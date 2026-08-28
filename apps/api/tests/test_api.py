@@ -11,7 +11,10 @@ from alcuin_api.contracts import EmbedClaims
 from alcuin_api.main import create_app
 from alcuin_api.security import issue_embed_token
 from alcuin_api.store import Store
-from alcuin_extensions.operations_toolkit import operations_demo_adapter
+from alcuin_extensions.operations_toolkit import (
+    operations_demo_adapter,
+    seed_operations_demo,
+)
 
 
 def fake_provider_transport() -> httpx.MockTransport:
@@ -68,6 +71,7 @@ def make_client(
     operations_adapter: bool = True,
 ) -> TestClient:
     store = Store(":memory:")
+    seed_operations_demo(store)
     app = create_app(
         Settings(
             database_path=":memory:",
@@ -89,6 +93,24 @@ def make_client(
 
 def make_client_with_operations_adapter() -> TestClient:
     return make_client(operations_adapter=True)
+
+
+def test_default_store_seeds_only_a_domain_neutral_starter() -> None:
+    store = Store(":memory:")
+
+    agents = store.list_agents("ws_demo")
+    assert [agent["id"] for agent in agents] == ["agt_starter"]
+    assert agents[0]["name"] == "Alcuin Starter"
+    assert agents[0]["definition"]["extensions"] == []
+    assert agents[0]["definition"]["tools"] == []
+    assert store.list_extensions("ws_demo") == []
+    assert store.list_threads("ws_demo") == []
+    assert store.list_runs("ws_demo") == []
+    serialized = json.dumps(store.bootstrap("ws_demo"), ensure_ascii=False).casefold()
+    assert all(
+        domain_term not in serialized
+        for domain_term in ("operations", "incident", "checkout", "northstar")
+    )
 
 
 def test_workspace_boundary_hides_resources() -> None:
@@ -202,6 +224,7 @@ def test_missing_provider_uses_domain_neutral_preview_without_inventing_tool_res
     None
 ):
     store = Store(":memory:")
+    seed_operations_demo(store)
     app = create_app(
         Settings(
             database_path=":memory:",
@@ -398,7 +421,7 @@ def test_run_emits_ordered_terminal_events() -> None:
         )
 
         tcm_stream = client.get(
-            f"/v1/runs/{run['id']}/events?protocol=tcm",
+            f"/v1/runs/{run['id']}/events?protocol=chat",
             headers=headers,
         ).text
         tcm_frames = [

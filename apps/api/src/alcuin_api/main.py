@@ -78,10 +78,9 @@ from .openapi_gateway import OpenAPIGateway
 from .runtime import RuntimeOrchestrator, RuntimeRequest
 from .security import RequestScope, issue_embed_token, resolve_scope
 from .store import Store
-from .tcm_sse import project_execution_event
+from .chat_sse import project_execution_event
 from .tools import ToolExecutor, ToolRegistry
 from .web_search import WebSearchService, is_public_http_url
-from alcuin_extensions.operations_toolkit import operations_demo_adapter
 
 
 ScopeDependency = Annotated[RequestScope, Depends(resolve_scope)]
@@ -738,7 +737,7 @@ def create_app(
         scope: ScopeDependency,
         last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
         after: Annotated[int, Query(ge=0)] = 0,
-        protocol: Literal["execution", "tcm"] = "execution",
+        protocol: Literal["execution", "chat"] = "execution",
     ) -> StreamingResponse:
         scope.require("run:read")
         run = repository.get_run(scope.workspace_id, run_id)
@@ -758,7 +757,7 @@ def create_app(
                     idle_ticks = 0
                     for event in events:
                         cursor = event["sequence"]
-                        if protocol == "tcm":
+                        if protocol == "chat":
                             for payload in project_execution_event(event):
                                 yield (
                                     f"id: {event['sequence']}\n"
@@ -1149,4 +1148,4 @@ def create_app(
     return app
 
 
-app = create_app(builtin_adapters={"operations-demo": operations_demo_adapter})
+app = create_app()

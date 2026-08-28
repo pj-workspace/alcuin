@@ -86,7 +86,7 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - Origin-bound Embed Session tokens and a framework-neutral `<alcuin-agent>` Web Component with `lang="en|zh-CN"` localization
 - Standard `Last-Event-ID` recovery shared by Studio and Embed, with bounded reconnects and replay suppression
 - Declarative extension card/table/form blocks with scoped data binding and approval-gated Tool Runs
-- An Operations Copilot demo proving that one published agent can run in Studio and an embedded host
+- An explicit Operations Copilot example proving that a domain Extension can run in Studio and an embedded host without entering Alcuin Core
 
 The contracts are versioned but not yet stable. SQLite stores local control-plane metadata, while Qdrant is the implemented local knowledge index. PostgreSQL and Redis remain optional `platform-infra` services until their production adapters land.
 
@@ -104,7 +104,9 @@ pnpm dev
 
 Open [http://localhost:3000/studio](http://localhost:3000/studio). The API and interactive OpenAPI reference run at [http://localhost:8000/docs](http://localhost:8000/docs).
 
-No model credential is required for the deterministic Operations Copilot fallback. DeepSeek is the first configured provider preset: put the key in the ignored local `.env` as `ALCUIN_DEEPSEEK_API_KEY`; the default endpoint is `https://api.deepseek.com`, model is the experimental `deepseek-v4-flash-vision-exp`, and protocol is Chat Completions. Studio enables thinking and renders its native stream in a compact, collapsible trace before the final Markdown output; API clients can disable thinking per run. Studio accepts up to four PNG, JPEG, WebP, or GIF attachments of 5 MiB each and sends only the active run's image data to the configured provider. DeepSeek V4 Flash text remains selectable, while generic OpenAI-compatible endpoints remain available through the `ALCUIN_OPENAI_*` variables.
+No model credential is required for the domain-neutral Alcuin Starter preview. The preview records the request but never invokes a bound tool or invents a result. DeepSeek is the first configured provider preset: put the key in the ignored local `.env` as `ALCUIN_DEEPSEEK_API_KEY`; the default endpoint is `https://api.deepseek.com`, model is the experimental `deepseek-v4-flash-vision-exp`, and protocol is Chat Completions. Studio enables thinking and renders its native stream in a compact, collapsible trace before the final Markdown output; API clients can disable thinking per run. Studio accepts up to four PNG, JPEG, WebP, or GIF attachments of 5 MiB each and sends only the active run's image data to the configured provider. DeepSeek V4 Flash text remains selectable, while generic OpenAI-compatible endpoints remain available through the `ALCUIN_OPENAI_*` variables.
+
+Operations Copilot is intentionally separate from Core. Run the optional example API with `uv run --project apps/api uvicorn examples.operations_copilot.app:app --reload --port 8000`; see [its README](examples/operations_copilot/README.md).
 
 Public web search uses the bundled SearXNG service and does not require another API key. For local development, start it with `docker compose up -d searxng` and keep `ALCUIN_SEARXNG_URL=http://localhost:9888` in the ignored `.env`. Compose-connected API containers use `http://searxng:8080`. Quick search returns normalized snippets; deep search additionally reads at most three validated public pages under strict byte, time, and output limits.
 

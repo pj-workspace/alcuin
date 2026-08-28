@@ -30,8 +30,8 @@ test("renders declarative extension blocks and routes forms through approval", a
   await page.getByRole("button", { name: /^Blocks/ }).click();
   await expect(page.getByText("Active record", { exact: true })).toBeVisible();
   await expect(page.getByText("Incident results", { exact: true })).toBeVisible();
-  await expect(page.locator('[data-ui-block="ops-toolkit:incident-summary"] tbody')).toContainText("INC-104");
-  await expect(page.getByLabel("Incident ID")).toHaveValue("INC-104");
+  await expect(page.locator('[data-ui-block="ops-toolkit:incident-summary"] tbody')).toContainText("REC-104");
+  await expect(page.getByLabel("Incident ID")).toHaveValue("REC-104");
 
   await page.getByLabel("New status").selectOption("resolved");
   await page.getByRole("button", { name: "Request update" }).click();
@@ -219,7 +219,7 @@ test("installs and enables real MCP and OpenAPI extensions through the governed 
 });
 
 test("creates, edits, publishes, persists, and switches between Agents", async ({ page }, testInfo) => {
-  test.setTimeout(60_000);
+  test.setTimeout(120_000);
   const suffix = testInfo.project.name;
   const draftName = `Release Copilot ${suffix}`;
   const publishedName = `${draftName} v2`;

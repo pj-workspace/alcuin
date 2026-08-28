@@ -15,6 +15,7 @@ from alcuin_api.extension_tools import (
 from alcuin_api.store import Store
 from alcuin_api.runtime import RuntimeOrchestrator
 from alcuin_api.tools import ToolContext, ToolError, ToolExecutor
+from alcuin_extensions.operations_toolkit import seed_operations_demo
 
 
 class RecordingMCPGateway:
@@ -324,6 +325,7 @@ async def test_approved_mutating_extension_tool_executes_real_handler() -> None:
     assert blocked.value.code == "approval_required"
     assert openapi.calls == []
 
+    seed_operations_demo(store)
     agent = store.get_agent("ws_demo", "agt_operations")
     assert agent is not None
     definition = AgentDefinition.model_validate(agent["definition"])
