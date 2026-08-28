@@ -18,6 +18,7 @@ from alcuin_knowledge import (
     UnsupportedDocumentError,
 )
 from alcuin_storage import ControlPlaneRepository, RepositoryConflict, open_repository
+from alcuin_web_search import WebSearchService, is_public_http_url
 from fastapi import (
     Depends,
     FastAPI,
@@ -85,7 +86,7 @@ from .runtime import RuntimeOrchestrator, RuntimeRequest
 from .security import RequestScope, issue_embed_token, resolve_scope
 from .chat_sse import project_execution_event
 from .tools import ToolExecutor, ToolRegistry
-from .web_search import WebSearchService, is_public_http_url
+from .web_search_wiring import web_search_config, web_search_tool_definition
 
 
 ScopeDependency = Annotated[RequestScope, Depends(resolve_scope)]
@@ -123,7 +124,9 @@ def create_app(
         postgres_pool_timeout_seconds=settings.postgres_pool_timeout_seconds,
     )
     web_search_service = (
-        WebSearchService(settings) if (settings.searxng_url or "").strip() else None
+        WebSearchService(web_search_config(settings))
+        if (settings.searxng_url or "").strip()
+        else None
     )
     configured_knowledge_service = knowledge_service or (
         KnowledgeService(repository, QdrantKnowledgeIndex(knowledge_config(settings)))
@@ -140,7 +143,7 @@ def create_app(
     )
     definitions = []
     if web_search_service:
-        definitions.append(web_search_service.tool_definition())
+        definitions.append(web_search_tool_definition(web_search_service))
     if configured_knowledge_service:
         definitions.append(knowledge_tool_definition(configured_knowledge_service))
     tool_registry = ToolRegistry(definitions)

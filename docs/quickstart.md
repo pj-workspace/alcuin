@@ -6,7 +6,7 @@
 cp .env.example .env
 pnpm install
 uv sync --project apps/api
-docker compose up -d searxng qdrant
+pnpm dev:prepare
 pnpm dev
 ```
 
@@ -14,7 +14,7 @@ Open `http://localhost:3000/studio`.
 
 To use the live DeepSeek vision runtime, set `ALCUIN_DEEPSEEK_API_KEY` in the ignored local `.env`. The prototype selects `deepseek-v4-flash-vision-exp` through Chat Completions; without a key the domain-neutral Alcuin Starter records a local preview without invoking tools or inventing results.
 
-Start the self-hosted retrieval dependencies before testing `web.search` or `knowledge.search`:
+`pnpm dev:prepare` starts PostgreSQL, Qdrant, and the self-hosted SearXNG service, then applies the database migrations. To restart only the retrieval dependencies:
 
 ```bash
 docker compose up -d searxng qdrant

@@ -7,6 +7,7 @@ dependencies = [
   "alcuin-core",
   "alcuin-knowledge",
   "alcuin-storage",
+  "alcuin-web-search",
   "alembic>=1.16.0,<2.0",
   "fastapi>=0.115.0,<1.0",
   "httpx>=0.27.0,<1.0",
@@ -37,6 +38,7 @@ packages = ["src/alcuin_api"]
 alcuin-core = { path = "../../packages/python/alcuin-core", editable = true }
 alcuin-knowledge = { path = "../../packages/python/alcuin-knowledge", editable = true }
 alcuin-storage = { path = "../../packages/python/alcuin-storage", editable = true }
+alcuin-web-search = { path = "../../packages/python/alcuin-web-search", editable = true }
 alcuin-operations-copilot = { path = "../../extensions/operations-copilot", editable = true }
 
 [tool.pytest.ini_options]
@@ -47,6 +49,7 @@ testpaths = [
   "../../packages/python/alcuin-core/tests",
   "../../packages/python/alcuin-knowledge/tests",
   "../../packages/python/alcuin-storage/tests",
+  "../../packages/python/alcuin-web-search/tests",
 ]
 asyncio_mode = "auto"
 

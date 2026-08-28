@@ -74,7 +74,7 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - An authoritative Workspace Tool Catalog that exposes configured built-ins and installed Extension tools with runtime availability, mutation metadata, and contributing Extension ownership
 - A replaceable runtime boundary with a LangGraph ReAct demo adapter and an optional OpenAI-compatible streaming adapter
 - A bounded OpenAI-compatible tool loop with Agent allow-lists, JSON Schema validation, workspace context, per-tool deadlines, call budgets, and structured results
-- A built-in `web.search` adapter for self-hosted SearXNG with quick/deep modes, TTL caches, URL deduplication, bounded page extraction, SSRF guards, and citation events
+- An independently packaged `web.search` capability for self-hosted SearXNG with quick/deep modes, tracking-aware URL deduplication, bounded page extraction, SSRF guards, explicit stale/partial degradation, and citation events
 - A built-in `knowledge.search` adapter with Builder-based document import, deterministic chunking, Qwen dense+sparse hybrid retrieval, Agent-version source binding, and `knowledge://` citations
 - A persisted English/Chinese interface switch across Studio, Builder, Extensions, Runs, and Embed, while keeping Agent and extension-owned content unchanged
 - Persisted normalized execution events with resumable SSE delivery and Alcuin's compact chat stream projection
@@ -110,21 +110,20 @@ No model credential is required for the domain-neutral Alcuin Starter preview. T
 
 Operations Copilot is intentionally separate from Core. Run the optional example API with `uv run --project apps/api uvicorn examples.operations_copilot.app:app --reload --port 8000`; see [its README](examples/operations_copilot/README.md).
 
-Public web search uses the bundled SearXNG service and does not require another API key. For local development, start it with `docker compose up -d searxng` and keep `ALCUIN_SEARXNG_URL=http://localhost:9888` in the ignored `.env`. Compose-connected API containers use `http://searxng:8080`. Quick search returns normalized snippets; deep search additionally reads at most three validated public pages under strict byte, time, and output limits.
+Public web search uses the bundled SearXNG service and does not require another API key. `pnpm dev:prepare` starts it at `http://localhost:9888`; keep `ALCUIN_SEARXNG_URL` pointed there for the locally run API. Quick search returns normalized, deduplicated snippets. Deep search additionally reads at most three validated public pages under strict byte, time, and output limits. Partial page reads and stale-cache fallback remain usable but are explicitly marked as degraded evidence.
 
 Workspace knowledge uses the bundled Qdrant service at `http://localhost:6333` and Qwen `text-embedding-v3` through DashScope. Put `ALCUIN_DASHSCOPE_API_KEY` in the ignored local `.env`; Workspace-specific DashScope endpoints can be set with `ALCUIN_DASHSCOPE_HTTP_API_URL`. In **Agents → Knowledge**, upload TXT, Markdown, PDF, or DOCX files—or paste text—then bind the resulting source and publish the Agent version. Uploads are signature-checked, limited to 8 MiB, parsed without executing embedded content, and reduced to at most two million characters of canonical text; raw files are not persisted. `knowledge.search` fuses Qwen dense and sparse vectors only across the bound source IDs and active Workspace. Embedding requests are batched, bounded, validated, and never expose provider credentials or raw provider errors.
 
 Run the complete verification suite with:
 
 ```bash
-pnpm -r test
-pnpm -r lint
-pnpm -r build
-uv run --project apps/api pytest
+pnpm lint
+pnpm build
+pnpm test
 pnpm test:e2e
 ```
 
-Docker users can start the prototype with `docker compose up --build`. PostgreSQL and Redis can be added with `docker compose --profile platform-infra up --build`.
+Docker Compose provides the local PostgreSQL, Qdrant, and SearXNG dependencies. `pnpm dev:prepare` starts them and applies Alembic migrations; the API and web apps then run through `pnpm dev`.
 
 ## Development Workflow
 

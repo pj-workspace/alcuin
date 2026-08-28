@@ -58,6 +58,7 @@ apps/web/shared                  Shared web UI, localization, and application SD
 packages/python/alcuin-core      Framework-neutral Python contracts and tool envelopes
 packages/python/alcuin-knowledge Domain-neutral document ingestion, Qwen embeddings, and Qdrant retrieval
 packages/python/alcuin-storage   Persistence ports, Alembic migrations, and pooled PostgreSQL Store
+packages/python/alcuin-web-search Provider-neutral web evidence contracts and bounded SearXNG retrieval
 packages/contracts              Shared TypeScript contract vocabulary
 packages/sdk                    Configurable framework-neutral REST/SSE client
 packages/embed                  Framework-neutral Web Component
@@ -66,7 +67,7 @@ packages/sse-client             Browser-neutral resumable SSE transport
 extensions/operations-copilot   Explicit domain example depending inward on Core
 ```
 
-Dependencies point inward: applications may compose packages; Core cannot import applications, runtime frameworks, infrastructure clients, or domain Extensions; web shared modules cannot import features; features cannot import Next routes. Repository tests enforce these initial boundaries. Knowledge ingestion and retrieval live in `alcuin-knowledge`; runtime orchestration and the remaining connector implementations still live inside `apps/api` during staged extraction and must not be described as independent packages until they move.
+Dependencies point inward: applications may compose packages; Core cannot import applications, runtime frameworks, infrastructure clients, or domain Extensions; web shared modules cannot import features; features cannot import Next routes. Repository tests enforce these initial boundaries. Knowledge ingestion/retrieval live in `alcuin-knowledge`, and public web evidence retrieval lives in `alcuin-web-search`; runtime orchestration and the remaining connector implementations still live inside `apps/api` during staged extraction and must not be described as independent packages until they move.
 
 Persistence consumers depend on structural `RuntimeRepository`, `ExtensionRepository`, and `KnowledgeRepository` ports from `alcuin-storage`. The API composes those ports with the pooled `PostgresStore`; services do not import psycopg or manage transactions. PostgreSQL is the single implemented control-plane database and Alembic is its only schema migration path.
 
@@ -80,7 +81,7 @@ The Workspace Tool Catalog is exposed through `GET /v1/tools` and the bootstrap 
 
 When no model credential is configured, the LangGraph adapter runs a domain-neutral local preview. It records the request and explains that provider execution is unavailable, but never selects a domain tool or manufactures a tool result. Automated browser tests use a local OpenAI-compatible streaming fixture so the same production tool loop, adapters, approvals, citations, and artifacts are exercised without contacting an external model provider.
 
-The first registered adapter is `web.search`. It targets a configured self-hosted SearXNG JSON endpoint and provides quick snippet search plus an optional bounded deep-read path. A shared HTTP client, TTL caches, canonical URL deduplication, public-address validation, response-size limits, per-page deadlines, per-Run call budgets, and citation deduplication bound latency and exposure to untrusted web content.
+The first registered adapter is `web.search`. It targets a configured self-hosted SearXNG JSON endpoint through the independent `alcuin-web-search` package and provides quick snippet search plus an optional bounded deep-read path. A shared HTTP client, fresh/stale TTL caches, tracking-aware canonical URL deduplication, public-address validation, response-size limits, provider/page/total deadlines, per-Run call budgets, and citation deduplication bound latency and exposure to untrusted web content. Deep-read and stale-cache fallbacks are explicitly marked as degraded evidence.
 
 `knowledge.search` is the governed retrieval adapter. PostgreSQL stores Workspace-owned source and document lifecycle metadata plus canonical source text for controlled reindexing; Qdrant stores chunk payloads and named dense/sparse vectors. A replaceable `DocumentParser` accepts bounded TXT, Markdown, PDF, and DOCX uploads, sanitizes filenames, validates container signatures, refuses encrypted or executable content, and never persists the raw file. Ingestion normalizes the extracted text, chunks deterministically, hashes documents for idempotency, and records failed indexing without backend details. A replaceable `EmbeddingProvider` currently calls Qwen `text-embedding-v3` through DashScope and fuses its dense and sparse outputs with reciprocal-rank fusion. Requests are limited to ten texts per batch, retried within a fixed budget, and validated before indexing. Every Qdrant branch carries mandatory `workspace_id` and Agent-bound `source_id` filters, and results are checked again before they leave the adapter. Agent versions may only bind source ids owned by their Workspace, and a referenced source cannot be deleted while any immutable Agent version depends on it.
 
@@ -104,6 +105,7 @@ See [ADR-0001](adr-0001-runtime-extension-contracts.md) for the contract decisio
 See [ADR-0002](adr-0002-modular-package-boundaries.md) for the implemented package dependency rules and staged extraction order.
 See [ADR-0003](adr-0003-storage-ports.md) for the verified storage boundary and adapter strategy.
 See [ADR-0004](adr-0004-knowledge-package.md) for the implemented Knowledge package and retrieval boundaries.
+See [ADR-0005](adr-0005-web-search-package.md) for the public web evidence contract and degradation policy.
 
 ## Remaining Decisions
 

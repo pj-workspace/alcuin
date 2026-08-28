@@ -4,7 +4,7 @@
   "packageManager": "pnpm@11.20.0",
   "scripts": {
     "dev": "concurrently -k -n api,web -c blue,magenta \"pnpm dev:api\" \"pnpm dev:web\"",
-    "dev:prepare": "docker compose up -d --wait postgres && pnpm db:migrate",
+    "dev:prepare": "docker compose up -d --wait postgres qdrant searxng && pnpm db:migrate",
     "dev:web": "pnpm --filter @alcuin/web dev",
     "dev:api": "uv run --project apps/api uvicorn alcuin_api.main:app --reload --port 8000",
     "db:migrate": "uv run --project apps/api alembic -c packages/python/alcuin-storage/alembic.ini upgrade head",
