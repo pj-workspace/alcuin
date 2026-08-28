@@ -63,6 +63,7 @@ from .extensions import (
     refresh_mcp_manifest,
     resolve_openapi_document,
 )
+from .extension_tools import ExtensionToolService, extension_tool_name
 from .knowledge import KnowledgeService, QdrantKnowledgeIndex
 from .mcp_gateway import MCPGateway
 from .openapi_gateway import OpenAPIGateway
@@ -107,7 +108,15 @@ def create_app(
     if configured_knowledge_service:
         definitions.append(configured_knowledge_service.tool_definition())
     tool_registry = ToolRegistry(definitions)
-    tool_executor = ToolExecutor(tool_registry)
+    extension_tool_service = ExtensionToolService(
+        repository,
+        configured_mcp_gateway,
+        configured_openapi_gateway,
+    )
+    tool_executor = ToolExecutor(
+        tool_registry,
+        dynamic_resolver=extension_tool_service.definitions,
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -138,6 +147,7 @@ def create_app(
     app.state.store = repository
     app.state.web_search_service = web_search_service
     app.state.knowledge_service = configured_knowledge_service
+    app.state.extension_tool_service = extension_tool_service
     app.state.runtime = RuntimeOrchestrator(repository, settings, tool_executor)
 
     def missing(resource: str) -> HTTPException:
@@ -198,6 +208,68 @@ def create_app(
                 status_code=422,
                 detail=f"Unknown credential requirements: {', '.join(unknown)}",
             )
+
+    def validate_agent_extension_references(
+        workspace_id: str,
+        definition: AgentDefinition,
+        *,
+        require_runnable: bool = False,
+    ) -> None:
+        installed = {
+            extension["manifest_id"]: extension
+            for extension in repository.list_extensions(workspace_id)
+        }
+        missing_extensions = sorted(set(definition.extensions) - set(installed))
+        if missing_extensions:
+            raise HTTPException(
+                status_code=422 if not require_runnable else 409,
+                detail="Agent references extensions outside this workspace: "
+                + ", ".join(missing_extensions),
+            )
+        dynamic_tools: dict[str, str] = {}
+        for manifest_id, extension in installed.items():
+            manifest = ExtensionManifest.model_validate(extension["manifest"])
+            if not any(item.type in {"mcp", "openapi"} for item in manifest.entrypoints):
+                continue
+            for tool in manifest.contributions.tools:
+                raw_name = str(tool.get("name") or "").strip()
+                if raw_name:
+                    dynamic_tools[extension_tool_name(manifest_id, raw_name)] = manifest_id
+        unknown_tools = sorted(
+            tool
+            for tool in definition.tools
+            if tool.startswith("extension.") and tool not in dynamic_tools
+        )
+        if unknown_tools:
+            raise HTTPException(
+                status_code=422 if not require_runnable else 409,
+                detail="Agent references unavailable extension tools: "
+                + ", ".join(unknown_tools),
+            )
+        unbound_tools = sorted(
+            tool
+            for tool in definition.tools
+            if tool in dynamic_tools and dynamic_tools[tool] not in definition.extensions
+        )
+        if unbound_tools:
+            raise HTTPException(
+                status_code=422 if not require_runnable else 409,
+                detail="Bind the contributing extension before using tools: "
+                + ", ".join(unbound_tools),
+            )
+        if require_runnable:
+            unavailable = sorted(
+                manifest_id
+                for manifest_id in definition.extensions
+                if installed[manifest_id]["status"] != "enabled"
+                or installed[manifest_id]["health"] not in {"healthy", "degraded"}
+            )
+            if unavailable:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Enable and health-check Agent extensions before publishing: "
+                    + ", ".join(unavailable),
+                )
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -387,6 +459,7 @@ def create_app(
     async def create_agent(payload: AgentCreate, scope: ScopeDependency) -> dict:
         require_workspace_operator(scope)
         validate_knowledge_references(scope.workspace_id, payload.definition)
+        validate_agent_extension_references(scope.workspace_id, payload.definition)
         return repository.create_agent(scope.workspace_id, payload)
 
     @app.get("/v1/agents/{agent_id}")
@@ -403,6 +476,7 @@ def create_app(
     async def create_agent_version(agent_id: str, payload: AgentVersionCreate, scope: ScopeDependency) -> dict:
         require_workspace_operator(scope)
         validate_knowledge_references(scope.workspace_id, payload.definition)
+        validate_agent_extension_references(scope.workspace_id, payload.definition)
         agent = repository.create_agent_version(scope.workspace_id, agent_id, payload.definition)
         if not agent:
             raise missing("Agent")
@@ -416,6 +490,11 @@ def create_app(
             raise missing("Agent")
         definition = AgentDefinition.model_validate(current["definition"])
         validate_knowledge_references(scope.workspace_id, definition)
+        validate_agent_extension_references(
+            scope.workspace_id,
+            definition,
+            require_runnable=True,
+        )
         if "knowledge.search" in definition.tools and not definition.knowledge:
             raise HTTPException(
                 status_code=409,

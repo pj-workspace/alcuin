@@ -68,6 +68,7 @@ class ToolResult:
 
 
 ToolHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[ToolResult]]
+DynamicToolResolver = Callable[[str], Iterable["ToolDefinition"]]
 
 
 _INVALID_PROVIDER_NAME = re.compile(r"[^a-zA-Z0-9_-]")
@@ -147,24 +148,80 @@ class ToolRegistry:
 class ToolExecutor:
     """Workspace-scoped execution boundary shared by all runtime adapters."""
 
-    def __init__(self, registry: ToolRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry | None = None,
+        dynamic_resolver: DynamicToolResolver | None = None,
+    ) -> None:
         self.registry = registry or ToolRegistry()
+        self.dynamic_resolver = dynamic_resolver
 
-    def provider_schemas(self, allowed_names: Iterable[str]) -> list[dict[str, Any]]:
-        return [definition.provider_schema() for definition in self.registry.resolve(allowed_names)]
+    def _dynamic_registry(self, workspace_id: str) -> ToolRegistry:
+        definitions = self.dynamic_resolver(workspace_id) if self.dynamic_resolver else ()
+        return ToolRegistry(definitions)
 
-    def definitions(self, allowed_names: Iterable[str]) -> list[ToolDefinition]:
-        return self.registry.resolve(allowed_names)
+    def provider_schemas(
+        self,
+        allowed_names: Iterable[str],
+        *,
+        workspace_id: str = "",
+    ) -> list[dict[str, Any]]:
+        return [
+            definition.provider_schema()
+            for definition in self.definitions(allowed_names, workspace_id=workspace_id)
+        ]
 
-    def definition(self, name: str, allowed_names: Iterable[str]) -> ToolDefinition:
+    def definitions(
+        self,
+        allowed_names: Iterable[str],
+        *,
+        workspace_id: str = "",
+    ) -> list[ToolDefinition]:
+        dynamic = self._dynamic_registry(workspace_id)
+        resolved: list[ToolDefinition] = []
+        provider_names: dict[str, str] = {}
+        for name in dict.fromkeys(allowed_names):
+            definition = self.registry.get(name) or dynamic.get(name)
+            if definition is None:
+                continue
+            conflict = provider_names.get(definition.provider_name)
+            if conflict and conflict != definition.name:
+                raise ToolError(
+                    "tool_name_conflict",
+                    f"Tool names conflict after provider normalization: {conflict}, {definition.name}",
+                )
+            provider_names[definition.provider_name] = definition.name
+            resolved.append(definition)
+        return resolved
+
+    def definition(
+        self,
+        name: str,
+        allowed_names: Iterable[str],
+        *,
+        workspace_id: str = "",
+    ) -> ToolDefinition:
         allowed = set(allowed_names)
-        definition = self.registry.get(name)
+        definition = self.registry.get(name) or self._dynamic_registry(workspace_id).get(name)
         if name not in allowed or definition is None:
             raise ToolError("tool_not_allowed", f"Tool is not available to this agent: {name}")
         return definition
 
-    def canonical_name(self, provider_name: str, allowed_names: Iterable[str]) -> str:
-        return self.registry.canonical_name(provider_name, allowed_names)
+    def canonical_name(
+        self,
+        provider_name: str,
+        allowed_names: Iterable[str],
+        *,
+        workspace_id: str = "",
+    ) -> str:
+        matches = [
+            definition.name
+            for definition in self.definitions(allowed_names, workspace_id=workspace_id)
+            if definition.provider_name == provider_name
+        ]
+        if len(matches) > 1:
+            raise ToolError("tool_name_conflict", "Provider tool name is ambiguous")
+        return matches[0] if matches else provider_name
 
     async def execute(
         self,
@@ -174,7 +231,11 @@ class ToolExecutor:
         allowed_names: Iterable[str],
         context: ToolContext,
     ) -> ToolExecution:
-        definition = self.definition(name, allowed_names)
+        definition = self.definition(
+            name,
+            allowed_names,
+            workspace_id=context.workspace_id,
+        )
         errors = sorted(
             Draft202012Validator(definition.input_schema).iter_errors(arguments),
             key=lambda error: list(error.path),

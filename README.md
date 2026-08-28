@@ -76,7 +76,8 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - A built-in `web.search` adapter for self-hosted SearXNG with quick/deep modes, TTL caches, URL deduplication, bounded page extraction, SSRF guards, and citation events
 - A built-in `knowledge.search` adapter with Builder-based document import, deterministic chunking, Qwen dense+sparse hybrid retrieval, Agent-version source binding, and `knowledge://` citations
 - Persisted normalized execution events with resumable SSE delivery and a lightweight TCM-compatible stream projection
-- Extension inspection, disabled-first installation, permission review, health state, and enable/disable lifecycle
+- Extension inspection, disabled-first installation, permission review, live health state, and enable/disable lifecycle
+- Workspace-scoped MCP/OpenAPI tool resolution from enabled extensions into Agent Definitions and model tool loops, with runtime state rechecks and bounded results
 - MCP discovery and invocation over stdio, SSE, and Streamable HTTP
 - OpenAPI JSON/YAML import from request bodies or URLs and read-only execution, with mutating operations routed to approval-gated runs
 - Origin-bound Embed Session tokens and a framework-neutral `<alcuin-agent>` Web Component

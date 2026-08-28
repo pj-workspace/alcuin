@@ -72,6 +72,8 @@ MCP processes and remote transports terminate in the API service. Browser client
 
 Extension installation is disabled-first. The control plane persists only reviewed operations, stores credentials as secret references, performs live MCP discovery or OpenAPI reachability checks before enablement, and blocks private-network URLs unless a local-development policy explicitly allows them.
 
+Executable extension tools use portable Agent Definition ids in the form `extension.<manifest-id>.<tool-name>`. The runtime resolves those ids again inside the request Workspace, advertises only the Agent allow-list to the model, and rechecks extension status, health, and approved tool membership immediately before invocation. Third-party results are bounded before they enter execution events or model context.
+
 See [ADR-0001](adr-0001-runtime-extension-contracts.md) for the contract decisions implemented by the prototype.
 
 ## Remaining Decisions
