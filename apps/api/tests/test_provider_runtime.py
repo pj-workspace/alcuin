@@ -197,6 +197,7 @@ async def test_chat_completions_executes_tool_and_continues_to_final_answer() ->
             return httpx.Response(
                 200,
                 text=(
+                    'data: {"choices":[{"delta":{"content":"I will search first."}}]}\n\n'
                     'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"knowledge_search","arguments":"{\\"query\\":\\"Alc"}}]}}]}\n\n'
                     'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"uin\\"}"}}]}}]}\n\n'
                     "data: [DONE]\n\n"
@@ -268,6 +269,7 @@ async def test_chat_completions_executes_tool_and_continues_to_final_answer() ->
     emissions = [emission async for emission in runtime.stream(request)]
 
     assert [emission.type for emission in emissions] == [
+        EventType.REASONING_DELTA,
         EventType.TOOL_REQUESTED,
         EventType.TOOL_COMPLETED,
         EventType.CITATION_CREATED,
@@ -275,9 +277,10 @@ async def test_chat_completions_executes_tool_and_continues_to_final_answer() ->
         EventType.ARTIFACT_UPDATED,
         EventType.RUN_COMPLETED,
     ]
-    assert emissions[0].payload["arguments"] == {"query": "Alcuin"}
-    assert emissions[1].payload["result_summary"] == "1 knowledge hit"
-    assert emissions[2].payload["locator"] == "kb://docs/alcuin"
+    assert emissions[0].payload["delta"] == "I will search first."
+    assert emissions[1].payload["arguments"] == {"query": "Alcuin"}
+    assert emissions[2].payload["result_summary"] == "1 knowledge hit"
+    assert emissions[3].payload["locator"] == "kb://docs/alcuin"
     assert emissions[-2].payload["artifact"]["content"] == "Alcuin is extensible."
     assert seen_contexts[0].workspace_id == "ws_test"
     assert len(requests) == 2

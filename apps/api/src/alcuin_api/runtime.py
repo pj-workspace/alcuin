@@ -320,6 +320,7 @@ class OpenAICompatibleRuntime:
                         definition.provider_schema() for definition in available_tools
                     ]
                     payload["tool_choice"] = "auto"
+                buffer_content_until_tool_decision = bool(available_tools)
                 if provider.id == "deepseek":
                     payload["thinking"] = {
                         "type": "enabled" if request.thinking else "disabled"
@@ -355,7 +356,8 @@ class OpenAICompatibleRuntime:
                         delta = provider_delta.get("content") or ""
                         if delta:
                             turn_text += delta
-                            yield RuntimeEmission(EventType.MESSAGE_DELTA, {"delta": delta})
+                            if not buffer_content_until_tool_decision:
+                                yield RuntimeEmission(EventType.MESSAGE_DELTA, {"delta": delta})
                         for call_delta in provider_delta.get("tool_calls") or []:
                             index = int(call_delta.get("index", 0))
                             current = pending_calls.setdefault(
@@ -373,6 +375,8 @@ class OpenAICompatibleRuntime:
                             )
 
                 if not pending_calls:
+                    if buffer_content_until_tool_decision and turn_text:
+                        yield RuntimeEmission(EventType.MESSAGE_DELTA, {"delta": turn_text})
                     yield RuntimeEmission(
                         EventType.ARTIFACT_UPDATED,
                         {
@@ -387,6 +391,12 @@ class OpenAICompatibleRuntime:
                     )
                     yield RuntimeEmission(EventType.RUN_COMPLETED, {"status": "completed"})
                     return
+
+                if turn_text:
+                    yield RuntimeEmission(
+                        EventType.REASONING_DELTA,
+                        {"delta": turn_text},
+                    )
 
                 normalized_calls = [
                     {
