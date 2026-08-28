@@ -33,8 +33,9 @@ Qdrant is exposed at `http://localhost:6333`. Set `ALCUIN_DASHSCOPE_API_KEY` in 
 5. In **Agents**, edit identity or instructions. Saving creates another immutable version; publishing makes it embeddable.
 6. In **Extensions**, choose **Connect capability**, then import an MCP server, OpenAPI document, or Alcuin Manifest. Confirm the full `Inspect → Review → Install disabled → Bind credentials → Health check → Enable` lifecycle. MCP inspection performs live tool discovery; OpenAPI inspection lets you select operations before installation.
 7. Return to **Agents → Capabilities**, bind one enabled extension tool, and save a draft. In **Studio**, explicitly request that capability and verify the trace contains the stable `extension.<manifest-id>.<tool-name>` id plus a real `tool.completed` result.
-8. In **Embed**, create an origin-bound session and copy the generated Web Component snippet.
-9. In **Runs**, select the latest Run and verify that events remain ordered.
+8. Bind a mutating extension tool with the Agent policy set to **Ask every time**. Verify the model cannot bypass the structured approval card, then approve once and confirm the persisted event order is `tool.requested → approval.required → tool.completed → run.completed` with the real adapter result.
+9. In **Embed**, create an origin-bound session and copy the generated Web Component snippet.
+10. In **Runs**, select the latest Run and verify that events remain ordered.
 
 ## API headers
 

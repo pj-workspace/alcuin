@@ -26,6 +26,7 @@ class ToolContext:
     run_id: str
     thread_context: dict[str, Any]
     knowledge_source_ids: tuple[str, ...] = ()
+    mutation_authorized: bool = False
 
 
 @dataclass(frozen=True)

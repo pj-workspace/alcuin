@@ -95,10 +95,12 @@ class OpenAPIGateway:
         tool: dict[str, Any],
         arguments: dict[str, Any],
         credential_reference: str | None,
+        *,
+        allow_mutating: bool = False,
     ) -> dict[str, Any]:
         if not entrypoint.base_url:
             raise ValueError("OpenAPI extension requires a base_url")
-        if tool.get("mutating"):
+        if tool.get("mutating") and not allow_mutating:
             raise ValueError("Mutating OpenAPI tools require an approval-gated Agent run")
         method = str(tool.get("method", "GET")).upper()
         path = str(tool.get("path", "/"))
