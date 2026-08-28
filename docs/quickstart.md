@@ -34,7 +34,7 @@ Qdrant is exposed at `http://localhost:6333`. Set `ALCUIN_DASHSCOPE_API_KEY` in 
 6. In **Extensions**, choose **Connect capability**, then import an MCP server, OpenAPI document, or Alcuin Manifest. Confirm the full `Inspect → Review → Install disabled → Bind credentials → Health check → Enable` lifecycle. MCP inspection performs live tool discovery; OpenAPI inspection lets you select operations before installation.
 7. Return to **Agents → Capabilities**, bind one enabled extension tool, and save a draft. In **Studio**, explicitly request that capability and verify the trace contains the stable `extension.<manifest-id>.<tool-name>` id plus a real `tool.completed` result.
 8. Bind a mutating extension tool with the Agent policy set to **Ask every time**. Verify the model cannot bypass the structured approval card, then approve once and confirm the persisted event order is `tool.requested → approval.required → tool.completed → run.completed` with the real adapter result.
-9. In **Embed**, create an origin-bound session and copy the generated Web Component snippet.
+9. In **Embed**, create an origin-bound session. The Playground mounts the real `@alcuin/embed` Web Component, passes host context through `setContext`, and uses the same published Agent Version as Studio. Run one read tool, then approve one write and verify the host receives `alcuin:event` and `alcuin:approval` events.
 10. In **Runs**, select the latest Run and verify that events remain ordered.
 
 ## API headers
@@ -75,6 +75,8 @@ Image bytes are validated at the API boundary and are not written into execution
 The canonical run stream is available from `GET /v1/runs/{run_id}/events`. Studio requests the lightweight compatible projection with `?protocol=tcm`, which emits `thinking-delta`, `text-delta`, tool, approval, artifact, citation, error, and terminal `done` frames. This `done` frame only closes the stream; it is not a callable tool and does not appear as an execution step.
 
 OpenAPI specifications can be submitted inline as JSON or loaded from a JSON/YAML `spec_url` through `POST /v1/extensions/import/openapi`. Imported write operations are never callable directly; they must execute through an approval-gated Agent run.
+
+For a local end-to-end OpenAPI check, start the domain-neutral fixture with `uv run --project apps/api uvicorn examples.records_api.app:app --port 9411`, then import `http://127.0.0.1:9411/openapi.json`. Its read and patch operations verify path/query/request-body schema projection and the real approval execution path.
 
 Remote MCP and OpenAPI URLs must resolve to public HTTP(S) addresses by default. For trusted local development only, set `ALCUIN_EXTENSION_ALLOW_PRIVATE_NETWORKS=true`; keep it disabled in production. Extension credentials are stored as `secret://` references and must resolve server-side before a health check can pass.
 

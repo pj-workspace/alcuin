@@ -66,6 +66,66 @@ def test_openapi_import_marks_mutations_for_approval() -> None:
     assert str(manifest.entrypoints[0].base_url).rstrip("/") == "https://orders.example.test/v1"
 
 
+def test_openapi_import_resolves_request_body_component_reference() -> None:
+    request = OpenAPIImportRequest(
+        name="Records API",
+        extension_id="records.api",
+        spec={
+            "openapi": "3.1.0",
+            "info": {"title": "Records", "version": "1.0.0"},
+            "servers": [{"url": "https://records.example.test"}],
+            "components": {
+                "schemas": {
+                    "RecordPatch": {
+                        "type": "object",
+                        "properties": {
+                            "status": {
+                                "type": "string",
+                                "enum": ["open", "closed"],
+                            }
+                        },
+                        "required": ["status"],
+                    }
+                }
+            },
+            "paths": {
+                "/records/{record_id}": {
+                    "patch": {
+                        "operationId": "updateRecord",
+                        "parameters": [
+                            {
+                                "name": "record_id",
+                                "in": "path",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            }
+                        ],
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/RecordPatch"
+                                    }
+                                }
+                            },
+                        },
+                    }
+                }
+            },
+        },
+    )
+
+    tool = manifest_from_openapi(request).contributions.tools[0]
+
+    assert tool["input_schema"]["required"] == ["record_id", "status"]
+    assert tool["input_schema"]["properties"]["status"]["enum"] == [
+        "open",
+        "closed",
+    ]
+    assert tool["parameter_locations"]["status"] == "body"
+
+
 @pytest.mark.asyncio
 async def test_openapi_import_resolves_remote_yaml_document() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:

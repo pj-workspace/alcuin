@@ -25,6 +25,22 @@ MAX_OPENAPI_DOCUMENT_BYTES = 2 * 1024 * 1024
 UrlValidator = Callable[[str], Awaitable[bool]]
 
 
+def _resolve_local_reference(document: dict[str, Any], value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    reference = value.get("$ref")
+    if not isinstance(reference, str) or not reference.startswith("#/"):
+        return value
+    target: Any = document
+    for segment in reference[2:].split("/"):
+        if not isinstance(target, dict):
+            return value
+        target = target.get(segment.replace("~1", "/").replace("~0", "~"))
+    if not isinstance(target, dict):
+        return value
+    return {**target, **{key: item for key, item in value.items() if key != "$ref"}}
+
+
 def _parse_openapi_text(content: str) -> dict[str, Any]:
     if len(content.encode("utf-8")) > MAX_OPENAPI_DOCUMENT_BYTES:
         raise ValueError("OpenAPI document exceeds the 2 MiB import limit")
@@ -104,9 +120,12 @@ def manifest_from_openapi(payload: OpenAPIImportRequest) -> ExtensionManifest:
             parameter_locations: dict[str, str] = {}
             for parameter in parameters:
                 name = str(parameter["name"])
+                parameter_schema = _resolve_local_reference(
+                    payload.spec, parameter.get("schema")
+                )
                 properties[name] = (
-                    parameter.get("schema")
-                    if isinstance(parameter.get("schema"), dict)
+                    parameter_schema
+                    if isinstance(parameter_schema, dict)
                     else {"type": "string"}
                 )
                 parameter_locations[name] = str(parameter["in"])
@@ -116,7 +135,10 @@ def manifest_from_openapi(payload: OpenAPIImportRequest) -> ExtensionManifest:
             if isinstance(request_body, dict):
                 body_content = request_body.get("content") or {}
                 json_body = body_content.get("application/json") if isinstance(body_content, dict) else None
-                body_schema = json_body.get("schema") if isinstance(json_body, dict) else None
+                body_schema = _resolve_local_reference(
+                    payload.spec,
+                    json_body.get("schema") if isinstance(json_body, dict) else None,
+                )
                 if isinstance(body_schema, dict) and body_schema.get("type") == "object":
                     for name, schema in (body_schema.get("properties") or {}).items():
                         if isinstance(name, str) and isinstance(schema, dict):
