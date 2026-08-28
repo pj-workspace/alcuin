@@ -46,7 +46,55 @@ export interface Agent {
   created_at: string;
 }
 
+export type JsonSchema = Record<string, unknown>;
+
+export interface ExtensionToolContribution {
+  name: string;
+  description?: string;
+  input_schema: JsonSchema;
+  output_schema?: JsonSchema | null;
+  mutating?: boolean;
+  approval?: "auto" | "ask" | "deny";
+  method?: string;
+  path?: string;
+  parameter_locations?: Record<string, "path" | "query" | "body">;
+  timeout_seconds?: number;
+  max_calls_per_run?: number;
+}
+
+export interface ExtensionPermission {
+  id: string;
+  reason: string;
+  risk: "low" | "medium" | "high";
+  required: boolean;
+}
+
+export interface ExtensionCredentialRequirement {
+  id: string;
+  type: "api_key" | "bearer" | "oauth" | string;
+  required?: boolean;
+  description?: string;
+}
+
+export type ExtensionEntrypoint =
+  | { type: "builtin"; adapter: string }
+  | {
+      type: "mcp";
+      transport: "stdio" | "sse" | "streamable_http";
+      command?: string | null;
+      args?: string[];
+      cwd?: string | null;
+      url?: string | null;
+    }
+  | {
+      type: "openapi";
+      spec_url?: string | null;
+      base_url?: string | null;
+      auth?: "none" | "api_key" | "bearer";
+    };
+
 export interface ExtensionManifest {
+  $schema?: string;
   manifest_version: "1";
   id: string;
   name: string;
@@ -54,16 +102,16 @@ export interface ExtensionManifest {
   description: string;
   compatibility: string;
   contributions: {
-    tools: Array<Record<string, unknown>>;
+    tools: ExtensionToolContribution[];
     skills: Array<Record<string, unknown>>;
     agent_templates: Array<Record<string, unknown>>;
     knowledge_connectors: Array<Record<string, unknown>>;
     ui_blocks: Array<Record<string, unknown>>;
   };
-  entrypoints: Array<Record<string, unknown>>;
-  config_schema: Record<string, unknown>;
-  permissions: Array<{ id: string; reason: string; risk: "low" | "medium" | "high"; required: boolean }>;
-  credential_requirements: Array<Record<string, unknown>>;
+  entrypoints: ExtensionEntrypoint[];
+  config_schema: JsonSchema;
+  permissions: ExtensionPermission[];
+  credential_requirements: ExtensionCredentialRequirement[];
 }
 
 export interface Extension {

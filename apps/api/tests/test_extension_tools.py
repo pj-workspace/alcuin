@@ -297,6 +297,13 @@ async def test_approved_mutating_extension_tool_executes_real_handler() -> None:
             "credential_requirements": [
                 {"id": "api-credential", "type": "bearer", "required": True}
             ],
+            "permissions": [
+                {
+                    "id": "records:write",
+                    "reason": "Update records through OpenAPI",
+                    "risk": "high",
+                }
+            ],
         }
     )
     install_enabled(

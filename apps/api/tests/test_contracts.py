@@ -28,6 +28,9 @@ def test_sample_manifest_matches_public_json_schema() -> None:
         (REPOSITORY_ROOT / "extensions/operations-toolkit/alcuin.extension.json").read_text()
     )
     validate(instance=manifest, schema=schema)
+    parsed = ExtensionManifest.model_validate(manifest)
+    assert parsed.schema_uri == "../../docs/schemas/alcuin-extension.schema.json"
+    assert "schema_uri" not in parsed.model_dump(mode="json")
 
 
 def test_stdio_entrypoint_requires_command() -> None:
@@ -36,9 +39,47 @@ def test_stdio_entrypoint_requires_command() -> None:
 
 
 def test_credentials_are_references_not_values() -> None:
-    manifest = ExtensionManifest(id="sample.tools", name="Sample Tools", version="0.1.0")
+    manifest = ExtensionManifest(
+        id="sample.tools",
+        name="Sample Tools",
+        version="0.1.0",
+        entrypoints=[{"type": "builtin", "adapter": "sample"}],
+    )
     with pytest.raises(ValidationError):
         ExtensionInstallRequest(manifest=manifest, credential_refs={"api": "plain-secret"})
+
+
+def test_native_manifest_rejects_unsafe_mutation_contract() -> None:
+    base = {
+        "id": "unsafe.writer",
+        "name": "Unsafe Writer",
+        "version": "0.1.0",
+        "contributions": {
+            "tools": [
+                {
+                    "name": "write",
+                    "input_schema": {"type": "object"},
+                    "mutating": True,
+                    "approval": "auto",
+                }
+            ]
+        },
+        "entrypoints": [{"type": "builtin", "adapter": "unsafe-writer"}],
+        "permissions": [
+            {
+                "id": "records:write",
+                "reason": "Write records",
+                "risk": "high",
+            }
+        ],
+    }
+    with pytest.raises(ValidationError, match="must require approval"):
+        ExtensionManifest.model_validate(base)
+
+    base["contributions"]["tools"][0]["approval"] = "ask"
+    base["permissions"][0]["risk"] = "low"
+    with pytest.raises(ValidationError, match="high-risk permission"):
+        ExtensionManifest.model_validate(base)
 
 
 def test_openapi_import_marks_mutations_for_approval() -> None:
