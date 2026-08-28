@@ -74,6 +74,8 @@ Extension installation is disabled-first. The control plane persists only review
 
 Executable extension tools use portable Agent Definition ids in the form `extension.<manifest-id>.<tool-name>`. The runtime resolves those ids again inside the request Workspace, advertises only the Agent allow-list to the model, and rechecks extension status, health, and approved tool membership immediately before invocation. Third-party results are bounded before they enter execution events or model context.
 
+Mutating tools pause at `approval.required`. An approval decision does not manufacture a success event: the runtime reloads the Run's frozen Agent Version and thread context, revalidates the tool against the current Workspace extension state, executes the real adapter with a one-call mutation authorization, and then persists the actual result or a controlled failure.
+
 See [ADR-0001](adr-0001-runtime-extension-contracts.md) for the contract decisions implemented by the prototype.
 
 ## Remaining Decisions

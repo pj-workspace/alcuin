@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, TypedDict
@@ -564,11 +565,18 @@ class OpenAICompatibleRuntime:
                             continue
 
                     try:
+                        execution_context = (
+                            replace(tool_context, mutation_authorized=True)
+                            if definition
+                            and definition.mutating
+                            and request.definition.policies.mutating_tools == "auto"
+                            else tool_context
+                        )
                         execution = await self.tool_executor.execute(
                             name,
                             arguments,
                             allowed_names=request.definition.tools,
-                            context=tool_context,
+                            context=execution_context,
                         )
                     except ToolError as error:
                         yield RuntimeEmission(
@@ -634,11 +642,27 @@ class RuntimeOrchestrator:
     ) -> None:
         self.store = store
         self.settings = settings
-        self.sensitive_values = (settings.openai_api_key, settings.deepseek_api_key)
+        self.tool_executor = tool_executor or ToolExecutor()
+        self.sensitive_values = (
+            settings.openai_api_key,
+            settings.deepseek_api_key,
+            settings.dashscope_api_key,
+            settings.qdrant_api_key,
+            *(
+                value
+                for key, value in os.environ.items()
+                if key.startswith("ALCUIN_SECRET_")
+            ),
+        )
         self.provider_runtime: AgentRuntime = OpenAICompatibleRuntime(
-            settings, tool_executor=tool_executor
+            settings, tool_executor=self.tool_executor
         )
         self.demo_runtime: AgentRuntime = LangGraphReactRuntime()
+
+    def redact_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        shaped = redact_sensitive(payload)
+        serialized = json.dumps(shaped, ensure_ascii=False, default=str)
+        return json.loads(redact_text(serialized, self.sensitive_values))
 
     async def execute(self, request: RuntimeRequest) -> None:
         self.store.set_run_status(request.workspace_id, request.run_id, "running")
@@ -659,7 +683,7 @@ class RuntimeOrchestrator:
             provider = self.settings.provider(request.definition.model.provider)
             runtime = self.provider_runtime if provider.api_key else self.demo_runtime
             async for emission in runtime.stream(request):
-                payload = redact_sensitive(emission.payload)
+                payload = self.redact_payload(emission.payload)
                 if emission.type == EventType.APPROVAL_REQUIRED:
                     approval = self.store.create_approval(request.workspace_id, request.run_id, payload)
                     payload = {**payload, "approval_id": approval["id"]}
@@ -679,7 +703,7 @@ class RuntimeOrchestrator:
             )
             self.store.set_run_status(request.workspace_id, request.run_id, "failed")
 
-    def resume_after_approval(
+    async def resume_after_approval(
         self,
         workspace_id: str,
         run_id: str,
@@ -688,22 +712,107 @@ class RuntimeOrchestrator:
     ) -> None:
         tool = request_payload.get("tool", "external.tool")
         if approved:
+            self.store.set_run_status(workspace_id, run_id, "running")
+            call_id = str(request_payload.get("call_id") or f"approved_{run_id}")
+            arguments = request_payload.get("arguments")
+            arguments = arguments if isinstance(arguments, dict) else {}
+            try:
+                run = self.store.get_run(workspace_id, run_id)
+                if not run:
+                    raise ToolError("run_unavailable", "Run is no longer available")
+                version = self.store.get_agent_version(
+                    workspace_id,
+                    run["agent_version_id"],
+                )
+                if not version:
+                    raise ToolError("agent_version_unavailable", "Agent version is no longer available")
+                definition = AgentDefinition.model_validate(version["definition"])
+                thread = self.store.get_thread(workspace_id, run["thread_id"])
+                if not thread:
+                    raise ToolError("thread_unavailable", "Thread is no longer available")
+                execution = await self.tool_executor.execute(
+                    tool,
+                    arguments,
+                    allowed_names=definition.tools,
+                    context=ToolContext(
+                        workspace_id=workspace_id,
+                        run_id=run_id,
+                        thread_context=thread["context"],
+                        knowledge_source_ids=tuple(definition.knowledge),
+                        mutation_authorized=True,
+                    ),
+                )
+                result = self.redact_payload(execution.result.data)
+            except ToolError as error:
+                self.store.append_event(
+                    workspace_id,
+                    run_id,
+                    EventType.TOOL_COMPLETED,
+                    {
+                        "tool": tool,
+                        "call_id": call_id,
+                        "status": "failed",
+                        "error": {"code": error.code, "message": error.message},
+                        "duration_ms": 0,
+                    },
+                )
+                self.store.append_event(
+                    workspace_id,
+                    run_id,
+                    EventType.RUN_FAILED,
+                    {"code": error.code, "message": error.message},
+                )
+                self.store.set_run_status(workspace_id, run_id, "failed")
+                return
+            except Exception:
+                self.store.append_event(
+                    workspace_id,
+                    run_id,
+                    EventType.TOOL_COMPLETED,
+                    {
+                        "tool": tool,
+                        "call_id": call_id,
+                        "status": "failed",
+                        "error": {
+                            "code": "tool_failed",
+                            "message": "Approved tool execution failed",
+                        },
+                        "duration_ms": 0,
+                    },
+                )
+                self.store.append_event(
+                    workspace_id,
+                    run_id,
+                    EventType.RUN_FAILED,
+                    {"code": "tool_failed", "message": "Approved tool execution failed"},
+                )
+                self.store.set_run_status(workspace_id, run_id, "failed")
+                return
             self.store.append_event(
                 workspace_id,
                 run_id,
                 EventType.TOOL_COMPLETED,
                 {
                     "tool": tool,
+                    "call_id": call_id,
                     "status": "succeeded",
-                    "result_summary": "Approved operation completed.",
-                    "duration_ms": 164,
+                    "result_summary": execution.result.summary,
+                    "result": result,
+                    "duration_ms": execution.duration_ms,
                 },
             )
+            for citation in execution.result.citations:
+                self.store.append_event(
+                    workspace_id,
+                    run_id,
+                    EventType.CITATION_CREATED,
+                    {"tool": tool, "call_id": call_id, **citation.as_event_payload()},
+                )
             self.store.append_event(
                 workspace_id,
                 run_id,
                 EventType.MESSAGE_DELTA,
-                {"delta": "The approved update was completed and recorded in the run trace."},
+                {"delta": f"The approved {tool} operation completed successfully."},
             )
             self.store.append_event(
                 workspace_id,
@@ -715,8 +824,13 @@ class RuntimeOrchestrator:
                         "title": "Approved operation record",
                         "kind": "document",
                         "version": 1,
-                        "content": "## Operation completed\n\nThe requested external change was approved and executed.\n\n"
-                        "The approval decision and tool result are preserved in this run trace.",
+                        "content": (
+                            "## Approved tool result\n\n"
+                            f"`{tool}` completed after explicit approval.\n\n"
+                            "```json\n"
+                            + json.dumps(result, ensure_ascii=False, indent=2)[:24_000]
+                            + "\n```"
+                        ),
                     }
                 },
             )

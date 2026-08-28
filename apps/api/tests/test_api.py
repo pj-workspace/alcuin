@@ -117,7 +117,7 @@ def test_run_emits_ordered_terminal_events() -> None:
         assert "artifact-updated" in tcm_types
 
 
-def test_mutating_tool_waits_for_approval() -> None:
+def test_approved_tool_fails_truthfully_when_runtime_handler_is_unavailable() -> None:
     with make_client() as client:
         headers = {"X-Alcuin-Workspace": "ws_demo"}
         thread = client.post(
@@ -146,8 +146,10 @@ def test_mutating_tool_waits_for_approval() -> None:
         )
         assert decision.status_code == 200
         final = client.get(f"/v1/runs/{run['id']}", headers=headers).json()
-        assert final["status"] == "completed"
-        assert final["events"][-1]["type"] == "run.completed"
+        assert final["status"] == "failed"
+        assert final["events"][-1]["type"] == "run.failed"
+        assert final["events"][-2]["type"] == "tool.completed"
+        assert final["events"][-2]["payload"]["error"]["code"] == "tool_not_allowed"
 
 
 def test_embed_token_is_agent_and_origin_bound() -> None:

@@ -649,7 +649,7 @@ def create_app(
         )
         if not decided:
             raise HTTPException(status_code=409, detail="Approval already decided")
-        app.state.runtime.resume_after_approval(
+        await app.state.runtime.resume_after_approval(
             scope.workspace_id,
             run_id,
             payload.decision == "approved",

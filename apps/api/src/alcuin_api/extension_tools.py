@@ -123,6 +123,11 @@ class ExtensionToolService:
             )
             if tool is None:
                 raise ToolError("tool_not_allowed", "Extension tool is no longer approved")
+            if tool.get("mutating") and not context.mutation_authorized:
+                raise ToolError(
+                    "approval_required",
+                    "Mutating extension tools require an authorized Agent execution",
+                )
             entrypoint = next(
                 (
                     item
@@ -143,6 +148,7 @@ class ExtensionToolService:
                     tool,
                     arguments,
                     extension.get("credential_refs", {}).get("api-credential"),
+                    allow_mutating=context.mutation_authorized,
                 )
                 data = result if isinstance(result, dict) else {"result": result}
             else:
