@@ -18,7 +18,6 @@ from alcuin_api.contracts import (
 from alcuin_api.knowledge import (
     EmbeddingProviderError,
     HybridEmbedding,
-    KnowledgeChunk,
     KnowledgeHit,
     KnowledgeService,
     QwenEmbeddingProvider,

@@ -82,6 +82,7 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - MCP discovery and invocation over stdio, SSE, and Streamable HTTP
 - OpenAPI JSON/YAML import from request bodies or URLs and read-only execution, with mutating operations routed to approval-gated runs
 - Origin-bound Embed Session tokens and a framework-neutral `<alcuin-agent>` Web Component
+- Standard `Last-Event-ID` recovery shared by Studio and Embed, with bounded reconnects and replay suppression
 - An Operations Copilot demo proving that one published agent can run in Studio and an embedded host
 
 The contracts are versioned but not yet stable. SQLite stores local control-plane metadata, while Qdrant is the implemented local knowledge index. PostgreSQL and Redis remain optional `platform-infra` services until their production adapters land.
