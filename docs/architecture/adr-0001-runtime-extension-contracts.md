@@ -18,6 +18,7 @@ Alcuin must run the same Agent Definition in its own Studio and inside another p
 7. Credentials are referenced through `secret://` identifiers. Definitions and events never store raw credential values.
 8. Embed Sessions are short-lived HMAC-signed claims bound to workspace, published Agent Version, origin, expiry, and allowed actions.
 9. Extension UI contributions are declarative data blocks. The web application does not execute third-party React code.
+10. Runtime adapters may implement different provider protocols, but all tools cross one workspace-scoped execution boundary with an Agent allow-list, JSON Schema validation, a deadline, and a bounded maximum step count.
 
 ## Consequences
 

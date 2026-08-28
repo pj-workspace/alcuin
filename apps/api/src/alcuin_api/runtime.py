@@ -13,6 +13,7 @@ from .config import ProviderConfig, Settings
 from .contracts import AgentDefinition, EventType, ImageAttachment
 from .security import redact_sensitive, redact_text
 from .store import Store
+from .tools import ToolContext, ToolError, ToolExecutor
 
 
 RUNTIME_PRESENTATION_PROTOCOL = """\
@@ -184,9 +185,11 @@ class OpenAICompatibleRuntime:
         self,
         settings: Settings,
         transport: httpx.AsyncBaseTransport | None = None,
+        tool_executor: ToolExecutor | None = None,
     ) -> None:
         self.settings = settings
         self.transport = transport
+        self.tool_executor = tool_executor or ToolExecutor()
 
     async def stream(self, request: RuntimeRequest) -> AsyncIterator[RuntimeEmission]:
         provider = self.settings.provider(request.definition.model.provider)
@@ -196,6 +199,10 @@ class OpenAICompatibleRuntime:
             "deepseek-v4-pro",
             "deepseek-v4-flash-vision-exp",
         } and provider.protocol == "responses":
+            provider = replace(provider, protocol="chat_completions")
+        if request.definition.tools and self.tool_executor.provider_schemas(
+            request.definition.tools
+        ):
             provider = replace(provider, protocol="chat_completions")
         if provider.protocol == "chat_completions":
             async for emission in self._chat_completions(request, provider):
@@ -279,69 +286,293 @@ class OpenAICompatibleRuntime:
                     for attachment in request.attachments
                 ],
             ]
-        payload = {
-            "model": request.definition.model.model or provider.default_model,
-            "messages": [
-                {"role": "system", "content": provider_instructions(request.definition)},
-                {"role": "user", "content": user_content},
-            ],
-            "stream": True,
-        }
-        if provider.id == "deepseek":
-            payload["thinking"] = {"type": "enabled" if request.thinking else "disabled"}
-            if request.thinking:
-                payload["reasoning_effort"] = "high"
-        if request.definition.model.model == "deepseek-v4-flash-vision-exp":
-            payload["max_tokens"] = 4096
-        headers = {"Authorization": f"Bearer {provider.api_key}"}
-        final_text = ""
-        async with httpx.AsyncClient(timeout=90, transport=self.transport) as client:
-            async with client.stream("POST", url, headers=headers, json=payload) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line.removeprefix("data:").strip()
-                    if data == "[DONE]":
-                        break
-                    event = json.loads(data)
-                    provider_delta = event.get("choices", [{}])[0].get("delta", {})
-                    reasoning_delta = (
-                        provider_delta.get("reasoning_content")
-                        or provider_delta.get("reasoning")
-                        or provider_delta.get("thinking")
-                        or ""
-                    )
-                    if reasoning_delta:
-                        yield RuntimeEmission(
-                            EventType.REASONING_DELTA,
-                            {"delta": reasoning_delta},
-                        )
-                    delta = provider_delta.get("content") or ""
-                    if delta:
-                        final_text += delta
-                        yield RuntimeEmission(EventType.MESSAGE_DELTA, {"delta": delta})
-        yield RuntimeEmission(
-            EventType.ARTIFACT_UPDATED,
-            {
-                "artifact": {
-                    "id": f"artifact-{request.run_id}",
-                    "title": "Agent response",
-                    "kind": "document",
-                    "version": 1,
-                    "content": final_text,
-                }
-            },
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": provider_instructions(request.definition)},
+            {"role": "user", "content": user_content},
+        ]
+        tool_schemas = self.tool_executor.provider_schemas(request.definition.tools)
+        tool_context = ToolContext(
+            workspace_id=request.workspace_id,
+            run_id=request.run_id,
+            thread_context=request.thread_context,
         )
-        yield RuntimeEmission(EventType.RUN_COMPLETED, {"status": "completed"})
+        headers = {"Authorization": f"Bearer {provider.api_key}"}
+        async with httpx.AsyncClient(timeout=90, transport=self.transport) as client:
+            for _step in range(request.definition.runtime.max_steps):
+                payload: dict[str, Any] = {
+                    "model": request.definition.model.model or provider.default_model,
+                    "messages": messages,
+                    "stream": True,
+                }
+                if tool_schemas:
+                    payload["tools"] = tool_schemas
+                    payload["tool_choice"] = "auto"
+                if provider.id == "deepseek":
+                    payload["thinking"] = {
+                        "type": "enabled" if request.thinking else "disabled"
+                    }
+                    if request.thinking:
+                        payload["reasoning_effort"] = "high"
+                if request.definition.model.model == "deepseek-v4-flash-vision-exp":
+                    payload["max_tokens"] = 4096
+
+                turn_text = ""
+                pending_calls: dict[int, dict[str, str]] = {}
+                async with client.stream("POST", url, headers=headers, json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line.removeprefix("data:").strip()
+                        if data == "[DONE]":
+                            break
+                        event = json.loads(data)
+                        provider_delta = event.get("choices", [{}])[0].get("delta", {})
+                        reasoning_delta = (
+                            provider_delta.get("reasoning_content")
+                            or provider_delta.get("reasoning")
+                            or provider_delta.get("thinking")
+                            or ""
+                        )
+                        if reasoning_delta:
+                            yield RuntimeEmission(
+                                EventType.REASONING_DELTA,
+                                {"delta": reasoning_delta},
+                            )
+                        delta = provider_delta.get("content") or ""
+                        if delta:
+                            turn_text += delta
+                            yield RuntimeEmission(EventType.MESSAGE_DELTA, {"delta": delta})
+                        for call_delta in provider_delta.get("tool_calls") or []:
+                            index = int(call_delta.get("index", 0))
+                            current = pending_calls.setdefault(
+                                index,
+                                {"id": "", "name": "", "arguments": ""},
+                            )
+                            current["id"] += str(call_delta.get("id") or "")
+                            function = call_delta.get("function") or {}
+                            current["name"] += str(function.get("name") or "")
+                            arguments_delta = function.get("arguments") or ""
+                            current["arguments"] += (
+                                arguments_delta
+                                if isinstance(arguments_delta, str)
+                                else json.dumps(arguments_delta, ensure_ascii=False)
+                            )
+
+                if not pending_calls:
+                    yield RuntimeEmission(
+                        EventType.ARTIFACT_UPDATED,
+                        {
+                            "artifact": {
+                                "id": f"artifact-{request.run_id}",
+                                "title": "Agent response",
+                                "kind": "document",
+                                "version": 1,
+                                "content": turn_text,
+                            }
+                        },
+                    )
+                    yield RuntimeEmission(EventType.RUN_COMPLETED, {"status": "completed"})
+                    return
+
+                normalized_calls = [
+                    {
+                        "id": call["id"] or f"call_{request.run_id}_{index}",
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": call["arguments"] or "{}",
+                        },
+                    }
+                    for index, call in sorted(pending_calls.items())
+                ]
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": turn_text or None,
+                        "tool_calls": normalized_calls,
+                    }
+                )
+
+                for call in normalized_calls:
+                    call_id = str(call["id"])
+                    function = call["function"]
+                    provider_name = str(function["name"])
+                    name = self.tool_executor.canonical_name(
+                        provider_name, request.definition.tools
+                    )
+                    raw_arguments = str(function["arguments"])
+                    try:
+                        decoded = json.loads(raw_arguments)
+                        if not isinstance(decoded, dict):
+                            raise ValueError("arguments must be a JSON object")
+                        arguments = decoded
+                    except (json.JSONDecodeError, ValueError) as exc:
+                        error = ToolError("invalid_arguments", f"Invalid JSON arguments: {exc}")
+                        yield RuntimeEmission(
+                            EventType.TOOL_REQUESTED,
+                            {
+                                "tool": name,
+                                "call_id": call_id,
+                                "summary": f"Call {name}",
+                                "arguments": {},
+                                "mutating": False,
+                            },
+                        )
+                        yield RuntimeEmission(
+                            EventType.TOOL_COMPLETED,
+                            {
+                                "tool": name,
+                                "call_id": call_id,
+                                "status": "failed",
+                                "error": {"code": error.code, "message": error.message},
+                                "duration_ms": 0,
+                            },
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": json.dumps(
+                                    {"error": {"code": error.code, "message": error.message}},
+                                    ensure_ascii=False,
+                                ),
+                            }
+                        )
+                        continue
+
+                    try:
+                        definition = self.tool_executor.definition(
+                            name, request.definition.tools
+                        )
+                    except ToolError as error:
+                        definition = None
+
+                    mutating = bool(definition and definition.mutating)
+                    yield RuntimeEmission(
+                        EventType.TOOL_REQUESTED,
+                        {
+                            "tool": name,
+                            "call_id": call_id,
+                            "summary": f"Call {name}",
+                            "arguments": arguments,
+                            "mutating": mutating,
+                        },
+                    )
+
+                    if definition and definition.mutating:
+                        policy = request.definition.policies.mutating_tools
+                        if policy == "ask":
+                            yield RuntimeEmission(
+                                EventType.APPROVAL_REQUIRED,
+                                {
+                                    "title": "Approve tool execution",
+                                    "description": f"{name} can change an external system.",
+                                    "tool": name,
+                                    "call_id": call_id,
+                                    "arguments": arguments,
+                                    "risk": "high",
+                                },
+                            )
+                            return
+                        if policy == "deny":
+                            error = ToolError(
+                                "tool_denied",
+                                "Agent policy denies mutating tool execution",
+                            )
+                            yield RuntimeEmission(
+                                EventType.TOOL_COMPLETED,
+                                {
+                                    "tool": name,
+                                    "call_id": call_id,
+                                    "status": "failed",
+                                    "error": {"code": error.code, "message": error.message},
+                                    "duration_ms": 0,
+                                },
+                            )
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": call_id,
+                                    "content": json.dumps(
+                                        {"error": {"code": error.code, "message": error.message}}
+                                    ),
+                                }
+                            )
+                            continue
+
+                    try:
+                        execution = await self.tool_executor.execute(
+                            name,
+                            arguments,
+                            allowed_names=request.definition.tools,
+                            context=tool_context,
+                        )
+                    except ToolError as error:
+                        yield RuntimeEmission(
+                            EventType.TOOL_COMPLETED,
+                            {
+                                "tool": name,
+                                "call_id": call_id,
+                                "status": "failed",
+                                "error": {"code": error.code, "message": error.message},
+                                "duration_ms": 0,
+                            },
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": json.dumps(
+                                    {"error": {"code": error.code, "message": error.message}},
+                                    ensure_ascii=False,
+                                ),
+                            }
+                        )
+                        continue
+
+                    yield RuntimeEmission(
+                        EventType.TOOL_COMPLETED,
+                        {
+                            "tool": name,
+                            "call_id": call_id,
+                            "status": "succeeded",
+                            "result_summary": execution.result.summary,
+                            "result": execution.result.data,
+                            "duration_ms": execution.duration_ms,
+                        },
+                    )
+                    for citation in execution.result.citations:
+                        yield RuntimeEmission(
+                            EventType.CITATION_CREATED,
+                            {"tool": name, "call_id": call_id, **citation.as_event_payload()},
+                        )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": execution.result.model_content(),
+                        }
+                    )
+
+        raise RuntimeError(
+            f"Tool loop exceeded the configured max_steps={request.definition.runtime.max_steps}"
+        )
 
 
 class RuntimeOrchestrator:
-    def __init__(self, store: Store, settings: Settings) -> None:
+    def __init__(
+        self,
+        store: Store,
+        settings: Settings,
+        tool_executor: ToolExecutor | None = None,
+    ) -> None:
         self.store = store
         self.settings = settings
         self.sensitive_values = (settings.openai_api_key, settings.deepseek_api_key)
-        self.provider_runtime: AgentRuntime = OpenAICompatibleRuntime(settings)
+        self.provider_runtime: AgentRuntime = OpenAICompatibleRuntime(
+            settings, tool_executor=tool_executor
+        )
         self.demo_runtime: AgentRuntime = LangGraphReactRuntime()
 
     async def execute(self, request: RuntimeRequest) -> None:
