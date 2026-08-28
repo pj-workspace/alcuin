@@ -72,6 +72,8 @@ MCP processes and remote transports terminate in the API service. Browser client
 
 Extension installation is disabled-first. The control plane persists only reviewed operations, stores credentials as secret references, performs live MCP discovery or OpenAPI reachability checks before enablement, and blocks private-network URLs unless a local-development policy explicitly allows them.
 
+`@alcuin/extension-sdk` is the authoring boundary for native extension packages. It reuses the shared TypeScript contracts, adds runtime conformance checks that cover cross-field permission and entrypoint rules, and scaffolds a runnable stdio MCP package. The generated package must still pass the control plane's independent inspection and live health checks; SDK validation never grants trust by itself.
+
 Executable extension tools use portable Agent Definition ids in the form `extension.<manifest-id>.<tool-name>`. The runtime resolves those ids again inside the request Workspace, advertises only the Agent allow-list to the model, and rechecks extension status, health, and approved tool membership immediately before invocation. Third-party results are bounded before they enter execution events or model context.
 
 Mutating tools pause at `approval.required`. An approval decision does not manufacture a success event: the runtime reloads the Run's frozen Agent Version and thread context, revalidates the tool against the current Workspace extension state, executes the real adapter with a one-call mutation authorization, and then persists the actual result or a controlled failure.

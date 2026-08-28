@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 
@@ -211,6 +213,7 @@ class ExtensionContributions(StrictModel):
 
 
 class ExtensionManifest(StrictModel):
+    schema_uri: str | None = Field(default=None, alias="$schema", exclude=True)
     manifest_version: Literal["1"] = "1"
     id: str = Field(pattern=r"^[a-z][a-z0-9.-]{2,127}$")
     name: str = Field(min_length=2, max_length=100)
@@ -222,6 +225,64 @@ class ExtensionManifest(StrictModel):
     config_schema: dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
     permissions: list[PermissionSpec] = Field(default_factory=list)
     credential_requirements: list[dict[str, Any]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_extension_semantics(self) -> "ExtensionManifest":
+        if not self.entrypoints:
+            raise ValueError("extension requires at least one entrypoint")
+        tool_names: set[str] = set()
+        has_mutating_tool = False
+        for tool in self.contributions.tools:
+            name = tool.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("extension tool name is required")
+            if name in tool_names:
+                raise ValueError(f"duplicate extension tool name: {name}")
+            tool_names.add(name)
+            schema = tool.get("input_schema")
+            if not isinstance(schema, dict) or schema.get("type") != "object":
+                raise ValueError(
+                    f"extension tool input_schema must be an object schema: {name}"
+                )
+            try:
+                Draft202012Validator.check_schema(schema)
+            except SchemaError as exc:
+                raise ValueError(
+                    f"extension tool input_schema is invalid: {name}"
+                ) from exc
+            if "mutating" in tool and not isinstance(tool["mutating"], bool):
+                raise ValueError(f"extension tool mutating must be boolean: {name}")
+            if tool.get("mutating"):
+                has_mutating_tool = True
+                if tool.get("approval") not in {None, "ask"}:
+                    raise ValueError(
+                        f"mutating extension tool must require approval: {name}"
+                    )
+        permission_ids = [permission.id for permission in self.permissions]
+        if len(permission_ids) != len(set(permission_ids)):
+            raise ValueError("extension permission ids must be unique")
+        if has_mutating_tool and not any(
+            permission.risk == "high" for permission in self.permissions
+        ):
+            raise ValueError(
+                "mutating extension tools require a high-risk permission"
+            )
+        credential_ids: set[str] = set()
+        for requirement in self.credential_requirements:
+            requirement_id = requirement.get("id")
+            requirement_type = requirement.get("type")
+            if not isinstance(requirement_id, str) or not requirement_id.strip():
+                raise ValueError("credential requirement id is required")
+            if requirement_id in credential_ids:
+                raise ValueError("credential requirement ids must be unique")
+            credential_ids.add(requirement_id)
+            if not isinstance(requirement_type, str) or not requirement_type.strip():
+                raise ValueError("credential requirement type is required")
+            if "required" in requirement and not isinstance(
+                requirement["required"], bool
+            ):
+                raise ValueError("credential requirement required must be boolean")
+        return self
 
 
 class ManifestInspectRequest(StrictModel):
