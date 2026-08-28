@@ -244,6 +244,21 @@ class ExtensionStatusUpdate(StrictModel):
     enabled: bool
 
 
+class ExtensionCredentialBinding(StrictModel):
+    credential_refs: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_secret_refs(self) -> "ExtensionCredentialBinding":
+        invalid = [
+            value
+            for value in self.credential_refs.values()
+            if not value.startswith("secret://")
+        ]
+        if invalid:
+            raise ValueError("credentials must be secret:// references")
+        return self
+
+
 class MCPToolCallRequest(StrictModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
@@ -252,6 +267,7 @@ class OpenAPIImportRequest(StrictModel):
     name: str = Field(min_length=2, max_length=100)
     extension_id: str = Field(pattern=r"^[a-z][a-z0-9.-]{2,127}$")
     spec: dict[str, Any] | None = None
+    spec_text: str | None = Field(default=None, max_length=2 * 1024 * 1024)
     spec_url: HttpUrl | None = None
     base_url: HttpUrl | None = None
     selected_operations: list[str] = Field(default_factory=list)
@@ -259,9 +275,21 @@ class OpenAPIImportRequest(StrictModel):
 
     @model_validator(mode="after")
     def validate_source(self) -> "OpenAPIImportRequest":
-        if not self.spec and not self.spec_url:
-            raise ValueError("OpenAPI import requires spec or spec_url")
+        if not self.spec and not self.spec_text and not self.spec_url:
+            raise ValueError("OpenAPI import requires spec, spec_text, or spec_url")
         return self
+
+
+class MCPImportRequest(StrictModel):
+    name: str = Field(min_length=2, max_length=100)
+    extension_id: str = Field(pattern=r"^[a-z][a-z0-9.-]{2,127}$")
+    version: str = Field(
+        default="0.1.0",
+        pattern=r"^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$",
+    )
+    description: str = Field(default="", max_length=500)
+    entrypoint: MCPEntrypoint
+    selected_tools: list[str] = Field(default_factory=list)
 
 
 class EmbedSessionCreate(StrictModel):

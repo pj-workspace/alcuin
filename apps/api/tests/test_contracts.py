@@ -91,7 +91,14 @@ paths:
         extension_id="orders.api",
         spec_url="https://schemas.example.test/orders.yaml",
     )
-    resolved = await resolve_openapi_document(request, httpx.MockTransport(handler))
+    async def allow_test_url(_url: str) -> bool:
+        return True
+
+    resolved = await resolve_openapi_document(
+        request,
+        httpx.MockTransport(handler),
+        url_validator=allow_test_url,
+    )
     manifest = manifest_from_openapi(resolved)
 
     assert manifest.contributions.tools[0]["name"] == "listOrders"

@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .contracts import OpenAPIEntrypoint
+from .contracts import HealthReport, OpenAPIEntrypoint
 
 
 def resolve_secret_reference(reference: str | None) -> str | None:
@@ -20,8 +20,71 @@ def resolve_secret_reference(reference: str | None) -> str | None:
 
 
 class OpenAPIGateway:
-    def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        timeout_seconds: float = 30.0,
+    ) -> None:
         self.transport = transport
+        self.timeout_seconds = timeout_seconds
+
+    @staticmethod
+    def _auth_headers(
+        entrypoint: OpenAPIEntrypoint,
+        credential_reference: str | None,
+    ) -> dict[str, str]:
+        headers: dict[str, str] = {"Accept": "application/json"}
+        credential = resolve_secret_reference(credential_reference)
+        if entrypoint.auth != "none" and not credential:
+            raise ValueError("Credential reference could not be resolved")
+        if entrypoint.auth == "bearer":
+            headers["Authorization"] = f"Bearer {credential}"
+        elif entrypoint.auth == "api_key":
+            headers["X-API-Key"] = credential or ""
+        return headers
+
+    async def health(
+        self,
+        entrypoint: OpenAPIEntrypoint,
+        credential_reference: str | None,
+        *,
+        tool_count: int,
+    ) -> HealthReport:
+        if not entrypoint.base_url:
+            return HealthReport(
+                status="unhealthy",
+                details={"message": "OpenAPI extension requires a base_url"},
+            )
+        try:
+            headers = self._auth_headers(entrypoint, credential_reference)
+            async with httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+                transport=self.transport,
+                follow_redirects=False,
+            ) as client:
+                response = await client.head(str(entrypoint.base_url), headers=headers)
+            if response.status_code in {401, 403}:
+                return HealthReport(
+                    status="unhealthy",
+                    details={"message": "OpenAPI credential was rejected", "status_code": response.status_code},
+                )
+            if response.status_code >= 500:
+                return HealthReport(
+                    status="unhealthy",
+                    details={"message": "OpenAPI endpoint is unavailable", "status_code": response.status_code},
+                )
+            return HealthReport(
+                status="healthy",
+                details={"schema": "validated", "reachable": True, "status_code": response.status_code, "tools": tool_count},
+            )
+        except ValueError as exc:
+            return HealthReport(status="unhealthy", details={"message": str(exc)})
+        except httpx.HTTPError as exc:
+            return HealthReport(
+                status="unhealthy",
+                details={"message": "OpenAPI endpoint health check failed", "error_type": type(exc).__name__},
+            )
 
     async def call(
         self,
@@ -37,25 +100,26 @@ class OpenAPIGateway:
         method = str(tool.get("method", "GET")).upper()
         path = str(tool.get("path", "/"))
         remaining = dict(arguments)
+        parameter_locations = tool.get("parameter_locations") or {}
         for name in re.findall(r"\{([^}]+)\}", path):
             if name not in remaining:
                 raise ValueError(f"Missing path parameter: {name}")
             path = path.replace(f"{{{name}}}", quote(str(remaining.pop(name)), safe=""))
-        headers: dict[str, str] = {"Accept": "application/json"}
-        credential = resolve_secret_reference(credential_reference)
-        if entrypoint.auth != "none" and not credential:
-            raise ValueError("Credential reference could not be resolved")
-        if entrypoint.auth == "bearer":
-            headers["Authorization"] = f"Bearer {credential}"
-        elif entrypoint.auth == "api_key":
-            headers["X-API-Key"] = credential or ""
+        headers = self._auth_headers(entrypoint, credential_reference)
         url = f"{str(entrypoint.base_url).rstrip('/')}/{path.lstrip('/')}"
         request_kwargs: dict[str, Any] = {"headers": headers}
+        query_parameters = {
+            name: remaining.pop(name)
+            for name, location in parameter_locations.items()
+            if location == "query" and name in remaining
+        }
         if method in {"GET", "HEAD"}:
-            request_kwargs["params"] = remaining
+            request_kwargs["params"] = {**remaining, **query_parameters}
         else:
+            if query_parameters:
+                request_kwargs["params"] = query_parameters
             request_kwargs["json"] = remaining
-        async with httpx.AsyncClient(timeout=30, transport=self.transport) as client:
+        async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
             response = await client.request(method, url, **request_kwargs)
             response.raise_for_status()
         content_type = response.headers.get("content-type", "")

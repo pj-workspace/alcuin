@@ -73,6 +73,8 @@ class Settings(BaseSettings):
         le=5_000_000,
     )
     knowledge_pdf_max_pages: int = Field(default=500, ge=1, le=2_000)
+    extension_allow_private_networks: bool = False
+    extension_health_timeout_seconds: float = Field(default=5.0, ge=1.0, le=20.0)
 
     @property
     def allowed_origins(self) -> list[str]:

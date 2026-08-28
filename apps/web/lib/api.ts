@@ -103,6 +103,44 @@ export const alcuinApi = {
     request<{ status: string; details: Record<string, unknown> }>(`/v1/extensions/${extensionId}/health`, {
       method: "POST",
     }),
+  inspectExtensionManifest: (manifest: Record<string, unknown>) =>
+    request<ExtensionInspection>("/v1/extensions/inspect", {
+      method: "POST",
+      body: JSON.stringify({ manifest }),
+    }),
+  importMcpExtension: (payload: {
+    name: string;
+    extension_id: string;
+    version?: string;
+    description?: string;
+    selected_tools?: string[];
+    entrypoint: Record<string, unknown>;
+  }) => request<ExtensionInspection>("/v1/extensions/import/mcp", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }),
+  importOpenApiExtension: (payload: {
+    name: string;
+    extension_id: string;
+    spec_text?: string;
+    spec_url?: string;
+    base_url?: string;
+    selected_operations?: string[];
+    auth: "none" | "api_key" | "bearer";
+  }) => request<ExtensionInspection>("/v1/extensions/import/openapi", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }),
+  installExtension: (manifest: ExtensionInspection["manifest"]) =>
+    request<Extension>("/v1/extensions", {
+      method: "POST",
+      body: JSON.stringify({ manifest, credential_refs: {} }),
+    }),
+  bindExtensionCredentials: (extensionId: string, credentialRefs: Record<string, string>) =>
+    request<Extension>(`/v1/extensions/${extensionId}/credentials`, {
+      method: "PATCH",
+      body: JSON.stringify({ credential_refs: credentialRefs }),
+    }),
   setExtension: (extensionId: string, enabled: boolean) =>
     request<Extension>(`/v1/extensions/${extensionId}`, {
       method: "PATCH",
