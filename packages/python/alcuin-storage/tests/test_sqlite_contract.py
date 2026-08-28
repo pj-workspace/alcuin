@@ -8,7 +8,7 @@ from alcuin_core.contracts import (
     ExtensionManifest,
     KnowledgeSourceCreate,
 )
-from alcuin_storage import ControlPlaneRepository, SqliteStore
+from alcuin_storage import ControlPlaneRepository, RepositoryConflict, SqliteStore
 
 
 def add_workspace(store: SqliteStore, workspace_id: str) -> None:
@@ -107,5 +107,25 @@ def test_workspace_scope_is_required_by_foreign_keys() -> None:
             pass
         else:
             raise AssertionError("adapter accepted a resource without an owning Workspace")
+    finally:
+        store.close()
+
+
+def test_adapter_normalizes_scoped_uniqueness_conflicts() -> None:
+    store = SqliteStore(":memory:")
+    try:
+        store.create_knowledge_source(
+            "ws_demo",
+            KnowledgeSourceCreate(name="Duplicate source"),
+        )
+        try:
+            store.create_knowledge_source(
+                "ws_demo",
+                KnowledgeSourceCreate(name="Duplicate source"),
+            )
+        except RepositoryConflict as exc:
+            assert "already exists" in str(exc)
+        else:
+            raise AssertionError("adapter leaked or ignored a uniqueness conflict")
     finally:
         store.close()

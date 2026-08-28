@@ -68,6 +68,11 @@ def test_storage_package_depends_inward_and_services_use_ports() -> None:
         assert "alcuin_storage" in source
         assert "sqlite3" not in source
 
+    api_composition = (
+        REPOSITORY_ROOT / "apps/api/src/alcuin_api/main.py"
+    ).read_text()
+    assert "sqlite3" not in api_composition
+
 
 def test_python_and_typescript_share_platform_contract_vocabulary() -> None:
     source = (
