@@ -330,3 +330,86 @@ async def test_tool_loop_stops_at_agent_max_steps() -> None:
 
     with pytest.raises(RuntimeError, match="max_steps=1"):
         _ = [emission async for emission in runtime.stream(request)]
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_enforces_per_tool_budget_and_allows_final_answer() -> None:
+    provider_calls = 0
+    handler_calls = 0
+
+    async def provider_handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal provider_calls
+        provider_calls += 1
+        payload = json.loads(_request.content)
+        if provider_calls == 1:
+            assert payload["tools"][0]["function"]["name"] == "web_search"
+        if provider_calls == 2:
+            assert "tools" not in payload
+        if provider_calls <= 2:
+            return httpx.Response(
+                200,
+                text=(
+                    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"budget","function":{"name":"web_search","arguments":"{\\"query\\":\\"Alcuin\\"}"}}]}}]}\n\n'
+                    "data: [DONE]\n\n"
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"choices":[{"delta":{"content":"Enough evidence."}}]}\n\n'
+                "data: [DONE]\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def web_search(_context: ToolContext, _arguments: dict) -> ToolResult:
+        nonlocal handler_calls
+        handler_calls += 1
+        return ToolResult(data={"hits": []}, summary="No hits")
+
+    runtime = OpenAICompatibleRuntime(
+        Settings(database_path=":memory:", deepseek_api_key="ds-test-key"),
+        httpx.MockTransport(provider_handler),
+        ToolExecutor(
+            ToolRegistry(
+                [
+                    ToolDefinition(
+                        name="web.search",
+                        description="Search the web",
+                        input_schema={
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                        },
+                        handler=web_search,
+                        max_calls_per_run=1,
+                    )
+                ]
+            )
+        ),
+    )
+    request = RuntimeRequest(
+        workspace_id="ws_test",
+        run_id="run_budget",
+        prompt="Research Alcuin",
+        thread_context={},
+        definition=AgentDefinition(
+            identity={"name": "Web Agent"},
+            instructions="Search public facts before answering.",
+            model={"provider": "deepseek", "model": "deepseek-v4-flash-vision-exp"},
+            tools=["web.search"],
+            runtime={"adapter": "langgraph-react", "max_steps": 4},
+        ),
+    )
+
+    emissions = [emission async for emission in runtime.stream(request)]
+    completed = [
+        emission for emission in emissions if emission.type == EventType.TOOL_COMPLETED
+    ]
+
+    assert handler_calls == 1
+    assert provider_calls == 3
+    assert [row.payload["status"] for row in completed] == ["succeeded", "failed"]
+    assert completed[1].payload["error"]["code"] == "tool_budget_exceeded"
+    assert emissions[-2].payload["artifact"]["content"] == "Enough evidence."

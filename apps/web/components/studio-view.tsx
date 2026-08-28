@@ -74,6 +74,17 @@ export function StudioView({
   const visibleArtifact = running ? undefined : artifact;
   const assistantText = events.filter((event) => event.type === "message.delta").map((event) => event.payload.delta).join("");
   const approval = [...events].reverse().find((event) => event.type === "approval.required");
+  const citations = useMemo(() => {
+    const seen = new Set<string>();
+    return events
+      .filter((event) => event.type === "citation.created")
+      .filter((event) => {
+        const key = String(event.payload.locator ?? event.payload.label ?? event.id);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }, [events]);
 
   const showToast = (message: string) => {
     setToast(message);
@@ -173,8 +184,8 @@ export function StudioView({
                     <div className="approval-actions"><button className="button secondary" onClick={() => void decide("denied")}><X size={14} />Deny</button><button className="button dark" onClick={() => void decide("approved")}><Check size={14} />Approve once</button></div>
                   </div>
                 )}
-                {events.some((event) => event.type === "citation.created") && (
-                  <button className="citation-chip"><FileText size={12} />Incident INC-104 <span>1</span></button>
+                {citations.length > 0 && (
+                  <button className="citation-chip" title={citations.map((event) => String(event.payload.label ?? event.payload.source ?? "Source")).join(" · ")}><FileText size={12} />Sources <span>{citations.length}</span></button>
                 )}
               </div>
             </article>
@@ -217,7 +228,7 @@ export function StudioView({
         </header>
         <div className="canvas-content">
           {canvasTab === "artifact" && (
-            visibleArtifact ? <ArtifactDocument artifact={visibleArtifact} /> : <div className="artifact-empty"><Sparkles size={22} /><h3>Artifact canvas</h3><p>{running ? "The artifact will settle here when the response is complete." : "Structured output will appear here as the agent works."}</p></div>
+            visibleArtifact ? <ArtifactDocument artifact={visibleArtifact} citationCount={citations.length} /> : <div className="artifact-empty"><Sparkles size={22} /><h3>Artifact canvas</h3><p>{running ? "The artifact will settle here when the response is complete." : "Structured output will appear here as the agent works."}</p></div>
           )}
           {canvasTab === "trace" && <TraceTimeline events={events} />}
           {canvasTab === "context" && <ContextInspector agent={agent} />}
@@ -243,14 +254,14 @@ function fileToImageAttachment(file: File): Promise<ImageAttachment> {
   });
 }
 
-function ArtifactDocument({ artifact }: { artifact: Artifact }) {
+function ArtifactDocument({ artifact, citationCount }: { artifact: Artifact; citationCount: number }) {
   return (
     <article className="artifact-document">
       <div className="document-kicker">Operations / Incident brief</div>
       <h2>{artifact.title}</h2>
       <div className="document-rule" />
       <MarkdownContent content={artifact.content} variant="artifact" />
-      <div className="artifact-signoff"><AlcuinMark size={30} /><span>Prepared by Alcuin<small>Grounded in 1 operational source</small></span></div>
+      <div className="artifact-signoff"><AlcuinMark size={30} /><span>Prepared by Alcuin<small>{citationCount > 0 ? `Grounded in ${citationCount} source${citationCount === 1 ? "" : "s"}` : "No external sources used"}</small></span></div>
     </article>
   );
 }

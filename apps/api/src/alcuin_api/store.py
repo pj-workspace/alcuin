@@ -148,7 +148,12 @@ class Store:
                     "credential_ref": "secret://workspace/deepseek-primary",
                 },
                 "extensions": ["ops-toolkit"],
-                "tools": ["ops.search_incidents", "ops.lookup_order", "ops.update_ticket"],
+                "tools": [
+                    "web.search",
+                    "ops.search_incidents",
+                    "ops.lookup_order",
+                    "ops.update_ticket",
+                ],
                 "runtime": {"adapter": "langgraph-react", "max_steps": 8},
                 "policies": {"mutating_tools": "ask", "external_side_effects": "ask"},
                 "context_policy": {"accepted": ["page", "record", "selection"], "max_bytes": 16_384},

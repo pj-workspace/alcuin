@@ -85,6 +85,7 @@ class ToolDefinition:
     handler: ToolHandler
     mutating: bool = False
     timeout_seconds: float = 15.0
+    max_calls_per_run: int = 4
 
     @property
     def provider_name(self) -> str:
@@ -150,6 +151,9 @@ class ToolExecutor:
 
     def provider_schemas(self, allowed_names: Iterable[str]) -> list[dict[str, Any]]:
         return [definition.provider_schema() for definition in self.registry.resolve(allowed_names)]
+
+    def definitions(self, allowed_names: Iterable[str]) -> list[ToolDefinition]:
+        return self.registry.resolve(allowed_names)
 
     def definition(self, name: str, allowed_names: Iterable[str]) -> ToolDefinition:
         allowed = set(allowed_names)

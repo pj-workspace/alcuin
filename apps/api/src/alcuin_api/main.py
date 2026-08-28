@@ -42,6 +42,8 @@ from .runtime import RuntimeOrchestrator, RuntimeRequest
 from .security import RequestScope, issue_embed_token, resolve_scope
 from .store import Store
 from .tcm_sse import project_execution_event
+from .tools import ToolExecutor, ToolRegistry
+from .web_search import WebSearchService
 
 
 ScopeDependency = Annotated[RequestScope, Depends(resolve_scope)]
@@ -50,6 +52,13 @@ ScopeDependency = Annotated[RequestScope, Depends(resolve_scope)]
 def create_app(settings: Settings | None = None, store: Store | None = None) -> FastAPI:
     settings = settings or get_settings()
     repository = store or Store(settings.database_path)
+    web_search_service = (
+        WebSearchService(settings) if (settings.searxng_url or "").strip() else None
+    )
+    tool_registry = ToolRegistry(
+        [web_search_service.tool_definition()] if web_search_service else []
+    )
+    tool_executor = ToolExecutor(tool_registry)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -57,6 +66,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         yield
         for task in application.state.tasks:
             task.cancel()
+        if web_search_service:
+            await web_search_service.aclose()
         if store is None:
             repository.close()
 
@@ -74,7 +85,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         allow_headers=["*"],
     )
     app.state.store = repository
-    app.state.runtime = RuntimeOrchestrator(repository, settings)
+    app.state.web_search_service = web_search_service
+    app.state.runtime = RuntimeOrchestrator(repository, settings, tool_executor)
 
     def missing(resource: str) -> HTTPException:
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{resource} not found")
