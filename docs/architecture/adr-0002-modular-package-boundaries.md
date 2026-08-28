@@ -30,8 +30,9 @@ The first extraction establishes:
 - web `app`, `features`, and `shared` layers;
 - `extensions/operations-copilot` as an explicit domain package.
 
-`apps/api` remains the composition root. Runtime, storage, and connector modules are still
-implemented there and will move in separate behavior-preserving slices. A directory name alone
+`apps/api` remains the composition root. Runtime and connector modules are still implemented
+there and will move in separate behavior-preserving slices. Storage ports and the SQLite adapter
+have since moved to `alcuin-storage` under ADR-0003. A directory name alone
 does not establish a package boundary: extracted packages require their own manifest, tests,
 public imports, and dependency checks.
 

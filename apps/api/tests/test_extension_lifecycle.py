@@ -10,7 +10,7 @@ from alcuin_api.config import Settings
 from alcuin_api.mcp_gateway import MCPGateway
 from alcuin_api.main import create_app
 from alcuin_api.openapi_gateway import OpenAPIGateway
-from alcuin_api.store import Store
+from alcuin_storage import SqliteStore as Store
 
 
 HEADERS = {"X-Alcuin-Workspace": "ws_demo"}

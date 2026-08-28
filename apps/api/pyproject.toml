@@ -5,6 +5,7 @@ description = "Control plane and runtime gateway for Alcuin"
 requires-python = ">=3.11"
 dependencies = [
   "alcuin-core",
+  "alcuin-storage",
   "fastapi>=0.115.0,<1.0",
   "httpx>=0.27.0,<1.0",
   "jsonschema>=4.23.0,<5.0",
@@ -34,12 +35,17 @@ packages = ["src/alcuin_api"]
 
 [tool.uv.sources]
 alcuin-core = { path = "../../packages/python/alcuin-core", editable = true }
+alcuin-storage = { path = "../../packages/python/alcuin-storage", editable = true }
 alcuin-operations-copilot = { path = "../../extensions/operations-copilot", editable = true }
 
 [tool.pytest.ini_options]
 addopts = "-q"
 pythonpath = ["src"]
-testpaths = ["tests", "../../packages/python/alcuin-core/tests"]
+testpaths = [
+  "tests",
+  "../../packages/python/alcuin-core/tests",
+  "../../packages/python/alcuin-storage/tests",
+]
 asyncio_mode = "auto"
 
 [dependency-groups]

@@ -19,7 +19,7 @@ from alcuin_api.document_parser import (
 )
 from alcuin_api.knowledge import KnowledgeService
 from alcuin_api.main import create_app
-from alcuin_api.store import Store
+from alcuin_storage import SqliteStore as Store
 
 
 class CapturingIndex:

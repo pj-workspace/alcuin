@@ -12,7 +12,7 @@ from alcuin_api.extension_tools import (
     bounded_result,
     extension_tool_name,
 )
-from alcuin_api.store import Store
+from alcuin_storage import SqliteStore as Store
 from alcuin_api.runtime import RuntimeOrchestrator
 from alcuin_api.tools import ToolContext, ToolError, ToolExecutor
 from alcuin_operations_copilot import seed_operations_demo

@@ -88,6 +88,7 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - Declarative extension card/table/form blocks with scoped data binding and approval-gated Tool Runs
 - An explicit Operations Copilot example proving that a domain Extension can run in Studio and an embedded host without entering Alcuin Core
 - A framework-neutral Python `alcuin-core`, configurable `@alcuin/sdk`, enforced web feature boundaries, and an independently packaged Operations example
+- Replaceable Runtime, Extension, Knowledge, and control-plane persistence ports with a Workspace-scoped SQLite adapter
 
 The contracts are versioned but not yet stable. SQLite stores local control-plane metadata, while Qdrant is the implemented local knowledge index. PostgreSQL and Redis remain optional `platform-infra` services until their production adapters land.
 

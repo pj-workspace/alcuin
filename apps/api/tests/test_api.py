@@ -10,7 +10,7 @@ from alcuin_api.config import Settings
 from alcuin_core.contracts import EmbedClaims
 from alcuin_api.main import create_app
 from alcuin_api.security import issue_embed_token
-from alcuin_api.store import Store
+from alcuin_storage import SqliteStore as Store
 from alcuin_operations_copilot import operations_demo_adapter, seed_operations_demo
 
 
