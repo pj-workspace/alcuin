@@ -20,6 +20,7 @@ dependencies = [
     { name = "alcuin-core" },
     { name = "alcuin-knowledge" },
     { name = "alcuin-storage" },
+    { name = "alcuin-web-search" },
     { name = "alembic" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -52,6 +53,7 @@ requires-dist = [
     { name = "alcuin-knowledge", editable = "../../packages/python/alcuin-knowledge" },
     { name = "alcuin-operations-copilot", marker = "extra == 'dev'", editable = "../../extensions/operations-copilot" },
     { name = "alcuin-storage", editable = "../../packages/python/alcuin-storage" },
+    { name = "alcuin-web-search", editable = "../../packages/python/alcuin-web-search" },
     { name = "alembic", specifier = ">=1.16.0,<2.0" },
     { name = "fastapi", specifier = ">=0.115.0,<1.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0" },
@@ -147,6 +149,27 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.3.0,<9.0" }]
+
+[[package]]
+name = "alcuin-web-search"
+version = "0.1.0"
+source = { editable = "../../packages/python/alcuin-web-search" }
+dependencies = [
+    { name = "alcuin-core" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alcuin-core", editable = "../../packages/python/alcuin-core" },
+    { name = "httpx", specifier = ">=0.27.0,<1.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.3.0,<9.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24.0,<1.0" },
+]
 
 [[package]]
 name = "alembic"

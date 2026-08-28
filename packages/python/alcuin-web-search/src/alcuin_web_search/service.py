@@ -8,13 +8,33 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from typing import Any
-from urllib.parse import urldefrag, urlsplit, urlunsplit
+from typing import Any, Literal, cast
+from urllib.parse import parse_qsl, urlencode, urldefrag, urlsplit, urlunsplit
 
 import httpx
+from alcuin_core.tools import ToolCitation, ToolContext, ToolError, ToolResult
 
-from .config import Settings
-from .tools import ToolCitation, ToolContext, ToolDefinition, ToolError, ToolResult
+from .config import WebSearchConfig
+
+
+SearchDepth = Literal["quick", "deep"]
+SearchLanguage = Literal["auto", "zh", "en"]
+
+
+@dataclass(frozen=True)
+class WebSearchQuery:
+    query: str
+    depth: SearchDepth = "quick"
+    max_results: int = 5
+    language: SearchLanguage = "auto"
+
+
+@dataclass(frozen=True)
+class WebSearchResponse:
+    query: WebSearchQuery
+    hits: tuple["WebSearchHit", ...]
+    degraded: bool = False
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -67,18 +87,28 @@ class _TextExtractor(HTMLParser):
 
 
 class _TtlCache:
-    def __init__(self, *, ttl_seconds: float, max_entries: int) -> None:
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float,
+        stale_seconds: float = 0.0,
+        max_entries: int,
+    ) -> None:
         self.ttl_seconds = max(0.0, ttl_seconds)
+        self.stale_seconds = max(0.0, stale_seconds)
         self.max_entries = max(1, max_entries)
         self._values: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 
-    def get(self, key: str) -> Any | None:
+    def get(self, key: str, *, allow_stale: bool = False) -> Any | None:
         row = self._values.get(key)
         if row is None:
             return None
         created_at, value = row
-        if time.monotonic() - created_at > self.ttl_seconds:
+        age = time.monotonic() - created_at
+        if age > self.ttl_seconds + self.stale_seconds:
             self._values.pop(key, None)
+            return None
+        if age > self.ttl_seconds and not allow_stale:
             return None
         self._values.move_to_end(key)
         return value
@@ -98,25 +128,26 @@ class WebSearchService:
 
     def __init__(
         self,
-        settings: Settings,
+        config: WebSearchConfig,
         *,
         client: httpx.AsyncClient | None = None,
         public_url_validator: PublicUrlValidator | None = None,
     ) -> None:
-        self.settings = settings
+        self.config = config
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
-            timeout=httpx.Timeout(settings.searxng_timeout_seconds),
+            timeout=httpx.Timeout(config.provider_timeout_seconds),
             follow_redirects=False,
             headers={"User-Agent": "Alcuin/0.1 web.search"},
         )
         self.public_url_validator = public_url_validator or is_public_http_url
         self.search_cache = _TtlCache(
-            ttl_seconds=settings.web_search_cache_ttl_seconds,
+            ttl_seconds=config.search_cache_ttl_seconds,
+            stale_seconds=config.stale_if_error_seconds,
             max_entries=256,
         )
         self.page_cache = _TtlCache(
-            ttl_seconds=settings.web_page_cache_ttl_seconds,
+            ttl_seconds=config.page_cache_ttl_seconds,
             max_entries=512,
         )
 
@@ -124,50 +155,13 @@ class WebSearchService:
         if self._owns_client:
             await self.client.aclose()
 
-    def tool_definition(self) -> ToolDefinition:
-        return ToolDefinition(
-            name="web.search",
-            description=(
-                "Search the public web for current or public information. Use quick depth for "
-                "normal fact finding and deep depth only when result snippets are insufficient."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "minLength": 1, "maxLength": 500},
-                    "depth": {"type": "string", "enum": ["quick", "deep"], "default": "quick"},
-                    "max_results": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 10,
-                        "default": 5,
-                    },
-                    "language": {
-                        "type": "string",
-                        "enum": ["auto", "zh", "en"],
-                        "default": "auto",
-                    },
-                },
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-            handler=self.execute,
-            mutating=False,
-            timeout_seconds=max(3.0, self.settings.web_search_total_timeout_seconds),
-            max_calls_per_run=2,
-        )
-
     async def execute(self, context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
         del context
-        query = str(arguments["query"]).strip()
-        depth = str(arguments.get("depth") or "quick")
-        max_results = int(arguments.get("max_results") or 5)
-        language = str(arguments.get("language") or "auto")
-        hits = await self.search(
-            query,
-            depth=depth,
-            max_results=max_results,
-            language=language,
+        response = await self.search(
+            str(arguments["query"]),
+            depth=str(arguments.get("depth") or "quick"),
+            max_results=int(arguments.get("max_results") or 5),
+            language=str(arguments.get("language") or "auto"),
         )
         citations = tuple(
             ToolCitation(
@@ -175,17 +169,24 @@ class WebSearchService:
                 source=hit.source or "SearXNG",
                 locator=hit.url,
                 snippet=hit.snippet,
-                metadata={"kind": "web"},
+                metadata={"kind": "web", "degraded": response.degraded},
             )
-            for hit in hits
+            for hit in response.hits
         )
         return ToolResult(
             data={
-                "query": query,
-                "depth": depth,
-                "hits": [hit.as_dict() for hit in hits],
+                "query": response.query.query,
+                "depth": response.query.depth,
+                "language": response.query.language,
+                "degraded": response.degraded,
+                "warnings": list(response.warnings),
+                "hits": [hit.as_dict() for hit in response.hits],
             },
-            summary=f"Found {len(hits)} web result{'s' if len(hits) != 1 else ''}",
+            summary=(
+                f"Found {len(response.hits)} web result"
+                f"{'s' if len(response.hits) != 1 else ''}"
+                f"{' with degraded retrieval' if response.degraded else ''}"
+            ),
             citations=citations,
         )
 
@@ -196,11 +197,7 @@ class WebSearchService:
         depth: str,
         max_results: int,
         language: str,
-    ) -> list[WebSearchHit]:
-        base = (self.settings.searxng_url or "").strip().rstrip("/")
-        if not base:
-            raise ToolError("web_search_unconfigured", "Public web search is not configured")
-
+    ) -> WebSearchResponse:
         normalized_query = " ".join(query.split())
         if not normalized_query:
             raise ToolError("invalid_arguments", "Search query cannot be empty")
@@ -208,16 +205,52 @@ class WebSearchService:
             raise ToolError("invalid_arguments", "Search depth must be quick or deep")
         if language not in {"auto", "zh", "en"}:
             raise ToolError("invalid_arguments", "Search language must be auto, zh, or en")
-        max_results = max(1, min(int(max_results), 10))
-        cache_key = f"{normalized_query.casefold()}|{language}|{max_results}|{depth}"
+        request = WebSearchQuery(
+            query=normalized_query,
+            depth=cast(SearchDepth, depth),
+            max_results=max(1, min(int(max_results), 10)),
+            language=cast(SearchLanguage, language),
+        )
+        cache_key = (
+            f"{request.query.casefold()}|{request.language}|"
+            f"{request.max_results}|{request.depth}"
+        )
         cached = self.search_cache.get(cache_key)
         if cached is not None:
-            return list(cached)
+            return cast(WebSearchResponse, cached)
+
+        try:
+            async with asyncio.timeout(self.config.total_timeout_seconds):
+                result = await self._search_uncached(request)
+        except TimeoutError as exc:
+            stale = self._stale_response(cache_key, request, "stale_cache")
+            if stale:
+                return stale
+            raise ToolError(
+                "web_search_timeout",
+                "Public web search exceeded its total deadline",
+            ) from exc
+        except ToolError as exc:
+            if exc.code not in {"web_search_unavailable", "invalid_search_response"}:
+                raise
+            stale = self._stale_response(cache_key, request, "stale_cache")
+            if stale:
+                return stale
+            raise
+
+        self.search_cache.set(cache_key, result)
+        return result
+
+    async def _search_uncached(
+        self,
+        request: WebSearchQuery,
+    ) -> WebSearchResponse:
+        base = self.config.searxng_url.strip().rstrip("/")
 
         params = {
-            "q": normalized_query,
+            "q": request.query,
             "format": "json",
-            "language": "all" if language == "auto" else language,
+            "language": "all" if request.language == "auto" else request.language,
         }
         try:
             response = await self.client.get(f"{base}/search", params=params)
@@ -247,14 +280,17 @@ class WebSearchService:
                     source=_clean_text(row.get("engine")) or "SearXNG",
                 )
             )
-            if len(hits) >= max_results:
+            if len(hits) >= request.max_results:
                 break
 
-        if depth == "deep" and hits:
+        warnings: list[str] = []
+        if request.depth == "deep" and hits:
             reads = await asyncio.gather(
                 *(self._read_page(hit.url) for hit in hits[:3]),
                 return_exceptions=True,
             )
+            if any(not isinstance(read, str) or not read for read in reads):
+                warnings.append("deep_read_partial")
             enriched: list[WebSearchHit] = []
             for index, hit in enumerate(hits):
                 content = reads[index] if index < len(reads) and isinstance(reads[index], str) else None
@@ -269,8 +305,30 @@ class WebSearchService:
                 )
             hits = enriched
 
-        self.search_cache.set(cache_key, tuple(hits))
-        return hits
+        return WebSearchResponse(
+            query=request,
+            hits=tuple(hits),
+            degraded=bool(warnings),
+            warnings=tuple(warnings),
+        )
+
+    def _stale_response(
+        self,
+        cache_key: str,
+        request: WebSearchQuery,
+        warning: str,
+    ) -> WebSearchResponse | None:
+        cached = self.search_cache.get(cache_key, allow_stale=True)
+        if cached is None:
+            return None
+        previous = cast(WebSearchResponse, cached)
+        warnings = tuple(dict.fromkeys((*previous.warnings, warning)))
+        return WebSearchResponse(
+            query=request,
+            hits=previous.hits,
+            degraded=True,
+            warnings=warnings,
+        )
 
     async def _read_page(self, url: str) -> str | None:
         cached = self.page_cache.get(url)
@@ -280,7 +338,7 @@ class WebSearchService:
             return None
 
         try:
-            async with asyncio.timeout(self.settings.web_page_timeout_seconds):
+            async with asyncio.timeout(self.config.page_timeout_seconds):
                 async with self.client.stream("GET", url) as response:
                     response.raise_for_status()
                     content_type = response.headers.get("content-type", "").lower()
@@ -292,7 +350,7 @@ class WebSearchService:
                     body = bytearray()
                     async for chunk in response.aiter_bytes():
                         body.extend(chunk)
-                        if len(body) >= self.settings.web_page_max_bytes:
+                        if len(body) >= self.config.page_max_bytes:
                             break
         except (TimeoutError, httpx.HTTPError):
             return None
@@ -301,11 +359,11 @@ class WebSearchService:
         if "text/plain" in content_type:
             extracted = "\n".join(
                 line for line in (" ".join(row.split()) for row in text.splitlines()) if line
-            )[: self.settings.web_page_max_chars]
+            )[: self.config.page_max_chars]
         else:
             parser = _TextExtractor()
             parser.feed(text)
-            extracted = parser.text(self.settings.web_page_max_chars)
+            extracted = parser.text(self.config.page_max_chars)
         if extracted:
             self.page_cache.set(url, extracted)
         return extracted or None
@@ -313,6 +371,19 @@ class WebSearchService:
 
 def _clean_text(value: Any) -> str:
     return " ".join(str(value or "").split())
+
+
+_TRACKING_QUERY_KEYS = frozenset(
+    {
+        "dclid",
+        "fbclid",
+        "gclid",
+        "mc_cid",
+        "mc_eid",
+        "msclkid",
+        "ref_src",
+    }
+)
 
 
 def canonical_url(value: str) -> str:
@@ -324,18 +395,33 @@ def canonical_url(value: str) -> str:
         return ""
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         return ""
-    host = parsed.hostname.lower()
+    try:
+        host = parsed.hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return ""
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         address = None
     if address is not None and not address.is_global:
         return ""
-    port = f":{port_value}" if port_value else ""
+    if address is not None and address.version == 6:
+        host = f"[{host}]"
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    port = f":{port_value}" if port_value and port_value != default_port else ""
     path = parsed.path or "/"
     if path != "/":
         path = path.rstrip("/")
-    return urlunsplit((parsed.scheme.lower(), f"{host}{port}", path, parsed.query, ""))
+    query = urlencode(
+        sorted(
+            (key, item)
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+            if not key.casefold().startswith("utm_")
+            and key.casefold() not in _TRACKING_QUERY_KEYS
+        ),
+        doseq=True,
+    )
+    return urlunsplit((parsed.scheme.lower(), f"{host}{port}", path, query, ""))
 
 
 async def is_public_http_url(url: str) -> bool:

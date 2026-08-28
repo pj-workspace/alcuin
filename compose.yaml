@@ -24,6 +24,23 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
 
+  searxng:
+    image: docker.io/searxng/searxng@sha256:37baac8380e1a31e022b8dda0c58dbd6ba0630e3fdaf2c522bda3d140f5ef111
+    ports:
+      - "127.0.0.1:${ALCUIN_SEARXNG_PORT:-9888}:8080"
+    volumes:
+      - ./infra/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --spider
+        - -q
+        - http://127.0.0.1:8080/
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
 volumes:
   postgres-data:
   qdrant-data:

@@ -86,6 +86,22 @@ def test_storage_package_depends_inward_and_services_use_ports() -> None:
         {"alcuin_api", "alcuin_operations_copilot", "fastapi", "langgraph"}
     )
 
+    web_search_source = (
+        REPOSITORY_ROOT
+        / "packages/python/alcuin-web-search/src/alcuin_web_search"
+    )
+    web_search_roots = imported_roots(web_search_source)
+    assert {"alcuin_core", "httpx"}.issubset(web_search_roots)
+    assert web_search_roots.isdisjoint(
+        {
+            "alcuin_api",
+            "alcuin_operations_copilot",
+            "fastapi",
+            "langgraph",
+            "qdrant_client",
+        }
+    )
+
     api_composition = (
         REPOSITORY_ROOT / "apps/api/src/alcuin_api/main.py"
     ).read_text()

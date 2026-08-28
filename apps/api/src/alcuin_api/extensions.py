@@ -17,7 +17,7 @@ from alcuin_core.contracts import (
 )
 from .mcp_gateway import MCPGateway
 from .openapi_gateway import OpenAPIGateway, resolve_secret_reference
-from .web_search import is_public_http_url
+from alcuin_web_search import is_public_http_url
 
 
 MUTATING_METHODS = {"post", "put", "patch", "delete"}
