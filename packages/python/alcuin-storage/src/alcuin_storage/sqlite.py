@@ -17,6 +17,8 @@ from alcuin_core.contracts import (
     utc_now,
 )
 
+from .errors import RepositoryConflict
+
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:20]}"
@@ -333,7 +335,9 @@ class SqliteStore:
                 )
         except sqlite3.IntegrityError as exc:
             if "agents.workspace_id, agents.slug" in str(exc):
-                raise ValueError("Agent slug already exists in this workspace") from exc
+                raise RepositoryConflict(
+                    "Agent slug already exists in this workspace"
+                ) from exc
             raise
         return self.get_agent(workspace_id, agent_id) or {}
 
@@ -704,20 +708,27 @@ class SqliteStore:
     ) -> dict[str, Any]:
         source_id = new_id("ksrc")
         created_at = utc_now()
-        with self.lock, self.connection:
-            self.connection.execute(
-                """INSERT INTO knowledge_sources
-                (id, workspace_id, name, description, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'ready', ?, ?)""",
-                (
-                    source_id,
-                    workspace_id,
-                    payload.name.strip(),
-                    payload.description.strip(),
-                    created_at,
-                    created_at,
-                ),
-            )
+        try:
+            with self.lock, self.connection:
+                self.connection.execute(
+                    """INSERT INTO knowledge_sources
+                    (id, workspace_id, name, description, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'ready', ?, ?)""",
+                    (
+                        source_id,
+                        workspace_id,
+                        payload.name.strip(),
+                        payload.description.strip(),
+                        created_at,
+                        created_at,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            if "knowledge_sources.workspace_id, knowledge_sources.name" in str(exc):
+                raise RepositoryConflict(
+                    "A knowledge source with this name already exists"
+                ) from exc
+            raise
         return self.get_knowledge_source(workspace_id, source_id) or {}
 
     def list_knowledge_sources(self, workspace_id: str) -> list[dict[str, Any]]:

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 import time
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 import httpx
-from alcuin_storage import ControlPlaneRepository, SqliteStore
+from alcuin_storage import ControlPlaneRepository, RepositoryConflict, SqliteStore
 from fastapi import (
     Depends,
     FastAPI,
@@ -421,11 +420,8 @@ def create_app(
         require_knowledge_service()
         try:
             return repository.create_knowledge_source(scope.workspace_id, payload)
-        except sqlite3.IntegrityError as exc:
-            raise HTTPException(
-                status_code=409,
-                detail="A knowledge source with this name already exists",
-            ) from exc
+        except RepositoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/v1/knowledge/sources/{source_id}/documents")
     async def list_knowledge_documents(
@@ -581,7 +577,7 @@ def create_app(
         validate_agent_extension_references(scope.workspace_id, payload.definition)
         try:
             return repository.create_agent(scope.workspace_id, payload)
-        except ValueError as exc:
+        except RepositoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/v1/agents/{agent_id}")

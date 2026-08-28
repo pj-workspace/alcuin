@@ -398,6 +398,15 @@ def test_knowledge_api_is_scoped_idempotent_and_reference_safe() -> None:
         )
         assert source_response.status_code == 201
         source = source_response.json()
+        duplicate_source = client.post(
+            "/v1/knowledge/sources",
+            headers=demo_headers,
+            json={"name": "Operations runbooks", "description": "Duplicate"},
+        )
+        assert duplicate_source.status_code == 409
+        assert duplicate_source.json()["detail"] == (
+            "A knowledge source with this name already exists"
+        )
 
         first = client.post(
             f"/v1/knowledge/sources/{source['id']}/documents",
