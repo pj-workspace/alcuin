@@ -11,7 +11,7 @@ from xml.etree import ElementTree
 
 from pypdf import PdfReader
 
-from .config import Settings
+from .config import DocumentLimits
 
 
 class DocumentParseError(ValueError):
@@ -55,10 +55,10 @@ class FileDocumentParser:
     supported_extensions = (".txt", ".md", ".markdown", ".pdf", ".docx")
     _word_namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
-    def __init__(self, settings: Settings) -> None:
-        self.max_upload_bytes = settings.knowledge_upload_max_bytes
-        self.max_chars = settings.knowledge_extracted_max_chars
-        self.max_pdf_pages = settings.knowledge_pdf_max_pages
+    def __init__(self, limits: DocumentLimits) -> None:
+        self.max_upload_bytes = limits.upload_max_bytes
+        self.max_chars = limits.extracted_max_chars
+        self.max_pdf_pages = limits.pdf_max_pages
         self.max_docx_uncompressed_bytes = min(
             max(self.max_upload_bytes * 4, 16 * 1024 * 1024),
             64 * 1024 * 1024,

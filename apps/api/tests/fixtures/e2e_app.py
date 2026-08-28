@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import psycopg
+from alcuin_knowledge import KnowledgeChunk, KnowledgeHit, KnowledgeService
 from alcuin_api.config import Settings
-from alcuin_api.knowledge import KnowledgeChunk, KnowledgeHit, KnowledgeService
 from alcuin_api.main import create_app
 from alcuin_storage import PostgresStore
 from alcuin_operations_copilot import operations_demo_adapter, seed_operations_demo

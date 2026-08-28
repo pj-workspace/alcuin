@@ -10,6 +10,6 @@ Alembic owns schema changes. PostgreSQL is the only control-plane database imple
 run against an isolated Compose project and temporary volume.
 
 ```bash
-./scripts/with-test-postgres.sh \
+./scripts/with-test-services.sh \
   uv run --project apps/api pytest packages/python/alcuin-storage/tests
 ```

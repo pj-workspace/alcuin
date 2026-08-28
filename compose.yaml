@@ -17,5 +17,13 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    ports:
+      - "127.0.0.1:${ALCUIN_QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
 volumes:
   postgres-data:
+  qdrant-data:

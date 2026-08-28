@@ -87,7 +87,7 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - Standard `Last-Event-ID` recovery shared by Studio and Embed, with bounded reconnects and replay suppression
 - Declarative extension card/table/form blocks with scoped data binding and approval-gated Tool Runs
 - An explicit Operations Copilot example proving that a domain Extension can run in Studio and an embedded host without entering Alcuin Core
-- A framework-neutral Python `alcuin-core`, configurable `@alcuin/sdk`, enforced web feature boundaries, and an independently packaged Operations example
+- Framework-neutral Python `alcuin-core`, independently packaged `alcuin-knowledge`, configurable `@alcuin/sdk`, enforced web feature boundaries, and an independently packaged Operations example
 - PostgreSQL-only control-plane persistence with Workspace-scoped Repository ports, pooled connections, Alembic migrations, and atomic Run event sequencing
 
 The contracts are versioned but not yet stable. PostgreSQL stores control-plane metadata and canonical knowledge text, while Qdrant is the implemented knowledge vector index. Redis remains roadmap infrastructure rather than a claimed runtime dependency.
