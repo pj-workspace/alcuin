@@ -10,6 +10,7 @@ from alcuin_api.contracts import EmbedClaims
 from alcuin_api.main import create_app
 from alcuin_api.security import issue_embed_token
 from alcuin_api.store import Store
+from alcuin_extensions.operations_toolkit import operations_demo_adapter
 
 
 def make_client() -> TestClient:
@@ -23,6 +24,22 @@ def make_client() -> TestClient:
             cors_origins="http://localhost:3000",
         ),
         store=store,
+    )
+    return TestClient(app)
+
+
+def make_client_with_operations_adapter() -> TestClient:
+    store = Store(":memory:")
+    app = create_app(
+        Settings(
+            database_path=":memory:",
+            openai_api_key=None,
+            deepseek_api_key=None,
+            searxng_url="",
+            cors_origins="http://localhost:3000",
+        ),
+        store=store,
+        builtin_adapters={"operations-demo": operations_demo_adapter},
     )
     return TestClient(app)
 
@@ -182,6 +199,83 @@ def test_approved_tool_fails_truthfully_when_runtime_handler_is_unavailable() ->
         assert final["events"][-1]["type"] == "run.failed"
         assert final["events"][-2]["type"] == "tool.completed"
         assert final["events"][-2]["payload"]["error"]["code"] == "extension_unavailable"
+
+
+def test_declarative_ui_tool_runs_validate_forms_and_gate_mutations() -> None:
+    with make_client_with_operations_adapter() as client:
+        headers = {"X-Alcuin-Workspace": "ws_demo"}
+        thread = client.post(
+            "/v1/threads",
+            headers=headers,
+            json={
+                "agent_id": "agt_operations",
+                "context": {"record": {"id": "INC-UI-1"}},
+            },
+        ).json()
+
+        forged = client.post(
+            f"/v1/threads/{thread['id']}/runs",
+            headers=headers,
+            json={
+                "input": "Forged declarative extension action",
+                "requested_tool": {
+                    "name": "ops.update_ticket",
+                    "arguments": {"ticket_id": "INC-UI-1", "status": "resolved"},
+                    "extension_manifest_id": "ops-toolkit",
+                    "ui_block_id": "incident-summary",
+                },
+            },
+        )
+        assert forged.status_code == 409
+        assert forged.json()["detail"] == "UI form is unavailable"
+
+        write_run = client.post(
+            f"/v1/threads/{thread['id']}/runs",
+            headers=headers,
+            json={
+                "input": "Update incident · declarative extension action",
+                "requested_tool": {
+                    "name": "ops.update_ticket",
+                    "arguments": {"ticket_id": "INC-UI-1", "status": "resolved"},
+                    "extension_manifest_id": "ops-toolkit",
+                    "ui_block_id": "update-incident",
+                },
+            },
+        ).json()
+        deadline = time.time() + 2
+        write_body = None
+        while time.time() < deadline:
+            write_body = client.get(
+                f"/v1/runs/{write_run['id']}", headers=headers
+            ).json()
+            if write_body["status"] == "waiting_for_approval":
+                break
+            time.sleep(0.02)
+        assert write_body is not None
+        assert write_body["status"] == "waiting_for_approval"
+        approval_event = next(
+            event for event in write_body["events"] if event["type"] == "approval.required"
+        )
+        assert approval_event["payload"]["source"] == "extension.ui_block"
+        assert approval_event["payload"]["ui_block_id"] == "update-incident"
+        assert not any(event["type"] == "tool.completed" for event in write_body["events"])
+
+        decision = client.post(
+            f"/v1/runs/{write_run['id']}/approvals/{approval_event['payload']['approval_id']}",
+            headers=headers,
+            json={"decision": "approved"},
+        )
+        assert decision.status_code == 200
+        final = client.get(f"/v1/runs/{write_run['id']}", headers=headers).json()
+        assert final["status"] == "completed"
+        completed = next(
+            event for event in final["events"] if event["type"] == "tool.completed"
+        )
+        assert completed["payload"]["result"] == {
+            "ticket_id": "INC-UI-1",
+            "status": "resolved",
+            "updated": True,
+        }
 
 
 def test_embed_token_is_agent_and_origin_bound() -> None:

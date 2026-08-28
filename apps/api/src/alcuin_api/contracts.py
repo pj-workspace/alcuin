@@ -111,15 +111,31 @@ class ImageAttachment(StrictModel):
         return self
 
 
+class RequestedToolCall(StrictModel):
+    name: str = Field(min_length=1, max_length=200)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    extension_manifest_id: str = Field(pattern=r"^[a-z][a-z0-9.-]{2,127}$")
+    ui_block_id: str = Field(pattern=r"^[a-z][a-z0-9-]{1,63}$")
+
+    @model_validator(mode="after")
+    def validate_size(self) -> "RequestedToolCall":
+        if len(json.dumps(self.arguments, ensure_ascii=False, default=str)) > 32_000:
+            raise ValueError("requested tool arguments exceed 32000 characters")
+        return self
+
+
 class RunCreate(StrictModel):
     input: str = Field(default="", max_length=40_000)
     attachments: list[ImageAttachment] = Field(default_factory=list, max_length=4)
     thinking: bool = True
+    requested_tool: RequestedToolCall | None = None
 
     @model_validator(mode="after")
     def validate_content(self) -> "RunCreate":
-        if not self.input.strip() and not self.attachments:
-            raise ValueError("a run requires text or at least one attachment")
+        if not self.input.strip() and not self.attachments and not self.requested_tool:
+            raise ValueError("a run requires text, an attachment, or a requested tool")
+        if self.requested_tool and self.attachments:
+            raise ValueError("requested tool runs cannot include attachments")
         return self
 
 
@@ -204,12 +220,117 @@ ExtensionEntrypoint = Annotated[
 ]
 
 
+class UIBlockDataSource(StrictModel):
+    kind: Literal["context", "artifact", "tool_result"]
+    tool: str | None = Field(default=None, min_length=1, max_length=200)
+    path: str = Field(default="", max_length=200, pattern=r"^[a-zA-Z0-9_.-]*$")
+
+    @model_validator(mode="after")
+    def validate_tool_source(self) -> "UIBlockDataSource":
+        if any(
+            segment in {"__proto__", "prototype", "constructor"}
+            for segment in self.path.split(".")
+        ):
+            raise ValueError("UI data path contains a reserved segment")
+        if self.kind == "tool_result" and not self.tool:
+            raise ValueError("tool_result UI source requires a tool")
+        if self.kind != "tool_result" and self.tool:
+            raise ValueError("only tool_result UI sources may declare a tool")
+        return self
+
+
+class UIBlockValueField(StrictModel):
+    label: str = Field(min_length=1, max_length=80)
+    path: str = Field(max_length=200, pattern=r"^[a-zA-Z0-9_.-]*$")
+    format: Literal["text", "number", "status", "date", "json"] = "text"
+
+    @model_validator(mode="after")
+    def validate_path(self) -> "UIBlockValueField":
+        if any(
+            segment in {"__proto__", "prototype", "constructor"}
+            for segment in self.path.split(".")
+        ):
+            raise ValueError("UI value path contains a reserved segment")
+        return self
+
+
+class UICardBlock(StrictModel):
+    id: str = Field(pattern=r"^[a-z][a-z0-9-]{1,63}$")
+    type: Literal["card"] = "card"
+    title: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=300)
+    source: UIBlockDataSource
+    fields: list[UIBlockValueField] = Field(min_length=1, max_length=12)
+
+
+class UITableBlock(StrictModel):
+    id: str = Field(pattern=r"^[a-z][a-z0-9-]{1,63}$")
+    type: Literal["table"] = "table"
+    title: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=300)
+    source: UIBlockDataSource
+    columns: list[UIBlockValueField] = Field(min_length=1, max_length=12)
+    empty_state: str = Field(default="No data available", max_length=160)
+
+
+class UIFormField(StrictModel):
+    name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")
+    label: str = Field(min_length=1, max_length=80)
+    input: Literal["text", "textarea", "number", "select"] = "text"
+    required: bool = False
+    placeholder: str = Field(default="", max_length=160)
+    default_path: str = Field(default="", max_length=200, pattern=r"^[a-zA-Z0-9_.-]*$")
+    options: list[str] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_options(self) -> "UIFormField":
+        if any(
+            segment in {"__proto__", "prototype", "constructor"}
+            for segment in self.default_path.split(".")
+        ):
+            raise ValueError("UI default path contains a reserved segment")
+        if self.input == "select" and not self.options:
+            raise ValueError("select UI fields require options")
+        if self.input != "select" and self.options:
+            raise ValueError("only select UI fields may declare options")
+        if len(set(self.options)) != len(self.options):
+            raise ValueError("UI field options must be unique")
+        return self
+
+
+class UIFormSubmit(StrictModel):
+    tool: str = Field(min_length=1, max_length=200)
+    label: str = Field(min_length=1, max_length=80)
+
+
+class UIFormBlock(StrictModel):
+    id: str = Field(pattern=r"^[a-z][a-z0-9-]{1,63}$")
+    type: Literal["form"] = "form"
+    title: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=300)
+    fields: list[UIFormField] = Field(min_length=1, max_length=12)
+    submit: UIFormSubmit
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "UIFormBlock":
+        names = [field.name for field in self.fields]
+        if len(names) != len(set(names)):
+            raise ValueError("UI form field names must be unique")
+        return self
+
+
+UIBlockContribution = Annotated[
+    UICardBlock | UITableBlock | UIFormBlock,
+    Field(discriminator="type"),
+]
+
+
 class ExtensionContributions(StrictModel):
     tools: list[dict[str, Any]] = Field(default_factory=list)
     skills: list[dict[str, Any]] = Field(default_factory=list)
     agent_templates: list[dict[str, Any]] = Field(default_factory=list)
     knowledge_connectors: list[dict[str, Any]] = Field(default_factory=list)
-    ui_blocks: list[dict[str, Any]] = Field(default_factory=list)
+    ui_blocks: list[UIBlockContribution] = Field(default_factory=list, max_length=24)
 
 
 class ExtensionManifest(StrictModel):
@@ -282,6 +403,21 @@ class ExtensionManifest(StrictModel):
                 requirement["required"], bool
             ):
                 raise ValueError("credential requirement required must be boolean")
+        block_ids: set[str] = set()
+        for block in self.contributions.ui_blocks:
+            if block.id in block_ids:
+                raise ValueError(f"duplicate UI block id: {block.id}")
+            block_ids.add(block.id)
+            if isinstance(block, (UICardBlock, UITableBlock)):
+                source_tool = block.source.tool
+                if source_tool and source_tool not in tool_names:
+                    raise ValueError(
+                        f"UI block references an undeclared tool: {source_tool}"
+                    )
+            if isinstance(block, UIFormBlock) and block.submit.tool not in tool_names:
+                raise ValueError(
+                    f"UI form references an undeclared tool: {block.submit.tool}"
+                )
         return self
 
 

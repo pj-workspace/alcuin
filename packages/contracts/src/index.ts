@@ -93,6 +93,55 @@ export type ExtensionEntrypoint =
       auth?: "none" | "api_key" | "bearer";
     };
 
+export type ExtensionUIValueFormat = "text" | "number" | "status" | "date" | "json";
+
+export interface ExtensionUIDataSource {
+  kind: "context" | "artifact" | "tool_result";
+  tool?: string;
+  path?: string;
+}
+
+export interface ExtensionUICardBlock {
+  id: string;
+  type: "card";
+  title: string;
+  description?: string;
+  source: ExtensionUIDataSource;
+  fields: Array<{ label: string; path: string; format?: ExtensionUIValueFormat }>;
+}
+
+export interface ExtensionUITableBlock {
+  id: string;
+  type: "table";
+  title: string;
+  description?: string;
+  source: ExtensionUIDataSource;
+  columns: Array<{ label: string; path: string; format?: ExtensionUIValueFormat }>;
+  empty_state?: string;
+}
+
+export interface ExtensionUIFormBlock {
+  id: string;
+  type: "form";
+  title: string;
+  description?: string;
+  fields: Array<{
+    name: string;
+    label: string;
+    input: "text" | "textarea" | "number" | "select";
+    required?: boolean;
+    placeholder?: string;
+    default_path?: string;
+    options?: string[];
+  }>;
+  submit: { tool: string; label: string };
+}
+
+export type ExtensionUIBlock =
+  | ExtensionUICardBlock
+  | ExtensionUITableBlock
+  | ExtensionUIFormBlock;
+
 export interface ExtensionManifest {
   $schema?: string;
   manifest_version: "1";
@@ -106,7 +155,7 @@ export interface ExtensionManifest {
     skills: Array<Record<string, unknown>>;
     agent_templates: Array<Record<string, unknown>>;
     knowledge_connectors: Array<Record<string, unknown>>;
-    ui_blocks: Array<Record<string, unknown>>;
+    ui_blocks: ExtensionUIBlock[];
   };
   entrypoints: ExtensionEntrypoint[];
   config_schema: JsonSchema;
@@ -182,6 +231,13 @@ export interface Run {
   agent_name?: string;
   created_at: string;
   completed_at?: string | null;
+}
+
+export interface RequestedToolCall {
+  name: string;
+  arguments: Record<string, unknown>;
+  extension_manifest_id: string;
+  ui_block_id: string;
 }
 
 export interface ImageAttachment {

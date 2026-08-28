@@ -31,6 +31,11 @@ def test_sample_manifest_matches_public_json_schema() -> None:
     parsed = ExtensionManifest.model_validate(manifest)
     assert parsed.schema_uri == "../../docs/schemas/alcuin-extension.schema.json"
     assert "schema_uri" not in parsed.model_dump(mode="json")
+    assert [block.type for block in parsed.contributions.ui_blocks] == [
+        "card",
+        "table",
+        "form",
+    ]
 
 
 def test_stdio_entrypoint_requires_command() -> None:
@@ -81,6 +86,50 @@ def test_native_manifest_rejects_unsafe_mutation_contract() -> None:
     with pytest.raises(ValidationError, match="high-risk permission"):
         ExtensionManifest.model_validate(base)
 
+
+def test_ui_blocks_can_only_bind_declared_tools() -> None:
+    manifest = {
+        "id": "sample.ui",
+        "name": "Sample UI",
+        "version": "0.1.0",
+        "contributions": {
+            "tools": [
+                {
+                    "name": "search",
+                    "input_schema": {"type": "object"},
+                    "mutating": False,
+                }
+            ],
+            "ui_blocks": [
+                {
+                    "id": "results",
+                    "type": "table",
+                    "title": "Results",
+                    "source": {
+                        "kind": "tool_result",
+                        "tool": "undeclared",
+                        "path": "rows",
+                    },
+                    "columns": [{"label": "ID", "path": "id"}],
+                }
+            ],
+        },
+        "entrypoints": [{"type": "builtin", "adapter": "sample"}],
+    }
+    with pytest.raises(ValidationError, match="undeclared tool"):
+        ExtensionManifest.model_validate(manifest)
+
+    manifest["contributions"]["ui_blocks"] = [
+        {
+            "id": "action",
+            "type": "form",
+            "title": "Action",
+            "fields": [{"name": "query", "label": "Query", "input": "text"}],
+            "submit": {"tool": "undeclared", "label": "Run"},
+        }
+    ]
+    with pytest.raises(ValidationError, match="undeclared tool"):
+        ExtensionManifest.model_validate(manifest)
 
 def test_openapi_import_marks_mutations_for_approval() -> None:
     request = OpenAPIImportRequest(

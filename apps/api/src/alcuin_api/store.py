@@ -248,7 +248,64 @@ class Store:
                         },
                     ],
                     "skills": [{"id": "incident-brief", "name": "Incident brief"}],
-                    "ui_blocks": [{"type": "table", "id": "incident-summary"}],
+                    "ui_blocks": [
+                        {
+                            "id": "active-record",
+                            "type": "card",
+                            "title": "Active record",
+                            "description": "Host context exposed to this Agent session.",
+                            "source": {"kind": "context", "path": "record"},
+                            "fields": [
+                                {"label": "Record", "path": "id", "format": "text"},
+                                {"label": "Type", "path": "type", "format": "status"},
+                            ],
+                        },
+                        {
+                            "id": "incident-summary",
+                            "type": "table",
+                            "title": "Incident results",
+                            "description": "Latest structured result from Operations Toolkit.",
+                            "source": {
+                                "kind": "tool_result",
+                                "tool": "ops.search_incidents",
+                                "path": "incidents",
+                            },
+                            "columns": [
+                                {"label": "Incident", "path": "id", "format": "text"},
+                                {"label": "Status", "path": "status", "format": "status"},
+                            ],
+                            "empty_state": "Run an incident search to populate this table.",
+                        },
+                        {
+                            "id": "update-incident",
+                            "type": "form",
+                            "title": "Update incident",
+                            "description": (
+                                "Creates an approval-gated Tool Run; submitting never "
+                                "bypasses Agent policy."
+                            ),
+                            "fields": [
+                                {
+                                    "name": "ticket_id",
+                                    "label": "Incident ID",
+                                    "input": "text",
+                                    "required": True,
+                                    "default_path": "record.id",
+                                },
+                                {
+                                    "name": "status",
+                                    "label": "New status",
+                                    "input": "select",
+                                    "required": True,
+                                    "options": ["monitoring", "resolved", "open"],
+                                },
+                            ],
+                            "submit": {
+                                "tool": "ops.update_ticket",
+                                "label": "Request update",
+                            },
+                        },
+                    ],
                 },
                 "entrypoints": [{"type": "builtin", "adapter": "operations-demo"}],
                 "permissions": [
@@ -309,6 +366,12 @@ class Store:
                 ),
             )
             self.connection.execute(
+                """UPDATE extensions SET manifest_json = ?, name = ?, version = ?
+                WHERE id = 'ext_ops_toolkit' AND workspace_id = 'ws_demo'
+                AND manifest_id = 'ops-toolkit'""",
+                (manifest.model_dump_json(), manifest.name, manifest.version),
+            )
+            self.connection.execute(
                 """INSERT OR IGNORE INTO threads
                 (id, workspace_id, agent_id, title, context_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)""",
@@ -353,6 +416,10 @@ class Store:
                         "tool": "ops.search_incidents",
                         "status": "succeeded",
                         "result_summary": "1 active incident and 3 related notes found.",
+                        "result": {
+                            "query": "checkout latency",
+                            "incidents": [{"id": "INC-104", "status": "monitoring"}],
+                        },
                         "duration_ms": 82,
                     },
                 ),

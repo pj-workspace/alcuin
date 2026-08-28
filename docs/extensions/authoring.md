@@ -68,6 +68,56 @@ Credentials are requirements, never values. Store only a `secret://` reference
 during installation. Raw credentials must remain in the host's secret backend
 and must not appear in the Manifest, Agent Definition, events, or logs.
 
+## Declarative UI blocks
+
+Extensions may contribute `card`, `table`, and `form` blocks to the Studio
+Context Canvas. Alcuin owns every rendered element; manifests cannot provide
+HTML, JavaScript, React components, event handlers, or remote UI bundles.
+
+Cards and tables read bounded values from the controlled thread `context`, the
+latest `artifact.updated` payload, or the latest successful result of a tool
+declared by the same Manifest:
+
+```json
+{
+  "id": "incident-results",
+  "type": "table",
+  "title": "Incident results",
+  "source": {
+    "kind": "tool_result",
+    "tool": "search_incidents",
+    "path": "incidents"
+  },
+  "columns": [
+    { "label": "Incident", "path": "id" },
+    { "label": "Status", "path": "status", "format": "status" }
+  ]
+}
+```
+
+A form names primitive fields and one declared submit tool. Submission creates
+a persisted Tool Run against the Agent's immutable version; the backend
+rechecks Workspace ownership, extension health, the Agent tool allow-list, and
+the tool JSON Schema. Mutating tools stop at `approval.required` and are not
+executed until the user approves the Run.
+
+```json
+{
+  "id": "update-incident",
+  "type": "form",
+  "title": "Update incident",
+  "fields": [
+    { "name": "ticket_id", "label": "Incident ID", "input": "text", "required": true },
+    { "name": "status", "label": "Status", "input": "select", "options": ["monitoring", "resolved"] }
+  ],
+  "submit": { "tool": "update_ticket", "label": "Request update" }
+}
+```
+
+Tool and block ids are resolved only from enabled, healthy extensions bound to
+the active Agent. Unknown tools, duplicate block/field ids, unsafe paths, and
+unsupported input types fail Manifest inspection.
+
 ## Installation contract
 
 Every extension follows the same trust sequence:

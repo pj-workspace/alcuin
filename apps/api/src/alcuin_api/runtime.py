@@ -45,6 +45,7 @@ class RuntimeRequest:
     definition: AgentDefinition
     attachments: tuple[ImageAttachment, ...] = ()
     thinking: bool = False
+    requested_tool: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,10 @@ class LangGraphReactRuntime:
                 "tool": "ops.search_incidents",
                 "status": "succeeded",
                 "result_summary": "1 active incident and 3 related operational notes found.",
+                "result": {
+                    "query": request.prompt[:120],
+                    "incidents": [{"id": incident, "status": "monitoring"}],
+                },
                 "duration_ms": 82,
             },
         )
@@ -677,9 +682,13 @@ class RuntimeOrchestrator:
                 "input_modalities": ["text", *(["image"] if request.attachments else [])],
                 "attachment_count": len(request.attachments),
                 "thinking": request.thinking,
+                "invocation": "requested_tool" if request.requested_tool else "agent",
             },
         )
         try:
+            if request.requested_tool:
+                await self.execute_requested_tool(request)
+                return
             provider = self.settings.provider(request.definition.model.provider)
             runtime = self.provider_runtime if provider.api_key else self.demo_runtime
             async for emission in runtime.stream(request):
@@ -702,6 +711,189 @@ class RuntimeOrchestrator:
                 },
             )
             self.store.set_run_status(request.workspace_id, request.run_id, "failed")
+
+    async def execute_requested_tool(self, request: RuntimeRequest) -> None:
+        requested = request.requested_tool or {}
+        tool = str(requested.get("name") or "")
+        raw_arguments = requested.get("arguments")
+        arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
+        event_arguments = self.redact_payload(arguments)
+        extension_manifest_id = str(requested.get("extension_manifest_id") or "")
+        ui_block_id = str(requested.get("ui_block_id") or "")
+        call_id = f"requested_{request.run_id}"
+
+        try:
+            definition = self.tool_executor.definition(
+                tool,
+                request.definition.tools,
+                workspace_id=request.workspace_id,
+            )
+        except ToolError as error:
+            self._fail_requested_tool(
+                request, tool, call_id, error, event_arguments
+            )
+            return
+
+        self.store.append_event(
+            request.workspace_id,
+            request.run_id,
+            EventType.TOOL_REQUESTED,
+            {
+                "tool": tool,
+                "call_id": call_id,
+                "summary": f"Declarative UI requested {tool}",
+                "arguments": event_arguments,
+                "mutating": definition.mutating,
+                "source": "extension.ui_block",
+                "extension_manifest_id": extension_manifest_id,
+                "ui_block_id": ui_block_id,
+            },
+        )
+
+        mutation_authorized = False
+        if definition.mutating:
+            policy = request.definition.policies.mutating_tools
+            if policy == "deny":
+                self._fail_requested_tool(
+                    request,
+                    tool,
+                    call_id,
+                    ToolError(
+                        "tool_denied",
+                        "Agent policy denies this mutating UI action",
+                    ),
+                    event_arguments,
+                )
+                return
+            if policy == "ask":
+                approval_payload = {
+                    "title": "Approve extension action",
+                    "description": f"The declarative UI requested {tool}.",
+                    "tool": tool,
+                    "call_id": call_id,
+                    "arguments": event_arguments,
+                    "risk": "high",
+                    "source": "extension.ui_block",
+                    "extension_manifest_id": extension_manifest_id,
+                    "ui_block_id": ui_block_id,
+                }
+                approval = self.store.create_approval(
+                    request.workspace_id,
+                    request.run_id,
+                    approval_payload,
+                )
+                self.store.append_event(
+                    request.workspace_id,
+                    request.run_id,
+                    EventType.APPROVAL_REQUIRED,
+                    {**approval_payload, "approval_id": approval["id"]},
+                )
+                self.store.set_run_status(
+                    request.workspace_id,
+                    request.run_id,
+                    "waiting_for_approval",
+                )
+                return
+            mutation_authorized = True
+
+        try:
+            execution = await self.tool_executor.execute(
+                tool,
+                arguments,
+                allowed_names=request.definition.tools,
+                context=ToolContext(
+                    workspace_id=request.workspace_id,
+                    run_id=request.run_id,
+                    thread_context=request.thread_context,
+                    knowledge_source_ids=tuple(request.definition.knowledge),
+                    mutation_authorized=mutation_authorized,
+                ),
+            )
+        except ToolError as error:
+            self._fail_requested_tool(
+                request, tool, call_id, error, event_arguments
+            )
+            return
+
+        result = self.redact_payload(execution.result.data)
+        self.store.append_event(
+            request.workspace_id,
+            request.run_id,
+            EventType.TOOL_COMPLETED,
+            {
+                "tool": tool,
+                "call_id": call_id,
+                "status": "succeeded",
+                "result_summary": execution.result.summary,
+                "result": result,
+                "duration_ms": execution.duration_ms,
+            },
+        )
+        for citation in execution.result.citations:
+            self.store.append_event(
+                request.workspace_id,
+                request.run_id,
+                EventType.CITATION_CREATED,
+                {"tool": tool, "call_id": call_id, **citation.as_event_payload()},
+            )
+        self.store.append_event(
+            request.workspace_id,
+            request.run_id,
+            EventType.MESSAGE_DELTA,
+            {"delta": execution.result.summary},
+        )
+        self.store.append_event(
+            request.workspace_id,
+            request.run_id,
+            EventType.ARTIFACT_UPDATED,
+            {
+                "artifact": {
+                    "id": f"artifact-{request.run_id}",
+                    "title": execution.result.summary,
+                    "kind": "tool-result",
+                    "version": 1,
+                    "content": "```json\n"
+                    + json.dumps(result, ensure_ascii=False, indent=2)[:24_000]
+                    + "\n```",
+                }
+            },
+        )
+        self.store.append_event(
+            request.workspace_id,
+            request.run_id,
+            EventType.RUN_COMPLETED,
+            {"status": "completed", "invocation": "requested_tool"},
+        )
+        self.store.set_run_status(request.workspace_id, request.run_id, "completed")
+
+    def _fail_requested_tool(
+        self,
+        request: RuntimeRequest,
+        tool: str,
+        call_id: str,
+        error: ToolError,
+        arguments: dict[str, Any],
+    ) -> None:
+        self.store.append_event(
+            request.workspace_id,
+            request.run_id,
+            EventType.TOOL_COMPLETED,
+            {
+                "tool": tool,
+                "call_id": call_id,
+                "status": "failed",
+                "arguments": arguments,
+                "error": {"code": error.code, "message": error.message},
+                "duration_ms": 0,
+            },
+        )
+        self.store.append_event(
+            request.workspace_id,
+            request.run_id,
+            EventType.RUN_FAILED,
+            {"code": error.code, "message": error.message},
+        )
+        self.store.set_run_status(request.workspace_id, request.run_id, "failed")
 
     async def resume_after_approval(
         self,
