@@ -216,3 +216,37 @@ test("installs and enables real MCP and OpenAPI extensions through the governed 
   await wizard.getByRole("button", { name: "Done" }).click();
   await expect(page.getByRole("heading", { name: openApiName, exact: true })).toBeVisible();
 });
+
+test("creates, edits, publishes, persists, and switches between Agents", async ({ page }, testInfo) => {
+  const suffix = testInfo.project.name;
+  const draftName = `Release Copilot ${suffix}`;
+  const publishedName = `${draftName} v2`;
+  const slug = `release-copilot-${suffix}`;
+
+  await page.goto("/agents");
+  await page.locator(".wide-header").getByRole("button", { name: "New agent" }).click();
+  const dialog = page.getByRole("dialog", { name: "Create agent" });
+  await dialog.getByLabel("Agent name", { exact: true }).fill(draftName);
+  await expect(dialog.getByRole("textbox", { name: /^Agent slug/ })).toHaveValue(slug);
+  await dialog.getByLabel("Description", { exact: true }).fill("Coordinates governed release readiness.");
+  await dialog.getByRole("button", { name: "Create draft" }).click();
+
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole("textbox", { name: /^Agent name/ })).toHaveValue(draftName);
+  await expect(page.locator(".title-row .status-pill")).toHaveText("draft");
+  await expect(page.locator(".title-row .version-badge")).toHaveText("v1");
+
+  await page.getByRole("textbox", { name: /^Agent name/ }).fill(publishedName);
+  await page.getByRole("button", { name: "Publish version" }).click();
+  await expect(page.locator(".title-row .status-pill")).toHaveText("published");
+  await expect(page.locator(".title-row .version-badge")).toHaveText("v2");
+  await expect(page.getByRole("textbox", { name: /^Agent name/ })).toHaveValue(publishedName);
+
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: /^Agent name/ })).toHaveValue(publishedName);
+  await expect(page.locator(".title-row .status-pill")).toHaveText("published");
+  await page.getByRole("combobox", { name: "Select agent" }).selectOption({ label: "Operations Copilot · v1" });
+  await expect(page.getByRole("textbox", { name: /^Agent name/ })).toHaveValue("Operations Copilot");
+  await page.getByRole("combobox", { name: "Select agent" }).selectOption({ label: `${publishedName} · v2` });
+  await expect(page.getByRole("textbox", { name: /^Agent name/ })).toHaveValue(publishedName);
+});

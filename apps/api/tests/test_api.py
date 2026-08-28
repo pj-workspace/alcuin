@@ -62,6 +62,50 @@ def test_provider_status_never_returns_credentials() -> None:
         assert "api_key" not in deepseek
 
 
+def test_agent_creation_is_versioned_and_rejects_duplicate_workspace_slug() -> None:
+    definition = {
+        "identity": {
+            "name": "Release Copilot",
+            "description": "Coordinates release readiness.",
+            "icon": "spark",
+        },
+        "instructions": "Coordinate release readiness using only explicitly bound capabilities.",
+        "model": {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash-vision-exp",
+            "credential_ref": "secret://workspace/deepseek-primary",
+        },
+        "extensions": [],
+        "tools": [],
+        "knowledge": [],
+        "runtime": {"adapter": "langgraph-react", "max_steps": 8},
+        "policies": {"mutating_tools": "ask", "external_side_effects": "ask"},
+        "context_policy": {"accepted": ["page", "record"], "max_bytes": 16_384},
+        "output_schema": {"type": "artifact", "format": "markdown"},
+        "starter_prompts": [],
+    }
+    headers = {"X-Alcuin-Workspace": "ws_demo"}
+    with make_client() as client:
+        created = client.post(
+            "/v1/agents",
+            headers=headers,
+            json={"slug": "release-copilot", "definition": definition},
+        )
+        assert created.status_code == 201
+        assert created.json()["status"] == "draft"
+        assert created.json()["version"] == 1
+        assert created.json()["definition"]["identity"]["name"] == "Release Copilot"
+
+        duplicate = client.post(
+            "/v1/agents",
+            headers=headers,
+            json={"slug": "release-copilot", "definition": definition},
+        )
+        assert duplicate.status_code == 409
+        assert duplicate.json()["detail"] == "Agent slug already exists in this workspace"
+        assert len([agent for agent in client.get("/v1/agents", headers=headers).json() if agent["slug"] == "release-copilot"]) == 1
+
+
 def test_web_search_tool_is_registered_only_when_searxng_is_configured() -> None:
     store = Store(":memory:")
     app = create_app(

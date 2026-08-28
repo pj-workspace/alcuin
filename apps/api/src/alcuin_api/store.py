@@ -504,27 +504,32 @@ class Store:
 
     def create_agent(self, workspace_id: str, payload: AgentCreate) -> dict[str, Any]:
         agent_id, version_id, created_at = new_id("agt"), new_id("av"), utc_now()
-        with self.lock, self.connection:
-            self.connection.execute(
-                """INSERT INTO agents
-                (id, workspace_id, slug, name, description, status, current_version_id, created_at)
-                VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)""",
-                (
-                    agent_id,
-                    workspace_id,
-                    payload.slug,
-                    payload.definition.identity.name,
-                    payload.definition.identity.description,
-                    version_id,
-                    created_at,
-                ),
-            )
-            self.connection.execute(
-                """INSERT INTO agent_versions
-                (id, workspace_id, agent_id, version, definition_json, created_at)
-                VALUES (?, ?, ?, 1, ?, ?)""",
-                (version_id, workspace_id, agent_id, payload.definition.model_dump_json(), created_at),
-            )
+        try:
+            with self.lock, self.connection:
+                self.connection.execute(
+                    """INSERT INTO agents
+                    (id, workspace_id, slug, name, description, status, current_version_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)""",
+                    (
+                        agent_id,
+                        workspace_id,
+                        payload.slug,
+                        payload.definition.identity.name,
+                        payload.definition.identity.description,
+                        version_id,
+                        created_at,
+                    ),
+                )
+                self.connection.execute(
+                    """INSERT INTO agent_versions
+                    (id, workspace_id, agent_id, version, definition_json, created_at)
+                    VALUES (?, ?, ?, 1, ?, ?)""",
+                    (version_id, workspace_id, agent_id, payload.definition.model_dump_json(), created_at),
+                )
+        except sqlite3.IntegrityError as exc:
+            if "agents.workspace_id, agents.slug" in str(exc):
+                raise ValueError("Agent slug already exists in this workspace") from exc
+            raise
         return self.get_agent(workspace_id, agent_id) or {}
 
     def create_agent_version(

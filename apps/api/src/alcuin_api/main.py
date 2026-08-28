@@ -517,7 +517,10 @@ def create_app(
         require_workspace_operator(scope)
         validate_knowledge_references(scope.workspace_id, payload.definition)
         validate_agent_extension_references(scope.workspace_id, payload.definition)
-        return repository.create_agent(scope.workspace_id, payload)
+        try:
+            return repository.create_agent(scope.workspace_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/v1/agents/{agent_id}")
     async def get_agent(agent_id: str, scope: ScopeDependency) -> dict:
