@@ -9,7 +9,7 @@
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "test": "pnpm --filter @alcuin/contracts test && uv run --project apps/api pytest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test && pnpm --filter @alcuin/web exec next typegen"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",
