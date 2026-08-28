@@ -8,12 +8,12 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol, TypedDict
 
 import httpx
+from alcuin_storage import RuntimeRepository
 from langgraph.graph import END, START, StateGraph
 
 from .config import ProviderConfig, Settings
 from alcuin_core.contracts import AgentDefinition, EventType, ImageAttachment
 from .security import redact_sensitive, redact_text
-from .store import Store
 from .tools import ToolContext, ToolError, ToolExecutor
 
 
@@ -626,7 +626,7 @@ class OpenAICompatibleRuntime:
 class RuntimeOrchestrator:
     def __init__(
         self,
-        store: Store,
+        store: RuntimeRepository,
         settings: Settings,
         tool_executor: ToolExecutor | None = None,
         provider_transport: httpx.AsyncBaseTransport | None = None,

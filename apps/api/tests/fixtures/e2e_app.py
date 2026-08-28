@@ -5,7 +5,7 @@ from typing import Any
 from alcuin_api.config import Settings
 from alcuin_api.knowledge import KnowledgeChunk, KnowledgeHit, KnowledgeService
 from alcuin_api.main import create_app
-from alcuin_api.store import Store
+from alcuin_storage import SqliteStore
 from alcuin_operations_copilot import operations_demo_adapter, seed_operations_demo
 
 
@@ -93,7 +93,7 @@ class MemoryKnowledgeIndex:
 
 
 settings = Settings()
-store = Store(settings.database_path)
+store = SqliteStore(settings.database_path)
 seed_operations_demo(store)
 knowledge_service = KnowledgeService(store, MemoryKnowledgeIndex())
 app = create_app(

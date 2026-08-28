@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
+from alcuin_storage import KnowledgeRepository
 from qdrant_client import QdrantClient, models
 
 from .config import Settings
 from alcuin_core.contracts import KnowledgeDocumentCreate
-from .store import Store
 from .tools import ToolCitation, ToolContext, ToolDefinition, ToolError, ToolResult
 
 
@@ -463,7 +463,7 @@ class QdrantKnowledgeIndex:
 
 
 class KnowledgeService:
-    def __init__(self, store: Store, index: KnowledgeIndex) -> None:
+    def __init__(self, store: KnowledgeRepository, index: KnowledgeIndex) -> None:
         self.store = store
         self.index = index
         self.index_revision = getattr(index, "index_revision", "test-v1")

@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 import httpx
+from alcuin_storage import ControlPlaneRepository, SqliteStore
 from fastapi import (
     Depends,
     FastAPI,
@@ -77,7 +78,6 @@ from .mcp_gateway import MCPGateway
 from .openapi_gateway import OpenAPIGateway
 from .runtime import RuntimeOrchestrator, RuntimeRequest
 from .security import RequestScope, issue_embed_token, resolve_scope
-from .store import Store
 from .chat_sse import project_execution_event
 from .tools import ToolExecutor, ToolRegistry
 from .web_search import WebSearchService, is_public_http_url
@@ -102,7 +102,7 @@ def resolve_event_cursor(after: int, last_event_id: str | None) -> int:
 
 def create_app(
     settings: Settings | None = None,
-    store: Store | None = None,
+    store: ControlPlaneRepository | None = None,
     knowledge_service: KnowledgeService | None = None,
     document_parser: DocumentParser | None = None,
     mcp_gateway: MCPGateway | None = None,
@@ -111,7 +111,7 @@ def create_app(
     provider_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
-    repository = store or Store(settings.database_path)
+    repository = store or SqliteStore(settings.database_path)
     web_search_service = (
         WebSearchService(settings) if (settings.searxng_url or "").strip() else None
     )

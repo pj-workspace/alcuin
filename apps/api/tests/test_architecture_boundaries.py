@@ -48,6 +48,27 @@ def test_domain_extension_depends_inward_on_core_only() -> None:
     assert roots.isdisjoint({"alcuin_api", "fastapi", "langgraph"})
 
 
+def test_storage_package_depends_inward_and_services_use_ports() -> None:
+    storage_roots = imported_roots(
+        REPOSITORY_ROOT / "packages/python/alcuin-storage/src/alcuin_storage"
+    )
+    assert "alcuin_core" in storage_roots
+    assert storage_roots.isdisjoint(
+        {
+            "alcuin_api",
+            "alcuin_operations_copilot",
+            "fastapi",
+            "langgraph",
+            "qdrant_client",
+        }
+    )
+
+    for service in ("runtime.py", "knowledge.py", "extension_tools.py"):
+        source = (REPOSITORY_ROOT / "apps/api/src/alcuin_api" / service).read_text()
+        assert "alcuin_storage" in source
+        assert "sqlite3" not in source
+
+
 def test_python_and_typescript_share_platform_contract_vocabulary() -> None:
     source = (
         REPOSITORY_ROOT / "packages/contracts/src/platform.ts"

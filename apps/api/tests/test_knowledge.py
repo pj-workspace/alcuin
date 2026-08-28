@@ -25,7 +25,7 @@ from alcuin_api.knowledge import (
     chunk_document,
 )
 from alcuin_api.main import create_app
-from alcuin_api.store import Store
+from alcuin_storage import SqliteStore as Store
 from alcuin_api.tools import ToolContext, ToolError
 from alcuin_operations_copilot import seed_operations_demo
 

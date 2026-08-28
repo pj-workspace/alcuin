@@ -1,3 +1,5 @@
+"""SQLite persistence adapter for local Alcuin development and verification."""
+
 from __future__ import annotations
 
 import json
@@ -20,8 +22,8 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:20]}"
 
 
-class Store:
-    """Small SQL repository with workspace scoping enforced in every lookup."""
+class SqliteStore:
+    """SQLite repository with Workspace scoping enforced in every resource lookup."""
 
     def __init__(self, database_path: str) -> None:
         if database_path != ":memory:":

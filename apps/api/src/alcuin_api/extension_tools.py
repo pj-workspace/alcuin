@@ -10,9 +10,9 @@ from alcuin_core.contracts import (
     MCPEntrypoint,
     OpenAPIEntrypoint,
 )
+from alcuin_storage import ExtensionRepository
 from .mcp_gateway import MCPGateway
 from .openapi_gateway import OpenAPIGateway
-from .store import Store
 from .tools import ToolContext, ToolDefinition, ToolError, ToolResult
 
 
@@ -43,7 +43,7 @@ class ExtensionToolService:
 
     def __init__(
         self,
-        store: Store,
+        store: ExtensionRepository,
         mcp_gateway: MCPGateway,
         openapi_gateway: OpenAPIGateway,
         builtin_adapters: Mapping[str, BuiltinToolAdapter] | None = None,

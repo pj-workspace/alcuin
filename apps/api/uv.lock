@@ -18,6 +18,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "alcuin-core" },
+    { name = "alcuin-storage" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "jsonschema" },
@@ -49,6 +50,7 @@ dev = [
 requires-dist = [
     { name = "alcuin-core", editable = "../../packages/python/alcuin-core" },
     { name = "alcuin-operations-copilot", marker = "extra == 'dev'", editable = "../../extensions/operations-copilot" },
+    { name = "alcuin-storage", editable = "../../packages/python/alcuin-storage" },
     { name = "fastapi", specifier = ">=0.115.0,<1.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0" },
     { name = "jsonschema", specifier = ">=4.23.0,<5.0" },
@@ -100,6 +102,20 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "alcuin-core", editable = "../../packages/python/alcuin-core" }]
+
+[[package]]
+name = "alcuin-storage"
+version = "0.1.0"
+source = { editable = "../../packages/python/alcuin-storage" }
+dependencies = [
+    { name = "alcuin-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "alcuin-core", editable = "../../packages/python/alcuin-core" }]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.3.0,<9.0" }]
 
 [[package]]
 name = "annotated-doc"
