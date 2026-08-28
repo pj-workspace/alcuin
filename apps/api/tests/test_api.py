@@ -19,6 +19,7 @@ def make_client() -> TestClient:
             database_path=":memory:",
             openai_api_key=None,
             deepseek_api_key=None,
+            searxng_url="",
             cors_origins="http://localhost:3000",
         ),
         store=store,
@@ -42,6 +43,26 @@ def test_provider_status_never_returns_credentials() -> None:
         assert deepseek["default_model"] == "deepseek-v4-flash-vision-exp"
         assert deepseek["input_modalities"] == ["text", "image"]
         assert "api_key" not in deepseek
+
+
+def test_web_search_tool_is_registered_only_when_searxng_is_configured() -> None:
+    store = Store(":memory:")
+    app = create_app(
+        Settings(database_path=":memory:", searxng_url="http://searx.test"),
+        store=store,
+    )
+    with TestClient(app):
+        runtime = app.state.runtime.provider_runtime
+        schemas = runtime.tool_executor.provider_schemas(["web.search"])
+        assert schemas[0]["function"]["name"] == "web_search"
+        assert schemas[0]["function"]["parameters"]["properties"]["depth"]["enum"] == [
+            "quick",
+            "deep",
+        ]
+
+    with make_client() as client:
+        runtime = client.app.state.runtime.provider_runtime
+        assert runtime.tool_executor.provider_schemas(["web.search"]) == []
 
 
 def test_run_emits_ordered_terminal_events() -> None:

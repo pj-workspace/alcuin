@@ -15,6 +15,8 @@ services:
       ALCUIN_DEEPSEEK_BASE_URL: ${ALCUIN_DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       ALCUIN_DEEPSEEK_MODEL: ${ALCUIN_DEEPSEEK_MODEL:-deepseek-v4-flash-vision-exp}
       ALCUIN_DEEPSEEK_PROTOCOL: ${ALCUIN_DEEPSEEK_PROTOCOL:-chat_completions}
+      ALCUIN_SEARXNG_URL: ${ALCUIN_SEARXNG_URL:-http://searxng:8080}
+      ALCUIN_SEARXNG_TIMEOUT_SECONDS: ${ALCUIN_SEARXNG_TIMEOUT_SECONDS:-8}
     ports:
       - "8000:8000"
     volumes:
@@ -55,6 +57,13 @@ services:
   redis:
     image: redis:7-alpine
     profiles: ["platform-infra"]
+
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    ports:
+      - "9888:8080"
+    volumes:
+      - ./infra/searxng/settings.yml:/etc/searxng/settings.yml:ro
 
   qdrant:
     image: qdrant/qdrant:v1.15
