@@ -185,12 +185,12 @@ export const alcuinApi = {
         },
       }),
     }),
-  createEmbedSession: (agentId: string) =>
+  createEmbedSession: (agentId: string, origin: string) =>
     request<{ token: string; expires_at: number; agent_version_id: string; origin: string }>("/v1/embed/sessions", {
       method: "POST",
       body: JSON.stringify({
         agent_id: agentId,
-        origin: "http://localhost:3000",
+        origin,
         allowed_actions: ["thread:create", "run:create", "run:read", "approval:decide"],
       }),
     }),

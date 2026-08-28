@@ -69,7 +69,7 @@ export function EmbedView({ agent }: { agent?: Agent }) {
 
   async function createSession() {
     try {
-      const session = await alcuinApi.createEmbedSession(currentAgent.id);
+      const session = await alcuinApi.createEmbedSession(currentAgent.id, window.location.origin);
       setToken(session.token);
       notify(t("Origin-bound session created"));
     } catch (error) {

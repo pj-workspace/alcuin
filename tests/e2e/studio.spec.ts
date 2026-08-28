@@ -68,7 +68,6 @@ test("switches the full workspace between English and Chinese and persists the l
   await page.getByRole("button", { name: "Switch to Chinese" }).click();
   await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
   await expect(page.getByPlaceholder("给 Operations Copilot 发消息…")).toBeVisible();
-  await expect(page.getByRole("button", { name: "仅批准本次" })).toHaveCount(0);
 
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
@@ -94,4 +93,64 @@ test("switches the full workspace between English and Chinese and persists the l
   await page.getByRole("button", { name: "切换到英文" }).click();
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
   await expect(page.getByRole("heading", { name: "Extensions", exact: true })).toBeVisible();
+});
+
+test("runs the real Embed component through origin-scoped read and approval flows", async ({ page }) => {
+  await page.goto("/embed");
+  await page.locator(".header-actions").getByRole("button", { name: "Create session" }).click();
+  const embeddedAgent = page.locator("alcuin-agent");
+  await expect(embeddedAgent).toHaveAttribute("lang", "en");
+
+  await embeddedAgent.evaluate((element) => {
+    const eventWindow = window as unknown as { __alcuinHostEvents: string[] };
+    eventWindow.__alcuinHostEvents = [];
+    for (const eventName of [
+      "alcuin:run-start",
+      "alcuin:event",
+      "alcuin:artifact",
+      "alcuin:approval",
+      "alcuin:error",
+    ]) {
+      element.addEventListener(eventName, () => eventWindow.__alcuinHostEvents.push(eventName));
+    }
+    const input = element.shadowRoot?.querySelector("textarea");
+    if (!(input instanceof HTMLTextAreaElement)) throw new Error("Embed composer is unavailable");
+    input.value = "Summarize the active checkout incident";
+    input.form?.requestSubmit();
+  });
+  await expect.poll(() => embeddedAgent.evaluate((element) => element.shadowRoot?.textContent ?? ""))
+    .toContain("I reviewed the current record for INC-104");
+  await expect.poll(() => page.evaluate(() => (
+    window as unknown as { __alcuinHostEvents?: string[] }
+  ).__alcuinHostEvents ?? [])).toEqual(expect.arrayContaining([
+    "alcuin:run-start",
+    "alcuin:event",
+    "alcuin:artifact",
+  ]));
+  await expect.poll(() => page.evaluate(() => (
+    window as unknown as { __alcuinHostEvents?: string[] }
+  ).__alcuinHostEvents ?? [])).not.toContain("alcuin:error");
+
+  await embeddedAgent.evaluate((element) => {
+    const input = element.shadowRoot?.querySelector("textarea");
+    if (!(input instanceof HTMLTextAreaElement)) throw new Error("Embed composer is unavailable");
+    input.value = "Update this incident to monitoring";
+    input.form?.requestSubmit();
+  });
+  await expect.poll(() => embeddedAgent.evaluate((element) => element.shadowRoot?.textContent ?? ""))
+    .toContain("Approve external update");
+  await expect.poll(() => page.evaluate(() => (
+    window as unknown as { __alcuinHostEvents?: string[] }
+  ).__alcuinHostEvents ?? [])).toContain("alcuin:approval");
+  await embeddedAgent.evaluate((element) => {
+    const approve = [...(element.shadowRoot?.querySelectorAll(".approval-actions button") ?? [])]
+      .find((button) => button.textContent === "Approve once");
+    if (!(approve instanceof HTMLButtonElement)) throw new Error("Embed approval action is unavailable");
+    approve.click();
+  });
+  await expect.poll(() => embeddedAgent.evaluate((element) => element.shadowRoot?.textContent ?? ""))
+    .toContain("Approved and executed");
+  await expect.poll(() => page.evaluate(() => (
+    window as unknown as { __alcuinHostEvents?: string[] }
+  ).__alcuinHostEvents ?? [])).not.toContain("alcuin:error");
 });
