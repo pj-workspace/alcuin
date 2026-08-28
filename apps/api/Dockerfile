@@ -8,6 +8,7 @@ WORKDIR /workspace
 RUN pip install --no-cache-dir uv
 COPY apps/api/pyproject.toml apps/api/uv.lock ./apps/api/
 COPY packages/python/alcuin-core ./packages/python/alcuin-core
+COPY packages/python/alcuin-knowledge ./packages/python/alcuin-knowledge
 COPY packages/python/alcuin-storage ./packages/python/alcuin-storage
 COPY extensions/operations-copilot ./extensions/operations-copilot
 COPY apps/api/src ./apps/api/src

@@ -8,6 +8,15 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 import httpx
+from alcuin_knowledge import (
+    DocumentParseError,
+    DocumentParser,
+    DocumentTooLargeError,
+    FileDocumentParser,
+    KnowledgeService,
+    QdrantKnowledgeIndex,
+    UnsupportedDocumentError,
+)
 from alcuin_storage import ControlPlaneRepository, RepositoryConflict, open_repository
 from fastapi import (
     Depends,
@@ -51,13 +60,6 @@ from alcuin_core.contracts import (
     RunCreate,
     ThreadCreate,
 )
-from .document_parser import (
-    DocumentParseError,
-    DocumentParser,
-    DocumentTooLargeError,
-    FileDocumentParser,
-    UnsupportedDocumentError,
-)
 from .extensions import (
     check_extension_health,
     inspect_manifest,
@@ -72,7 +74,11 @@ from .extension_tools import (
     ExtensionToolService,
     extension_tool_name,
 )
-from .knowledge import KnowledgeService, QdrantKnowledgeIndex
+from .knowledge_wiring import (
+    document_limits,
+    knowledge_config,
+    knowledge_tool_definition,
+)
 from .mcp_gateway import MCPGateway
 from .openapi_gateway import OpenAPIGateway
 from .runtime import RuntimeOrchestrator, RuntimeRequest
@@ -120,12 +126,14 @@ def create_app(
         WebSearchService(settings) if (settings.searxng_url or "").strip() else None
     )
     configured_knowledge_service = knowledge_service or (
-        KnowledgeService(repository, QdrantKnowledgeIndex(settings))
+        KnowledgeService(repository, QdrantKnowledgeIndex(knowledge_config(settings)))
         if (settings.qdrant_url or "").strip()
         and (settings.dashscope_api_key or "").strip()
         else None
     )
-    configured_document_parser = document_parser or FileDocumentParser(settings)
+    configured_document_parser = document_parser or FileDocumentParser(
+        document_limits(settings)
+    )
     configured_mcp_gateway = mcp_gateway or MCPGateway()
     configured_openapi_gateway = openapi_gateway or OpenAPIGateway(
         timeout_seconds=settings.extension_health_timeout_seconds
@@ -134,7 +142,7 @@ def create_app(
     if web_search_service:
         definitions.append(web_search_service.tool_definition())
     if configured_knowledge_service:
-        definitions.append(configured_knowledge_service.tool_definition())
+        definitions.append(knowledge_tool_definition(configured_knowledge_service))
     tool_registry = ToolRegistry(definitions)
     extension_tool_service = ExtensionToolService(
         repository,

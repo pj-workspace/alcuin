@@ -10,8 +10,8 @@
     "db:migrate": "uv run --project apps/api alembic -c packages/python/alcuin-storage/alembic.ini upgrade head",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
-    "test": "pnpm --filter @alcuin/contracts test && ./scripts/with-test-postgres.sh uv run --project apps/api pytest",
-    "test:e2e": "./scripts/with-test-postgres.sh pnpm test:e2e:run",
+    "test": "pnpm --filter @alcuin/contracts test && ./scripts/with-test-services.sh uv run --project apps/api pytest",
+    "test:e2e": "./scripts/with-test-services.sh pnpm test:e2e:run",
     "test:e2e:run": "pnpm --filter @alcuin/web exec next typegen && playwright test"
   },
   "devDependencies": {

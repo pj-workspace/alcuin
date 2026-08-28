@@ -9,15 +9,16 @@ from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-from alcuin_api.config import Settings
-from alcuin_core.contracts import KnowledgeSourceCreate
-from alcuin_api.document_parser import (
+from alcuin_knowledge import (
+    DocumentLimits,
     DocumentParseError,
     DocumentTooLargeError,
     FileDocumentParser,
+    KnowledgeService,
     UnsupportedDocumentError,
 )
-from alcuin_api.knowledge import KnowledgeService
+from alcuin_api.config import Settings
+from alcuin_core.contracts import KnowledgeSourceCreate
 from alcuin_api.main import create_app
 from support import create_test_store
 
@@ -47,10 +48,10 @@ class CapturingIndex:
 
 def parser() -> FileDocumentParser:
     return FileDocumentParser(
-        Settings(
-            knowledge_upload_max_bytes=64 * 1024,
-            knowledge_extracted_max_chars=10_000,
-            knowledge_pdf_max_pages=10,
+        DocumentLimits(
+            upload_max_bytes=64 * 1024,
+            extracted_max_chars=10_000,
+            pdf_max_pages=10,
         )
     )
 

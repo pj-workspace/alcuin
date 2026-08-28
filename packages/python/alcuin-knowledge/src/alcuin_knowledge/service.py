@@ -12,9 +12,10 @@ import httpx
 from alcuin_storage import KnowledgeRepository
 from qdrant_client import QdrantClient, models
 
-from .config import Settings
 from alcuin_core.contracts import KnowledgeDocumentCreate
-from .tools import ToolCitation, ToolContext, ToolDefinition, ToolError, ToolResult
+from alcuin_core.tools import ToolCitation, ToolContext, ToolError, ToolResult
+
+from .config import KnowledgeConfig
 
 
 @dataclass(frozen=True)
@@ -80,13 +81,13 @@ class QwenEmbeddingProvider:
 
     def __init__(
         self,
-        settings: Settings,
+        settings: KnowledgeConfig,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if not (settings.dashscope_api_key or "").strip():
             raise ValueError("DashScope embedding credentials are not configured")
-        self.model = settings.qwen_embedding_model
-        self.dimensions = settings.knowledge_dense_dimensions
+        self.model = settings.embedding_model
+        self.dimensions = settings.dense_dimensions
         self.batch_size = settings.embedding_batch_size
         self.max_retries = settings.embedding_max_retries
         self.api_key = settings.dashscope_api_key or ""
@@ -233,12 +234,12 @@ class QdrantKnowledgeIndex:
 
     def __init__(
         self,
-        settings: Settings,
+        settings: KnowledgeConfig,
         client: QdrantClient | None = None,
         embedding_provider: EmbeddingProvider | None = None,
     ) -> None:
         self.settings = settings
-        self.index_revision = settings.knowledge_index_revision
+        self.index_revision = settings.index_revision
         self.client = client or QdrantClient(
             url=str(settings.qdrant_url),
             api_key=settings.qdrant_api_key,
@@ -259,13 +260,13 @@ class QdrantKnowledgeIndex:
             await self._ensure_collection()
             info = await asyncio.to_thread(
                 self.client.get_collection,
-                self.settings.knowledge_collection,
+                self.settings.collection,
             )
         except Exception as exc:
             return {"status": "unhealthy", "detail": type(exc).__name__}
         return {
             "status": "healthy",
-            "collection": self.settings.knowledge_collection,
+            "collection": self.settings.collection,
             "points_count": int(info.points_count or 0),
             "embedding_provider": "qwen-dashscope",
             "embedding_model": self.embedding_provider.model,
@@ -313,8 +314,27 @@ class QdrantKnowledgeIndex:
             for index, chunk in enumerate(chunks)
         ]
         await asyncio.to_thread(
+            self.client.delete,
+            collection_name=self.settings.collection,
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="workspace_id",
+                            match=models.MatchValue(value=workspace_id),
+                        ),
+                        models.FieldCondition(
+                            key="document_id",
+                            match=models.MatchValue(value=document_id),
+                        ),
+                    ]
+                )
+            ),
+            wait=True,
+        )
+        await asyncio.to_thread(
             self.client.upload_points,
-            collection_name=self.settings.knowledge_collection,
+            collection_name=self.settings.collection,
             points=points,
             batch_size=min(64, max(1, len(points))),
             wait=True,
@@ -345,7 +365,7 @@ class QdrantKnowledgeIndex:
         prefetch_limit = max(12, limit * 4)
         response = await asyncio.to_thread(
             self.client.query_points,
-            collection_name=self.settings.knowledge_collection,
+            collection_name=self.settings.collection,
             prefetch=[
                 models.Prefetch(
                     query=query_embedding.dense,
@@ -396,7 +416,7 @@ class QdrantKnowledgeIndex:
         await self._ensure_collection()
         await asyncio.to_thread(
             self.client.delete,
-            collection_name=self.settings.knowledge_collection,
+            collection_name=self.settings.collection,
             points_selector=models.FilterSelector(
                 filter=models.Filter(
                     must=[
@@ -424,13 +444,13 @@ class QdrantKnowledgeIndex:
             self._collection_ready = True
 
     def _ensure_collection_sync(self) -> None:
-        name = self.settings.knowledge_collection
+        name = self.settings.collection
         if not self.client.collection_exists(name):
             self.client.create_collection(
                 collection_name=name,
                 vectors_config={
                     self.dense_vector_name: models.VectorParams(
-                        size=self.settings.knowledge_dense_dimensions,
+                        size=self.settings.dense_dimensions,
                         distance=models.Distance.COSINE,
                     )
                 },
@@ -446,7 +466,7 @@ class QdrantKnowledgeIndex:
             sparse_config = sparse_vectors.get(self.sparse_vector_name)
             if (
                 dense_config is None
-                or dense_config.size != self.settings.knowledge_dense_dimensions
+                or dense_config.size != self.settings.dense_dimensions
                 or sparse_config is None
                 or sparse_config.modifier is not None
             ):
@@ -470,33 +490,6 @@ class KnowledgeService:
 
     async def aclose(self) -> None:
         await self.index.aclose()
-
-    def tool_definition(self) -> ToolDefinition:
-        return ToolDefinition(
-            name="knowledge.search",
-            description=(
-                "Search only the governed knowledge sources attached to this Agent version. "
-                "Use it for organization-specific facts, documents, policies, and runbooks."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "minLength": 2, "maxLength": 500},
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 8,
-                        "default": 5,
-                    },
-                },
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-            handler=self.execute,
-            mutating=False,
-            timeout_seconds=20.0,
-            max_calls_per_run=3,
-        )
 
     async def ingest_document(
         self,

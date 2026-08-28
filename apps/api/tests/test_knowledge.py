@@ -9,20 +9,21 @@ import pytest
 from fastapi.testclient import TestClient
 from qdrant_client import models
 
+from alcuin_knowledge import (
+    EmbeddingProviderError,
+    HybridEmbedding,
+    KnowledgeConfig,
+    KnowledgeHit,
+    KnowledgeService,
+    QdrantKnowledgeIndex,
+    QwenEmbeddingProvider,
+    chunk_document,
+)
 from alcuin_api.config import Settings
 from alcuin_core.contracts import (
     AgentDefinition,
     KnowledgeDocumentCreate,
     KnowledgeSourceCreate,
-)
-from alcuin_api.knowledge import (
-    EmbeddingProviderError,
-    HybridEmbedding,
-    KnowledgeHit,
-    KnowledgeService,
-    QwenEmbeddingProvider,
-    QdrantKnowledgeIndex,
-    chunk_document,
 )
 from alcuin_api.main import create_app
 from alcuin_storage import PostgresStore
@@ -247,10 +248,10 @@ class FakeEmbeddingProvider:
 async def test_qdrant_hybrid_query_has_mandatory_scope_filter() -> None:
     client = CapturingQdrantClient()
     index = QdrantKnowledgeIndex(
-        Settings(
+        KnowledgeConfig(
             qdrant_url="http://qdrant.test",
             dashscope_api_key="test-key",
-            knowledge_dense_dimensions=32,
+            dense_dimensions=32,
         ),
         client=client,  # type: ignore[arg-type]
         embedding_provider=FakeEmbeddingProvider(),
@@ -275,10 +276,10 @@ async def test_qdrant_hybrid_query_has_mandatory_scope_filter() -> None:
 
 def test_qdrant_rejects_an_incompatible_existing_collection() -> None:
     index = QdrantKnowledgeIndex(
-        Settings(
+        KnowledgeConfig(
             qdrant_url="http://qdrant.test",
             dashscope_api_key="test-key",
-            knowledge_dense_dimensions=1_024,
+            dense_dimensions=1_024,
         ),
         client=IncompatibleQdrantClient(),  # type: ignore[arg-type]
         embedding_provider=FakeEmbeddingProvider(),
@@ -317,10 +318,11 @@ async def test_qwen_embedding_batches_and_preserves_provider_order() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         provider = QwenEmbeddingProvider(
-            Settings(
+            KnowledgeConfig(
+                qdrant_url="http://qdrant.test",
                 dashscope_api_key="secret-test-key",
                 dashscope_http_api_url="https://dashscope.test/api/v1",
-                knowledge_dense_dimensions=32,
+                dense_dimensions=32,
             ),
             client=client,
         )
@@ -350,10 +352,11 @@ async def test_qwen_embedding_retries_transient_errors_and_redacts_failures() ->
             return httpx.Response(429, text="secret provider quota detail", request=request)
         return httpx.Response(200, json=qwen_response(["query"]), request=request)
 
-    settings = Settings(
+    settings = KnowledgeConfig(
+        qdrant_url="http://qdrant.test",
         dashscope_api_key="secret-test-key",
         dashscope_http_api_url="https://dashscope.test/api/v1",
-        knowledge_dense_dimensions=32,
+        dense_dimensions=32,
         embedding_max_retries=1,
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(transient_handler)) as client:

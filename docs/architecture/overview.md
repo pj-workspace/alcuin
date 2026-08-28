@@ -56,6 +56,7 @@ apps/web/app                     Next.js routing only
 apps/web/features                Studio, Agents, Extensions, Runs, Embed, and Shell modules
 apps/web/shared                  Shared web UI, localization, and application SDK wiring
 packages/python/alcuin-core      Framework-neutral Python contracts and tool envelopes
+packages/python/alcuin-knowledge Domain-neutral document ingestion, Qwen embeddings, and Qdrant retrieval
 packages/python/alcuin-storage   Persistence ports, Alembic migrations, and pooled PostgreSQL Store
 packages/contracts              Shared TypeScript contract vocabulary
 packages/sdk                    Configurable framework-neutral REST/SSE client
@@ -65,7 +66,7 @@ packages/sse-client             Browser-neutral resumable SSE transport
 extensions/operations-copilot   Explicit domain example depending inward on Core
 ```
 
-Dependencies point inward: applications may compose packages; Core cannot import applications, runtime frameworks, infrastructure clients, or domain Extensions; web shared modules cannot import features; features cannot import Next routes. Repository tests enforce these initial boundaries. Runtime orchestration and connector implementations still live inside `apps/api` during the staged extraction and must not be described as independent packages until they move.
+Dependencies point inward: applications may compose packages; Core cannot import applications, runtime frameworks, infrastructure clients, or domain Extensions; web shared modules cannot import features; features cannot import Next routes. Repository tests enforce these initial boundaries. Knowledge ingestion and retrieval live in `alcuin-knowledge`; runtime orchestration and the remaining connector implementations still live inside `apps/api` during staged extraction and must not be described as independent packages until they move.
 
 Persistence consumers depend on structural `RuntimeRepository`, `ExtensionRepository`, and `KnowledgeRepository` ports from `alcuin-storage`. The API composes those ports with the pooled `PostgresStore`; services do not import psycopg or manage transactions. PostgreSQL is the single implemented control-plane database and Alembic is its only schema migration path.
 
@@ -102,6 +103,7 @@ Mutating tools pause at `approval.required`. An approval decision does not manuf
 See [ADR-0001](adr-0001-runtime-extension-contracts.md) for the contract decisions implemented by the prototype.
 See [ADR-0002](adr-0002-modular-package-boundaries.md) for the implemented package dependency rules and staged extraction order.
 See [ADR-0003](adr-0003-storage-ports.md) for the verified storage boundary and adapter strategy.
+See [ADR-0004](adr-0004-knowledge-package.md) for the implemented Knowledge package and retrieval boundaries.
 
 ## Remaining Decisions
 

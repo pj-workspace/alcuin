@@ -69,10 +69,22 @@ def test_storage_package_depends_inward_and_services_use_ports() -> None:
         for source in storage_source.rglob("*.py")
     )
 
-    for service in ("runtime.py", "knowledge.py", "extension_tools.py"):
+    for service in ("runtime.py", "extension_tools.py"):
         source = (REPOSITORY_ROOT / "apps/api/src/alcuin_api" / service).read_text()
         assert "alcuin_storage" in source
         assert "sqlite3" not in source
+
+    knowledge_source = (
+        REPOSITORY_ROOT
+        / "packages/python/alcuin-knowledge/src/alcuin_knowledge"
+    )
+    knowledge_roots = imported_roots(knowledge_source)
+    assert {"alcuin_core", "alcuin_storage", "qdrant_client"}.issubset(
+        knowledge_roots
+    )
+    assert knowledge_roots.isdisjoint(
+        {"alcuin_api", "alcuin_operations_copilot", "fastapi", "langgraph"}
+    )
 
     api_composition = (
         REPOSITORY_ROOT / "apps/api/src/alcuin_api/main.py"
