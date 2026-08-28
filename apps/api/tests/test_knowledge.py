@@ -27,6 +27,7 @@ from alcuin_api.knowledge import (
 from alcuin_api.main import create_app
 from alcuin_api.store import Store
 from alcuin_api.tools import ToolContext, ToolError
+from alcuin_extensions.operations_toolkit import seed_operations_demo
 
 
 class FakeKnowledgeIndex:
@@ -377,6 +378,7 @@ async def test_qwen_embedding_retries_transient_errors_and_redacts_failures() ->
 
 def test_knowledge_api_is_scoped_idempotent_and_reference_safe() -> None:
     store = Store(":memory:")
+    seed_operations_demo(store)
     add_workspace(store, "ws_other")
     index = FakeKnowledgeIndex()
     service = KnowledgeService(store, index)

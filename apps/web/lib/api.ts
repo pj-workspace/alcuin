@@ -42,7 +42,7 @@ export const alcuinApi = {
   createThread: (agentId: string, context: Record<string, unknown> = {}) =>
     request<Thread>("/v1/threads", {
       method: "POST",
-      body: JSON.stringify({ agent_id: agentId, title: "Operations review", context }),
+      body: JSON.stringify({ agent_id: agentId, title: "Working session", context }),
     }),
   createRun: (
     threadId: string,
@@ -177,15 +177,15 @@ export const alcuinApi = {
       body: JSON.stringify({
         manifest: {
           manifest_version: "1",
-          id: "northstar.docs",
-          name: "Northstar Knowledge",
+          id: "example.docs",
+          name: "Example Knowledge",
           version: "0.1.0",
           description: "Search internal runbooks through MCP.",
           compatibility: ">=0.1.0",
           contributions: { tools: [], skills: [], agent_templates: [], knowledge_connectors: [], ui_blocks: [] },
-          entrypoints: [{ type: "mcp", transport: "stdio", command: "python3", args: ["-m", "northstar_mcp"] }],
+          entrypoints: [{ type: "mcp", transport: "stdio", command: "python3", args: ["-m", "example_mcp"] }],
           config_schema: { type: "object" },
-          permissions: [{ id: "docs:read", reason: "Search operational runbooks", risk: "low", required: true }],
+          permissions: [{ id: "docs:read", reason: "Search internal documents", risk: "low", required: true }],
           credential_requirements: [],
         },
       }),
@@ -205,11 +205,11 @@ export const alcuinApi = {
     after = 0,
   ) => {
     await streamJsonSse({
-      url: `${API_URL}/v1/runs/${runId}/events?protocol=tcm`,
+      url: `${API_URL}/v1/runs/${runId}/events?protocol=chat`,
       headers,
       lastEventId: after,
       onEvent(value) {
-        const event = executionEventFromTcmFrame(value);
+        const event = executionEventFromChatFrame(value);
         if (event) onEvent(event);
       },
       isTerminal(value) {
@@ -219,7 +219,7 @@ export const alcuinApi = {
   },
 };
 
-function executionEventFromTcmFrame(value: unknown): ExecutionEvent | null {
+function executionEventFromChatFrame(value: unknown): ExecutionEvent | null {
   if (!value || typeof value !== "object") return null;
   const row = value as Record<string, unknown>;
   const base = {

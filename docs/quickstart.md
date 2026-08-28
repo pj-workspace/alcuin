@@ -12,7 +12,7 @@ pnpm dev
 
 Open `http://localhost:3000/studio`.
 
-To use the live DeepSeek vision runtime, set `ALCUIN_DEEPSEEK_API_KEY` in the ignored local `.env`. The prototype selects `deepseek-v4-flash-vision-exp` through Chat Completions; without a key it falls back to the deterministic runtime.
+To use the live DeepSeek vision runtime, set `ALCUIN_DEEPSEEK_API_KEY` in the ignored local `.env`. The prototype selects `deepseek-v4-flash-vision-exp` through Chat Completions; without a key the domain-neutral Alcuin Starter records a local preview without invoking tools or inventing results.
 
 Start the self-hosted retrieval dependencies before testing `web.search` or `knowledge.search`:
 
@@ -28,7 +28,7 @@ Qdrant is exposed at `http://localhost:6333`. Set `ALCUIN_DASHSCOPE_API_KEY` in 
 
 1. In **Studio**, ask for a current public fact and verify that the trace shows `web.search`, followed by citation sources and a final Markdown answer. Normal searches start in quick mode; the runtime exposes at most two web calls per Run.
 2. Attach a PNG, JPEG, WebP, or GIF and ask a question about it. The compact execution panel streams reasoning separately from the final Markdown answer and collapses after the answer starts. Attachments are limited to four images of 5 MiB each.
-3. Run “Update this incident to monitoring.” The Run must pause at an approval card. Approve or deny it and inspect the terminal trace.
+3. Bind a mutating Extension tool and request that change. The Run must pause at an approval card. Approve or deny it and inspect the terminal trace. To use the optional Operations Copilot scenario, run `uv run --project apps/api uvicorn examples.operations_copilot.app:app --reload --port 8000` instead of the Core API.
 4. In **Agents → Knowledge**, upload a TXT, Markdown, PDF, or DOCX file (8 MiB maximum), or switch to **Paste text**. Verify that the source shows its document/chunk counts, remains bound to the draft definition, and automatically enables `knowledge.search`. Save and publish, then ask a source-specific question in Studio and verify a `Retrieve` trace plus `knowledge://` citations.
 5. In **Agents**, create or select an Agent, then edit its identity or instructions. In **Capabilities**, bind `web.search` and any available Extension tools from the runtime-backed Workspace Tool Catalog; in **Knowledge**, binding a source automatically binds `knowledge.search`. Creation starts at draft v1; saving creates another immutable version, publishing makes it embeddable, and the selected Agent persists across refreshes.
 6. In **Extensions**, choose **Connect capability**, then import an MCP server, OpenAPI document, or Alcuin Manifest. Confirm the full `Inspect → Review → Install disabled → Bind credentials → Health check → Enable` lifecycle. MCP inspection performs live tool discovery; OpenAPI inspection lets you select operations before installation.
@@ -72,7 +72,7 @@ Run payloads remain backward-compatible with text-only clients:
 
 Image bytes are validated at the API boundary and are not written into execution events or logs.
 
-The canonical run stream is available from `GET /v1/runs/{run_id}/events`. Studio requests the lightweight compatible projection with `?protocol=tcm`, which emits `thinking-delta`, `text-delta`, tool, approval, artifact, citation, error, and terminal `done` frames. This `done` frame only closes the stream; it is not a callable tool and does not appear as an execution step.
+The canonical run stream is available from `GET /v1/runs/{run_id}/events`. Studio requests Alcuin's compact chat projection with `?protocol=chat`, which emits `thinking-delta`, `text-delta`, tool, approval, artifact, citation, error, and terminal `done` frames. This `done` frame only closes the stream; it is not a callable tool and does not appear as an execution step.
 
 OpenAPI specifications can be submitted inline as JSON or loaded from a JSON/YAML `spec_url` through `POST /v1/extensions/import/openapi`. Imported write operations are never callable directly; they must execute through an approval-gated Agent run.
 

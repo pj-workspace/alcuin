@@ -6,7 +6,7 @@ from .contracts import EventType
 
 
 def project_execution_event(event: dict[str, Any]) -> list[dict[str, Any]]:
-    """Project stable Alcuin events into the lightweight TCM chat SSE vocabulary."""
+    """Project canonical execution events into Alcuin's compact chat stream."""
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     common = {
         "eventId": event["id"],

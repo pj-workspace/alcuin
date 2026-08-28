@@ -160,7 +160,7 @@ class Store:
                     "ALTER TABLE knowledge_documents "
                     "ADD COLUMN index_revision TEXT NOT NULL DEFAULT ''"
                 )
-        self.seed_demo()
+        self.seed_starter()
 
     def close(self) -> None:
         self.connection.close()
@@ -184,173 +184,60 @@ class Store:
             result["definition"] = definition
         return result
 
-    def seed_demo(self) -> None:
+    def seed_starter(self) -> None:
+        """Seed only a domain-neutral workspace and Agent for local first run."""
         definition = AgentDefinition.model_validate(
             {
                 "identity": {
-                    "name": "Operations Copilot",
-                    "description": "A governed operator for incidents, orders, and status communication.",
-                    "icon": "command",
+                    "name": "Alcuin Starter",
+                    "description": "A quiet, extensible Agent ready for your own context and capabilities.",
+                    "icon": "spark",
                 },
                 "instructions": (
-                    "Help operators investigate incidents and customer records. Use read-only tools freely. "
-                    "Request explicit approval before changing external systems. Produce concise operational artifacts."
+                    "Help the user with the context they explicitly provide. Use only capabilities "
+                    "bound to this Agent version, keep answers concise, and ask before any external change."
                 ),
                 "model": {
                     "provider": "deepseek",
                     "model": "deepseek-v4-flash-vision-exp",
                     "credential_ref": "secret://workspace/deepseek-primary",
                 },
-                "extensions": ["ops-toolkit"],
-                "tools": [
-                    "web.search",
-                    "ops.search_incidents",
-                    "ops.update_ticket",
-                ],
                 "runtime": {"adapter": "langgraph-react", "max_steps": 8},
-                "policies": {"mutating_tools": "ask", "external_side_effects": "ask"},
+                "policies": {
+                    "mutating_tools": "ask",
+                    "external_side_effects": "ask",
+                },
                 "context_policy": {
                     "accepted": ["page", "record", "selection"],
                     "max_bytes": 16_384,
                 },
                 "output_schema": {"type": "artifact", "format": "markdown"},
                 "starter_prompts": [
-                    "Summarize the active checkout incident",
-                    "Look up order AC-2048 and draft a customer update",
-                    "Update incident INC-104 to monitoring",
+                    "Summarize the context shared by this host",
+                    "Turn these notes into a concise working document",
+                    "What capabilities are currently available to you?",
                 ],
             }
         )
-        manifest = ExtensionManifest.model_validate(
-            {
-                "id": "ops-toolkit",
-                "name": "Operations Toolkit",
-                "version": "0.1.0",
-                "description": "Read operational records and perform approval-gated updates.",
-                "compatibility": ">=0.1.0",
-                "contributions": {
-                    "tools": [
-                        {
-                            "name": "ops.search_incidents",
-                            "description": "Search incident records",
-                            "input_schema": {
-                                "type": "object",
-                                "properties": {"query": {"type": "string"}},
-                            },
-                            "mutating": False,
-                        },
-                        {
-                            "name": "ops.update_ticket",
-                            "description": "Update an incident ticket",
-                            "input_schema": {
-                                "type": "object",
-                                "properties": {
-                                    "ticket_id": {"type": "string"},
-                                    "status": {"type": "string"},
-                                },
-                                "required": ["ticket_id", "status"],
-                                "additionalProperties": False,
-                            },
-                            "mutating": True,
-                        },
-                    ],
-                    "skills": [{"id": "incident-brief", "name": "Incident brief"}],
-                    "ui_blocks": [
-                        {
-                            "id": "active-record",
-                            "type": "card",
-                            "title": "Active record",
-                            "description": "Host context exposed to this Agent session.",
-                            "source": {"kind": "context", "path": "record"},
-                            "fields": [
-                                {"label": "Record", "path": "id", "format": "text"},
-                                {"label": "Type", "path": "type", "format": "status"},
-                            ],
-                        },
-                        {
-                            "id": "incident-summary",
-                            "type": "table",
-                            "title": "Incident results",
-                            "description": "Latest structured result from Operations Toolkit.",
-                            "source": {
-                                "kind": "tool_result",
-                                "tool": "ops.search_incidents",
-                                "path": "incidents",
-                            },
-                            "columns": [
-                                {"label": "Incident", "path": "id", "format": "text"},
-                                {
-                                    "label": "Status",
-                                    "path": "status",
-                                    "format": "status",
-                                },
-                            ],
-                            "empty_state": "Run an incident search to populate this table.",
-                        },
-                        {
-                            "id": "update-incident",
-                            "type": "form",
-                            "title": "Update incident",
-                            "description": (
-                                "Creates an approval-gated Tool Run; submitting never "
-                                "bypasses Agent policy."
-                            ),
-                            "fields": [
-                                {
-                                    "name": "ticket_id",
-                                    "label": "Incident ID",
-                                    "input": "text",
-                                    "required": True,
-                                    "default_path": "record.id",
-                                },
-                                {
-                                    "name": "status",
-                                    "label": "New status",
-                                    "input": "select",
-                                    "required": True,
-                                    "options": ["monitoring", "resolved", "open"],
-                                },
-                            ],
-                            "submit": {
-                                "tool": "ops.update_ticket",
-                                "label": "Request update",
-                            },
-                        },
-                    ],
-                },
-                "entrypoints": [{"type": "builtin", "adapter": "operations-demo"}],
-                "permissions": [
-                    {
-                        "id": "records:read",
-                        "reason": "Read operational records",
-                        "risk": "low",
-                    },
-                    {
-                        "id": "tickets:write",
-                        "reason": "Update incident status",
-                        "risk": "high",
-                    },
-                ],
-            }
-        )
+        created_at = utc_now()
         with self.lock, self.connection:
             self.connection.execute(
                 "INSERT OR IGNORE INTO workspaces(id, name, created_at) VALUES (?, ?, ?)",
-                ("ws_demo", "Northstar Operations", utc_now()),
+                ("ws_demo", "Alcuin Workspace", created_at),
             )
             self.connection.execute(
                 """INSERT OR IGNORE INTO agents
                 (id, workspace_id, slug, name, description, status, current_version_id, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    "agt_operations",
+                    "agt_starter",
                     "ws_demo",
-                    "operations-copilot",
+                    "alcuin-starter",
                     definition.identity.name,
                     definition.identity.description,
                     "published",
-                    "av_operations_1",
-                    utc_now(),
+                    "av_starter_1",
+                    created_at,
                 ),
             )
             self.connection.execute(
@@ -358,146 +245,14 @@ class Store:
                 (id, workspace_id, agent_id, version, definition_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)""",
                 (
-                    "av_operations_1",
+                    "av_starter_1",
                     "ws_demo",
-                    "agt_operations",
+                    "agt_starter",
                     1,
                     definition.model_dump_json(),
-                    utc_now(),
+                    created_at,
                 ),
             )
-            self.connection.execute(
-                """INSERT OR IGNORE INTO extensions
-                (id, workspace_id, manifest_id, name, version, status, health, manifest_json,
-                 credential_refs_json, installed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    "ext_ops_toolkit",
-                    "ws_demo",
-                    manifest.id,
-                    manifest.name,
-                    manifest.version,
-                    "enabled",
-                    "healthy",
-                    manifest.model_dump_json(),
-                    "{}",
-                    utc_now(),
-                ),
-            )
-            self.connection.execute(
-                """UPDATE extensions SET manifest_json = ?, name = ?, version = ?
-                WHERE id = 'ext_ops_toolkit' AND workspace_id = 'ws_demo'
-                AND manifest_id = 'ops-toolkit'""",
-                (manifest.model_dump_json(), manifest.name, manifest.version),
-            )
-            self.connection.execute(
-                """INSERT OR IGNORE INTO threads
-                (id, workspace_id, agent_id, title, context_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    "thr_demo_incident",
-                    "ws_demo",
-                    "agt_operations",
-                    "Checkout latency review",
-                    self._json(
-                        {"page": "/operations/incidents", "record": {"id": "INC-104"}}
-                    ),
-                    utc_now(),
-                ),
-            )
-            self.connection.execute(
-                """INSERT OR IGNORE INTO runs
-                (id, workspace_id, thread_id, agent_version_id, status, input, created_at, completed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    "run_demo_incident",
-                    "ws_demo",
-                    "thr_demo_incident",
-                    "av_operations_1",
-                    "completed",
-                    "Summarize the active checkout incident and prepare a handoff brief.",
-                    utc_now(),
-                    utc_now(),
-                ),
-            )
-            demo_events = [
-                (
-                    "run.started",
-                    {"runtime": "langgraph-react", "provider": "openai-compatible"},
-                ),
-                (
-                    "tool.requested",
-                    {
-                        "tool": "ops.search_incidents",
-                        "summary": "Read current operational records",
-                        "arguments": {"query": "checkout latency"},
-                        "mutating": False,
-                    },
-                ),
-                (
-                    "tool.completed",
-                    {
-                        "tool": "ops.search_incidents",
-                        "status": "succeeded",
-                        "result_summary": "1 active incident and 3 related notes found.",
-                        "result": {
-                            "query": "checkout latency",
-                            "incidents": [{"id": "INC-104", "status": "monitoring"}],
-                        },
-                        "duration_ms": 82,
-                    },
-                ),
-                (
-                    "message.delta",
-                    {
-                        "delta": "Checkout latency is recovering. The mitigation is active and no new payment failures have appeared in the last 20 minutes."
-                    },
-                ),
-                (
-                    "citation.created",
-                    {
-                        "label": "Incident INC-104",
-                        "source": "Operations Toolkit",
-                        "locator": "ops://incidents/INC-104",
-                    },
-                ),
-                (
-                    "artifact.updated",
-                    {
-                        "artifact": {
-                            "id": "artifact-demo-incident",
-                            "title": "INC-104 · Operational brief",
-                            "kind": "document",
-                            "version": 1,
-                            "content": "## Current state\n\nMitigation is active and checkout latency is trending down.\n\n## Evidence\n\n- No new payment failures in 20 minutes\n- Error rate returned below the alert threshold\n\n## Next action\n\nKeep the incident in monitoring and reassess in 30 minutes.",
-                        }
-                    },
-                ),
-                (
-                    "run.completed",
-                    {
-                        "status": "completed",
-                        "usage": {"input_tokens": 132, "output_tokens": 96},
-                    },
-                ),
-            ]
-            for sequence, (event_type, event_payload) in enumerate(
-                demo_events, start=1
-            ):
-                self.connection.execute(
-                    """INSERT OR IGNORE INTO events
-                    (id, workspace_id, run_id, sequence, type, payload_json, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        f"evt_demo_{sequence}",
-                        "ws_demo",
-                        "run_demo_incident",
-                        sequence,
-                        event_type,
-                        self._json(event_payload),
-                        utc_now(),
-                    ),
-                )
 
     def workspace(self, workspace_id: str) -> dict[str, Any] | None:
         row = self._one("SELECT * FROM workspaces WHERE id = ?", (workspace_id,))

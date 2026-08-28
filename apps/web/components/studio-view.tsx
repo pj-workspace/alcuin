@@ -56,15 +56,15 @@ export function StudioView({
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
   const [lastAttachments, setLastAttachments] = useState<ImageAttachment[]>([]);
-  const [lastPrompt, setLastPrompt] = useState("Summarize the active checkout incident and prepare a handoff brief.");
+  const [lastPrompt, setLastPrompt] = useState("Summarize the context shared by this host.");
   const [running, setRunning] = useState(false);
   const [runId, setRunId] = useState<string | null>(initialEvents[0]?.run_id ?? null);
   const [toast, setToast] = useState<string | null>(null);
   const [composerFocused, setComposerFocused] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const hostContext = useMemo(() => ({
-    page: "/operations/incidents",
-    record: { id: "INC-104", type: "incident" },
+    page: "/workspace/records",
+    record: { id: "REC-104", type: "project" },
   }), []);
 
   useEffect(() => {
@@ -236,7 +236,7 @@ export function StudioView({
 
         <div className="conversation-scroll" ref={timelineRef}>
           <div className="conversation-inner">
-            <div className="thread-meta"><span>{workspace.name}</span><i />{t("Operations review")}<i />{t("Now")}</div>
+            <div className="thread-meta"><span>{workspace.name}</span><i />{t("Working session")}<i />{t("Now")}</div>
             <article className="user-turn" ref={anchorRef}>
               <div className="user-message">{lastAttachments.length > 0 && <div className="turn-images">{lastAttachments.map((attachment) => <NextImage key={`${attachment.name}-${attachment.data_url.length}`} src={attachment.data_url} alt={attachment.name} width={92} height={68} unoptimized />)}</div>}<p>{lastPrompt}</p></div>
             </article>
@@ -279,7 +279,7 @@ export function StudioView({
               placeholder={t("Message {name}…", { name: agent.name })}
             />
             <div className="composer-footer">
-              <div><button className="composer-tool"><Plus size={15} /></button><button className="composer-tool" aria-label={t("Attach images")} onClick={() => attachmentInputRef.current?.click()}><Paperclip size={15} /></button><input ref={attachmentInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => void addImages(event.target.files)} /><button className="context-chip"><span className="context-dot" />INC-104<ChevronDown size={11} /></button></div>
+              <div><button className="composer-tool"><Plus size={15} /></button><button className="composer-tool" aria-label={t("Attach images")} onClick={() => attachmentInputRef.current?.click()}><Paperclip size={15} /></button><input ref={attachmentInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => void addImages(event.target.files)} /><button className="context-chip"><span className="context-dot" />REC-104<ChevronDown size={11} /></button></div>
               <div className="composer-send-group"><span>⌘ ↵</span><button className="send-button" disabled={(!prompt.trim() && attachments.length === 0) || running} onClick={() => void submit()}>{running ? <CircleStop size={16} /> : <ArrowUp size={17} />}</button></div>
             </div>
           </div>
@@ -337,7 +337,7 @@ function ArtifactDocument({ artifact, citationCount }: { artifact: Artifact; cit
   const { t } = useI18n();
   return (
     <article className="artifact-document">
-      <div className="document-kicker">{t("Operations / Incident brief")}</div>
+      <div className="document-kicker">{t("Working document")}</div>
       <h2>{artifact.title}</h2>
       <div className="document-rule" />
       <MarkdownContent content={artifact.content} variant="artifact" />
@@ -360,7 +360,7 @@ function ContextInspector({ agent }: { agent: Agent }) {
   const { t } = useI18n();
   return <div className="context-inspector">
     <div className="context-group"><label>{t("Agent version")}</label><strong>{agent.name} · v{agent.version}</strong><span>{t("Immutable published definition")}</span></div>
-    <div className="context-group"><label>{t("Host context")}</label><code>{`{\n  "page": "/operations/incidents",\n  "record": { "id": "INC-104" }\n}`}</code></div>
+    <div className="context-group"><label>{t("Host context")}</label><code>{`{\n  "page": "/workspace/records",\n  "record": { "id": "REC-104", "type": "project" }\n}`}</code></div>
     <div className="context-group"><label>{t("Bound capabilities")}</label>{agent.definition.tools.map((tool) => <span className="tool-binding" key={tool}><TerminalSquare size={12} />{tool}</span>)}</div>
   </div>;
 }
