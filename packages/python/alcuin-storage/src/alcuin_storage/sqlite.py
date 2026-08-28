@@ -33,6 +33,9 @@ class SqliteStore:
         self.connection = sqlite3.connect(database_path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
+        self.connection.execute("PRAGMA busy_timeout = 5000")
+        if database_path != ":memory:":
+            self.connection.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
         self.initialize()
 
@@ -80,6 +83,7 @@ class SqliteStore:
                     agent_version_id TEXT NOT NULL REFERENCES agent_versions(id),
                     status TEXT NOT NULL,
                     input TEXT NOT NULL,
+                    next_event_sequence INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     completed_at TEXT
                 );
@@ -164,6 +168,28 @@ class SqliteStore:
                     "ALTER TABLE knowledge_documents "
                     "ADD COLUMN index_revision TEXT NOT NULL DEFAULT ''"
                 )
+            run_columns = {
+                row["name"]
+                for row in self.connection.execute(
+                    "PRAGMA table_info(runs)"
+                ).fetchall()
+            }
+            if "next_event_sequence" not in run_columns:
+                self.connection.execute(
+                    "ALTER TABLE runs ADD COLUMN "
+                    "next_event_sequence INTEGER NOT NULL DEFAULT 0"
+                )
+            self.connection.execute(
+                """UPDATE runs
+                SET next_event_sequence = COALESCE(
+                    (SELECT MAX(events.sequence) FROM events WHERE events.run_id = runs.id),
+                    0
+                )
+                WHERE next_event_sequence < COALESCE(
+                    (SELECT MAX(events.sequence) FROM events WHERE events.run_id = runs.id),
+                    0
+                )"""
+            )
         self.seed_starter()
 
     def close(self) -> None:
@@ -474,10 +500,15 @@ class SqliteStore:
     ) -> dict[str, Any]:
         with self.lock, self.connection:
             row = self._one(
-                "SELECT COALESCE(MAX(sequence), 0) AS value FROM events WHERE run_id = ?",
-                (run_id,),
+                """UPDATE runs
+                SET next_event_sequence = next_event_sequence + 1
+                WHERE workspace_id = ? AND id = ?
+                RETURNING next_event_sequence AS value""",
+                (workspace_id, run_id),
             )
-            sequence = int(row["value"]) + 1
+            if row is None:
+                raise RepositoryConflict("Run does not exist in this Workspace")
+            sequence = int(row["value"])
             event_id, created_at = new_id("evt"), utc_now()
             self.connection.execute(
                 """INSERT INTO events

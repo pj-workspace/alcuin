@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from alcuin_core.contracts import (
     AgentCreate,
@@ -129,3 +131,66 @@ def test_adapter_normalizes_scoped_uniqueness_conflicts() -> None:
             raise AssertionError("adapter leaked or ignored a uniqueness conflict")
     finally:
         store.close()
+
+
+def create_run(store: SqliteStore) -> dict:
+    agent = store.get_agent("ws_demo", "agt_starter")
+    assert agent is not None
+    thread = store.create_thread("ws_demo", agent["id"], "Sequence test", {})
+    return store.create_run(
+        "ws_demo",
+        thread["id"],
+        agent["current_version_id"],
+        "verify event ordering",
+    )
+
+
+def test_event_sequence_is_atomic_across_independent_connections(
+    tmp_path: Path,
+) -> None:
+    database = str(tmp_path / "shared.db")
+    first = SqliteStore(database)
+    second = SqliteStore(database)
+    run = create_run(first)
+
+    def append(index: int) -> dict:
+        store = first if index % 2 == 0 else second
+        return store.append_event(
+            "ws_demo",
+            run["id"],
+            "message.delta",
+            {"index": index},
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            emitted = list(executor.map(append, range(64)))
+
+        assert sorted(event["sequence"] for event in emitted) == list(range(1, 65))
+        persisted = first.list_events("ws_demo", run["id"])
+        assert [event["sequence"] for event in persisted] == list(range(1, 65))
+        assert {event["payload"]["index"] for event in persisted} == set(range(64))
+    finally:
+        second.close()
+        first.close()
+
+
+def test_existing_event_sequence_is_backfilled_on_open(tmp_path: Path) -> None:
+    database = str(tmp_path / "migration.db")
+    store = SqliteStore(database)
+    run = create_run(store)
+    store.append_event("ws_demo", run["id"], "run.started", {})
+    store.append_event("ws_demo", run["id"], "message.delta", {"delta": "first"})
+    with store.connection:
+        store.connection.execute(
+            "UPDATE runs SET next_event_sequence = 0 WHERE id = ?",
+            (run["id"],),
+        )
+    store.close()
+
+    reopened = SqliteStore(database)
+    try:
+        event = reopened.append_event("ws_demo", run["id"], "run.completed", {})
+        assert event["sequence"] == 3
+    finally:
+        reopened.close()
