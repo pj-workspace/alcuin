@@ -111,7 +111,13 @@ export function Workbench({ surface }: { surface: Surface }) {
   const view = useMemo(() => {
     if (!data) return null;
     switch (surface) {
-      case "agents": return <AgentBuilderView agent={activeAgent} onChanged={refresh} />;
+      case "agents": return (
+        <AgentBuilderView
+          agent={activeAgent}
+          knowledgeSources={data.knowledge_sources}
+          onChanged={refresh}
+        />
+      );
       case "extensions": return <ExtensionsView extensions={data.extensions} onChanged={refresh} />;
       case "runs": return <RunsView runs={data.runs} events={events} onSelectEvents={setEvents} />;
       case "embed": return <EmbedView agent={activeAgent} />;

@@ -25,6 +25,7 @@ class ToolContext:
     workspace_id: str
     run_id: str
     thread_context: dict[str, Any]
+    knowledge_source_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -298,6 +298,7 @@ class OpenAICompatibleRuntime:
             workspace_id=request.workspace_id,
             run_id=request.run_id,
             thread_context=request.thread_context,
+            knowledge_source_ids=tuple(request.definition.knowledge),
         )
         tool_call_counts: dict[str, int] = {}
         seen_citation_locators: set[str] = set()

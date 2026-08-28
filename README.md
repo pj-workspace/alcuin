@@ -74,6 +74,7 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - A replaceable runtime boundary with a LangGraph ReAct demo adapter and an optional OpenAI-compatible streaming adapter
 - A bounded OpenAI-compatible tool loop with Agent allow-lists, JSON Schema validation, workspace context, per-tool deadlines, call budgets, and structured results
 - A built-in `web.search` adapter for self-hosted SearXNG with quick/deep modes, TTL caches, URL deduplication, bounded page extraction, SSRF guards, and citation events
+- A built-in `knowledge.search` adapter with Builder-based document import, deterministic chunking, Qwen dense+sparse hybrid retrieval, Agent-version source binding, and `knowledge://` citations
 - Persisted normalized execution events with resumable SSE delivery and a lightweight TCM-compatible stream projection
 - Extension inspection, disabled-first installation, permission review, health state, and enable/disable lifecycle
 - MCP discovery and invocation over stdio, SSE, and Streamable HTTP
@@ -81,7 +82,7 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - Origin-bound Embed Session tokens and a framework-neutral `<alcuin-agent>` Web Component
 - An Operations Copilot demo proving that one published agent can run in Studio and an embedded host
 
-The contracts are versioned but not yet stable. SQLite is the local prototype store; PostgreSQL, Redis, and Qdrant containers are provided under the `platform-infra` Compose profile while their production adapters remain roadmap work.
+The contracts are versioned but not yet stable. SQLite stores local control-plane metadata, while Qdrant is the implemented local knowledge index. PostgreSQL and Redis remain optional `platform-infra` services until their production adapters land.
 
 ## Quick Start
 
@@ -91,6 +92,7 @@ Requirements: Node.js 22+, pnpm 11+, Python 3.11+, and `uv`.
 cp .env.example .env
 pnpm install
 uv sync --project apps/api
+docker compose up -d searxng qdrant
 pnpm dev
 ```
 
@@ -99,6 +101,8 @@ Open [http://localhost:3000/studio](http://localhost:3000/studio). The API and i
 No model credential is required for the deterministic Operations Copilot fallback. DeepSeek is the first configured provider preset: put the key in the ignored local `.env` as `ALCUIN_DEEPSEEK_API_KEY`; the default endpoint is `https://api.deepseek.com`, model is the experimental `deepseek-v4-flash-vision-exp`, and protocol is Chat Completions. Studio enables thinking and renders its native stream in a compact, collapsible trace before the final Markdown output; API clients can disable thinking per run. Studio accepts up to four PNG, JPEG, WebP, or GIF attachments of 5 MiB each and sends only the active run's image data to the configured provider. DeepSeek V4 Flash text remains selectable, while generic OpenAI-compatible endpoints remain available through the `ALCUIN_OPENAI_*` variables.
 
 Public web search uses the bundled SearXNG service and does not require another API key. For local development, start it with `docker compose up -d searxng` and keep `ALCUIN_SEARXNG_URL=http://localhost:9888` in the ignored `.env`. Compose-connected API containers use `http://searxng:8080`. Quick search returns normalized snippets; deep search additionally reads at most three validated public pages under strict byte, time, and output limits.
+
+Workspace knowledge uses the bundled Qdrant service at `http://localhost:6333` and Qwen `text-embedding-v3` through DashScope. Put `ALCUIN_DASHSCOPE_API_KEY` in the ignored local `.env`; Workspace-specific DashScope endpoints can be set with `ALCUIN_DASHSCOPE_HTTP_API_URL`. In **Agents → Knowledge**, import plain text or Markdown, bind the resulting source, then save and publish the Agent version. `knowledge.search` fuses Qwen dense and sparse vectors only across the bound source IDs and active Workspace. Embedding requests are batched, bounded, validated, and never expose provider credentials or raw provider errors.
 
 Run the complete verification suite with:
 
@@ -110,7 +114,7 @@ uv run --project apps/api pytest
 pnpm test:e2e
 ```
 
-Docker users can start the prototype with `docker compose up --build`. The reserved infrastructure stack is available through `docker compose --profile platform-infra up --build`.
+Docker users can start the prototype with `docker compose up --build`. PostgreSQL and Redis can be added with `docker compose --profile platform-infra up --build`.
 
 ## Development Workflow
 

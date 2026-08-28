@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import time
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -22,6 +23,8 @@ from .contracts import (
     EventType,
     ExtensionInstallRequest,
     ExtensionStatusUpdate,
+    KnowledgeDocumentCreate,
+    KnowledgeSourceCreate,
     ManifestInspectRequest,
     MCPEntrypoint,
     MCPToolCallRequest,
@@ -37,6 +40,7 @@ from .extensions import (
     resolve_openapi_document,
 )
 from .mcp_gateway import MCPGateway
+from .knowledge import KnowledgeService, QdrantKnowledgeIndex
 from .openapi_gateway import OpenAPIGateway
 from .runtime import RuntimeOrchestrator, RuntimeRequest
 from .security import RequestScope, issue_embed_token, resolve_scope
@@ -49,15 +53,28 @@ from .web_search import WebSearchService
 ScopeDependency = Annotated[RequestScope, Depends(resolve_scope)]
 
 
-def create_app(settings: Settings | None = None, store: Store | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    store: Store | None = None,
+    knowledge_service: KnowledgeService | None = None,
+) -> FastAPI:
     settings = settings or get_settings()
     repository = store or Store(settings.database_path)
     web_search_service = (
         WebSearchService(settings) if (settings.searxng_url or "").strip() else None
     )
-    tool_registry = ToolRegistry(
-        [web_search_service.tool_definition()] if web_search_service else []
+    configured_knowledge_service = knowledge_service or (
+        KnowledgeService(repository, QdrantKnowledgeIndex(settings))
+        if (settings.qdrant_url or "").strip()
+        and (settings.dashscope_api_key or "").strip()
+        else None
     )
+    definitions = []
+    if web_search_service:
+        definitions.append(web_search_service.tool_definition())
+    if configured_knowledge_service:
+        definitions.append(configured_knowledge_service.tool_definition())
+    tool_registry = ToolRegistry(definitions)
     tool_executor = ToolExecutor(tool_registry)
 
     @asynccontextmanager
@@ -68,6 +85,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             task.cancel()
         if web_search_service:
             await web_search_service.aclose()
+        if configured_knowledge_service:
+            await configured_knowledge_service.aclose()
         if store is None:
             repository.close()
 
@@ -86,6 +105,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     )
     app.state.store = repository
     app.state.web_search_service = web_search_service
+    app.state.knowledge_service = configured_knowledge_service
     app.state.runtime = RuntimeOrchestrator(repository, settings, tool_executor)
 
     def missing(resource: str) -> HTTPException:
@@ -108,6 +128,29 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 detail="Embed session is bound to another agent",
             )
 
+    def validate_knowledge_references(
+        workspace_id: str,
+        definition: AgentDefinition,
+    ) -> None:
+        missing_sources = [
+            source_id
+            for source_id in definition.knowledge
+            if not repository.get_knowledge_source(workspace_id, source_id)
+        ]
+        if missing_sources:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Knowledge sources are outside this workspace: {', '.join(missing_sources)}",
+            )
+
+    def require_knowledge_service() -> KnowledgeService:
+        if not configured_knowledge_service:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Workspace knowledge indexing is not configured",
+            )
+        return configured_knowledge_service
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "healthy", "service": "alcuin-api", "version": "0.1.0"}
@@ -125,6 +168,99 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         require_workspace_operator(scope)
         return settings.provider_statuses()
 
+    @app.get("/v1/knowledge/sources")
+    async def list_knowledge_sources(scope: ScopeDependency) -> list[dict]:
+        require_workspace_operator(scope)
+        return repository.list_knowledge_sources(scope.workspace_id)
+
+    @app.post("/v1/knowledge/sources", status_code=201)
+    async def create_knowledge_source(
+        payload: KnowledgeSourceCreate,
+        scope: ScopeDependency,
+    ) -> dict:
+        require_workspace_operator(scope)
+        require_knowledge_service()
+        try:
+            return repository.create_knowledge_source(scope.workspace_id, payload)
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="A knowledge source with this name already exists",
+            ) from exc
+
+    @app.get("/v1/knowledge/sources/{source_id}/documents")
+    async def list_knowledge_documents(
+        source_id: str,
+        scope: ScopeDependency,
+    ) -> list[dict]:
+        require_workspace_operator(scope)
+        if not repository.get_knowledge_source(scope.workspace_id, source_id):
+            raise missing("Knowledge source")
+        return repository.list_knowledge_documents(scope.workspace_id, source_id)
+
+    @app.post("/v1/knowledge/sources/{source_id}/documents", status_code=201)
+    async def ingest_knowledge_document(
+        source_id: str,
+        payload: KnowledgeDocumentCreate,
+        response: Response,
+        scope: ScopeDependency,
+    ) -> dict:
+        require_workspace_operator(scope)
+        service = require_knowledge_service()
+        try:
+            document, indexed = await service.ingest_document(
+                scope.workspace_id,
+                source_id,
+                payload,
+            )
+        except KeyError as exc:
+            raise missing("Knowledge source") from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Knowledge document indexing failed",
+            ) from exc
+        if not indexed:
+            response.status_code = status.HTTP_200_OK
+        return {"document": document, "indexed": indexed}
+
+    @app.get("/v1/knowledge/health")
+    async def knowledge_health(scope: ScopeDependency) -> dict:
+        require_workspace_operator(scope)
+        return await require_knowledge_service().index.health()
+
+    @app.delete("/v1/knowledge/sources/{source_id}", status_code=204)
+    async def delete_knowledge_source(
+        source_id: str,
+        scope: ScopeDependency,
+    ) -> Response:
+        require_workspace_operator(scope)
+        references = repository.knowledge_source_references(
+            scope.workspace_id,
+            source_id,
+        )
+        if references:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Knowledge source is referenced by immutable Agent versions",
+                    "references": references,
+                },
+            )
+        try:
+            deleted = await require_knowledge_service().delete_source(
+                scope.workspace_id,
+                source_id,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Knowledge source deletion failed",
+            ) from exc
+        if not deleted:
+            raise missing("Knowledge source")
+        return Response(status_code=204)
+
     @app.get("/v1/agents")
     async def list_agents(scope: ScopeDependency) -> list[dict]:
         require_workspace_operator(scope)
@@ -133,6 +269,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.post("/v1/agents", status_code=201)
     async def create_agent(payload: AgentCreate, scope: ScopeDependency) -> dict:
         require_workspace_operator(scope)
+        validate_knowledge_references(scope.workspace_id, payload.definition)
         return repository.create_agent(scope.workspace_id, payload)
 
     @app.get("/v1/agents/{agent_id}")
@@ -148,6 +285,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.post("/v1/agents/{agent_id}/versions", status_code=201)
     async def create_agent_version(agent_id: str, payload: AgentVersionCreate, scope: ScopeDependency) -> dict:
         require_workspace_operator(scope)
+        validate_knowledge_references(scope.workspace_id, payload.definition)
         agent = repository.create_agent_version(scope.workspace_id, agent_id, payload.definition)
         if not agent:
             raise missing("Agent")
@@ -156,6 +294,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.post("/v1/agents/{agent_id}/publish")
     async def publish_agent(agent_id: str, scope: ScopeDependency) -> dict:
         require_workspace_operator(scope)
+        current = repository.get_agent(scope.workspace_id, agent_id)
+        if not current:
+            raise missing("Agent")
+        definition = AgentDefinition.model_validate(current["definition"])
+        validate_knowledge_references(scope.workspace_id, definition)
+        if "knowledge.search" in definition.tools and not definition.knowledge:
+            raise HTTPException(
+                status_code=409,
+                detail="Attach at least one knowledge source before publishing knowledge.search",
+            )
+        if "knowledge.search" in definition.tools:
+            require_knowledge_service()
         agent = repository.publish_agent(scope.workspace_id, agent_id)
         if not agent:
             raise missing("Agent")

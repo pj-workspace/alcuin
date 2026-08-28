@@ -5,6 +5,8 @@ import type {
   Extension,
   ExtensionInspection,
   ImageAttachment,
+  KnowledgeDocument,
+  KnowledgeSource,
   Run,
   Thread,
 } from "@alcuin/contracts";
@@ -23,7 +25,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.detail ?? `Alcuin API returned ${response.status}`);
+    const detail = body.detail;
+    throw new Error(
+      typeof detail === "string"
+        ? detail
+        : typeof detail?.message === "string"
+          ? detail.message
+          : `Alcuin API returned ${response.status}`,
+    );
   }
   return response.json();
 }
@@ -57,6 +66,19 @@ export const alcuinApi = {
       body: JSON.stringify({ definition }),
     }),
   publishAgent: (agentId: string) => request<Agent>(`/v1/agents/${agentId}/publish`, { method: "POST" }),
+  createKnowledgeSource: (name: string, description: string) =>
+    request<KnowledgeSource>("/v1/knowledge/sources", {
+      method: "POST",
+      body: JSON.stringify({ name, description }),
+    }),
+  ingestKnowledgeDocument: (
+    sourceId: string,
+    document: { title: string; content: string; source_uri?: string; metadata?: Record<string, unknown> },
+  ) =>
+    request<{ document: KnowledgeDocument; indexed: boolean }>(
+      `/v1/knowledge/sources/${sourceId}/documents`,
+      { method: "POST", body: JSON.stringify(document) },
+    ),
   healthExtension: (extensionId: string) =>
     request<{ status: string; details: Record<string, unknown> }>(`/v1/extensions/${extensionId}/health`, {
       method: "POST",

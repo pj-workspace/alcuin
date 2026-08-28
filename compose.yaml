@@ -17,6 +17,11 @@ services:
       ALCUIN_DEEPSEEK_PROTOCOL: ${ALCUIN_DEEPSEEK_PROTOCOL:-chat_completions}
       ALCUIN_SEARXNG_URL: ${ALCUIN_SEARXNG_URL:-http://searxng:8080}
       ALCUIN_SEARXNG_TIMEOUT_SECONDS: ${ALCUIN_SEARXNG_TIMEOUT_SECONDS:-8}
+      ALCUIN_QDRANT_URL: ${ALCUIN_QDRANT_URL:-http://qdrant:6333}
+      ALCUIN_QDRANT_API_KEY: ${ALCUIN_QDRANT_API_KEY:-}
+      ALCUIN_DASHSCOPE_API_KEY: ${ALCUIN_DASHSCOPE_API_KEY:-}
+      ALCUIN_DASHSCOPE_HTTP_API_URL: ${ALCUIN_DASHSCOPE_HTTP_API_URL:-https://dashscope.aliyuncs.com/api/v1}
+      ALCUIN_QWEN_EMBEDDING_MODEL: ${ALCUIN_QWEN_EMBEDDING_MODEL:-text-embedding-v3}
     ports:
       - "8000:8000"
     volumes:
@@ -66,8 +71,9 @@ services:
       - ./infra/searxng/settings.yml:/etc/searxng/settings.yml:ro
 
   qdrant:
-    image: qdrant/qdrant:v1.15
-    profiles: ["platform-infra"]
+    image: qdrant/qdrant:v1.19.0
+    ports:
+      - "6333:6333"
     volumes:
       - qdrant-data:/qdrant/storage
 

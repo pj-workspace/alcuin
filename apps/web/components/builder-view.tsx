@@ -1,6 +1,6 @@
 "use client";
 
-import type { Agent } from "@alcuin/contracts";
+import type { Agent, KnowledgeSource } from "@alcuin/contracts";
 import {
   Blocks,
   Bot,
@@ -8,14 +8,17 @@ import {
   Check,
   ChevronRight,
   Database,
+  FileText,
   Eye,
   FileJson2,
   LockKeyhole,
   Play,
+  Plus,
   Save,
   Settings2,
   ShieldCheck,
   Sparkles,
+  Upload,
   Wrench,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -34,7 +37,15 @@ const sections = [
   { id: "output", label: "Output", icon: Sparkles },
 ];
 
-export function AgentBuilderView({ agent, onChanged }: { agent?: Agent; onChanged: () => Promise<void> }) {
+export function AgentBuilderView({
+  agent,
+  knowledgeSources,
+  onChanged,
+}: {
+  agent?: Agent;
+  knowledgeSources: KnowledgeSource[];
+  onChanged: () => Promise<void>;
+}) {
   const [active, setActive] = useState("identity");
   const [definition, setDefinition] = useState(agent?.definition);
   const [saving, setSaving] = useState(false);
@@ -56,6 +67,16 @@ export function AgentBuilderView({ agent, onChanged }: { agent?: Agent; onChange
       : { provider, model: "gpt-4.1-mini", credential_ref: "secret://workspace/openai-primary" },
   });
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(null), 2200); };
+  const toggleKnowledge = (sourceId: string) => {
+    const isBound = definition.knowledge.includes(sourceId);
+    const knowledge = isBound
+      ? definition.knowledge.filter((item) => item !== sourceId)
+      : [...definition.knowledge, sourceId];
+    const tools = knowledge.length
+      ? Array.from(new Set([...definition.tools, "knowledge.search"]))
+      : definition.tools.filter((tool) => tool !== "knowledge.search");
+    setDefinition({ ...definition, knowledge, tools });
+  };
 
   async function save(publish = false) {
     setSaving(true);
@@ -121,7 +142,19 @@ export function AgentBuilderView({ agent, onChanged }: { agent?: Agent; onChange
           </label>
         </div>}
         {active === "capabilities" && <Capabilities definition={definition} />}
-        {active === "knowledge" && <div className="empty-editor"><Database size={24} /><h3>No knowledge collections bound</h3><p>Bind a governed retrieval collection or install a knowledge connector.</p><button className="button secondary"><Database size={14} />Bind knowledge</button></div>}
+        {active === "knowledge" && (
+          <KnowledgeEditor
+            sources={knowledgeSources}
+            boundSourceIds={definition.knowledge}
+            onToggle={toggleKnowledge}
+            onImported={async (sourceId) => {
+              if (!definition.knowledge.includes(sourceId)) toggleKnowledge(sourceId);
+              notify("Knowledge source indexed and bound");
+              await onChanged();
+            }}
+            onSourcesChanged={onChanged}
+          />
+        )}
         {active === "policies" && <div className="form-stack"><div className="policy-card"><ShieldCheck size={18} /><div><strong>Mutating tools</strong><p>External write operations pause the run and create an explicit approval event.</p></div><select value={definition.policies.mutating_tools} onChange={(event) => setDefinition({ ...definition, policies: { ...definition.policies, mutating_tools: event.target.value as "ask" | "deny" | "auto" } })}><option value="ask">Ask every time</option><option value="deny">Always deny</option><option value="auto">Allow automatically</option></select></div><div className="policy-card"><LockKeyhole size={18} /><div><strong>Sensitive values</strong><p>Credentials remain scoped secret references and are redacted from execution events.</p></div><StatusPill status="enabled" /></div></div>}
         {active === "output" && <div className="form-stack"><label className="field"><span>Output kind</span><select defaultValue="artifact"><option>artifact</option><option>structured data</option><option>message only</option></select></label><label className="field"><span>Output schema</span><textarea className="code-editor" rows={8} value={JSON.stringify(definition.output_schema, null, 2)} readOnly /></label></div>}
         <div className="advanced-toggle"><button onClick={() => setAdvanced((value) => !value)}><Settings2 size={14} />Advanced definition JSON<ChevronRight className={clsx(advanced && "rotate")} size={13} /></button>{advanced && <pre>{JSON.stringify(definition, null, 2)}</pre>}</div>
@@ -133,6 +166,131 @@ export function AgentBuilderView({ agent, onChanged }: { agent?: Agent; onChange
     </div>
     {toast && <Toast message={toast} />}
   </div>;
+}
+
+function KnowledgeEditor({
+  sources,
+  boundSourceIds,
+  onToggle,
+  onImported,
+  onSourcesChanged,
+}: {
+  sources: KnowledgeSource[];
+  boundSourceIds: string[];
+  onToggle: (sourceId: string) => void;
+  onImported: (sourceId: string) => Promise<void>;
+  onSourcesChanged: () => Promise<void>;
+}) {
+  const [importOpen, setImportOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [form, setForm] = useState({ targetSourceId: "new", sourceName: "", description: "", title: "", content: "" });
+
+  async function importDocument() {
+    if (
+      (form.targetSourceId === "new" && !form.sourceName.trim())
+      || !form.title.trim()
+      || !form.content.trim()
+    ) {
+      setError("Choose or name a source, then provide a document title and content.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    let sourceId = form.targetSourceId;
+    let createdSource = false;
+    try {
+      if (sourceId === "new") {
+        const source = await alcuinApi.createKnowledgeSource(
+          form.sourceName.trim(),
+          form.description.trim(),
+        );
+        sourceId = source.id;
+        createdSource = true;
+      }
+      await alcuinApi.ingestKnowledgeDocument(sourceId, {
+        title: form.title.trim(),
+        content: form.content,
+        metadata: { imported_via: "agent-builder" },
+      });
+      setForm({ targetSourceId: sourceId, sourceName: "", description: "", title: "", content: "" });
+      setImportOpen(false);
+      await onImported(sourceId);
+    } catch (reason) {
+      if (createdSource) {
+        setForm((current) => ({ ...current, targetSourceId: sourceId }));
+        await onSourcesChanged();
+      }
+      setError(reason instanceof Error ? reason.message : "Unable to import knowledge");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="knowledge-editor">
+      <div className="capability-toolbar">
+        <div>
+          <strong>Workspace sources</strong>
+          <p>Qwen dense + sparse hybrid retrieval. Agent versions store only source references.</p>
+        </div>
+        <button className="button secondary" onClick={() => setImportOpen((open) => !open)}>
+          <Plus size={14} />Import document
+        </button>
+      </div>
+
+      {importOpen && (
+        <div className="knowledge-import">
+          <div className="knowledge-import-heading">
+            <span className="section-icon"><Upload size={16} /></span>
+            <div><strong>Create source and index document</strong><p>Plain text or Markdown · 2 MB maximum</p></div>
+          </div>
+          <div className="knowledge-form-grid">
+            <label className="field"><span>Knowledge source</span><select value={form.targetSourceId} onChange={(event) => setForm({ ...form, targetSourceId: event.target.value })}><option value="new">Create a new source</option>{sources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}</select></label>
+            <label className="field"><span>Document title</span><input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Embedding guide" /></label>
+          </div>
+          {form.targetSourceId === "new" && <div className="knowledge-form-grid"><label className="field"><span>Source name</span><input value={form.sourceName} onChange={(event) => setForm({ ...form, sourceName: event.target.value })} placeholder="Product handbook" /></label><label className="field"><span>Description</span><input value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="Governed internal product knowledge" /></label></div>}
+          <label className="field"><span>Content</span><textarea rows={8} value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} placeholder="Paste plain text or Markdown…" /></label>
+          {error && <div className="knowledge-error">{error}</div>}
+          <div className="knowledge-import-actions">
+            <button className="button secondary" onClick={() => setImportOpen(false)} disabled={submitting}>Cancel</button>
+            <button className="button dark" onClick={() => void importDocument()} disabled={submitting}>
+              <Upload size={13} />{submitting ? "Indexing…" : "Index and bind"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {sources.length ? (
+        <div className="knowledge-source-list">
+          {sources.map((source) => {
+            const bound = boundSourceIds.includes(source.id);
+            return (
+              <button
+                className={clsx("knowledge-source-row", bound && "bound")}
+                key={source.id}
+                onClick={() => onToggle(source.id)}
+                aria-pressed={bound}
+              >
+                <span className="capability-icon"><Database size={15} /></span>
+                <span className="knowledge-source-copy">
+                  <strong>{source.name}</strong>
+                  <small>{source.description || "Workspace knowledge source"}</small>
+                </span>
+                <span className="knowledge-count"><FileText size={12} />{source.document_count} docs · {source.chunk_count} chunks</span>
+                <span className={clsx("knowledge-binding", bound && "active")}>
+                  {bound ? <><Check size={12} />Bound</> : "Bind"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-editor compact"><Database size={24} /><h3>No knowledge sources yet</h3><p>Import the first governed document for this Workspace.</p></div>
+      )}
+      <div className="editor-tip"><ShieldCheck size={15} /><span>Search is always filtered by Workspace and the source IDs frozen into this Agent version. Retrieved content is treated as untrusted reference data.</span></div>
+    </div>
+  );
 }
 
 function Capabilities({ definition }: { definition: Agent["definition"] }) {

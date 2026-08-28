@@ -87,6 +87,33 @@ export interface ExtensionInspection {
   install_state: string;
 }
 
+export interface KnowledgeSource {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string;
+  status: "ready" | "degraded" | "disabled";
+  document_count: number;
+  chunk_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeDocument {
+  id: string;
+  workspace_id: string;
+  source_id: string;
+  title: string;
+  source_uri?: string | null;
+  content_hash: string;
+  chunk_count: number;
+  status: "indexing" | "ready" | "failed";
+  metadata: Record<string, unknown>;
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Thread {
   id: string;
   workspace_id: string;
@@ -137,6 +164,7 @@ export interface BootstrapPayload {
   workspace: { id: string; name: string; created_at: string };
   agents: Agent[];
   extensions: Extension[];
+  knowledge_sources: KnowledgeSource[];
   threads: Thread[];
   runs: Run[];
 }
