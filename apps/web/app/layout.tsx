@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Instrument_Serif } from "next/font/google";
 
-import { LocaleProvider } from "@/lib/i18n";
+import { LocaleProvider } from "@/shared/lib/i18n";
 
 import "./globals.css";
 

@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from alcuin_api.config import Settings
-from alcuin_api.contracts import AgentDefinition, ExtensionManifest
+from alcuin_core.contracts import AgentDefinition, ExtensionManifest
 from alcuin_api.extension_tools import (
     MAX_EXTENSION_EVENT_RESULT_CHARS,
     ExtensionToolService,
@@ -15,7 +15,7 @@ from alcuin_api.extension_tools import (
 from alcuin_api.store import Store
 from alcuin_api.runtime import RuntimeOrchestrator
 from alcuin_api.tools import ToolContext, ToolError, ToolExecutor
-from alcuin_extensions.operations_toolkit import seed_operations_demo
+from alcuin_operations_copilot import seed_operations_demo
 
 
 class RecordingMCPGateway:

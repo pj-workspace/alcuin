@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .contracts import HealthReport, OpenAPIEntrypoint
+from alcuin_core.contracts import HealthReport, OpenAPIEntrypoint
 
 
 MAX_OPENAPI_RESPONSE_BYTES = 2 * 1024 * 1024

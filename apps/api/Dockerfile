@@ -2,12 +2,15 @@ FROM python:3.12-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:$PATH"
+    PATH="/workspace/apps/api/.venv/bin:$PATH"
 
-WORKDIR /app
+WORKDIR /workspace
 RUN pip install --no-cache-dir uv
-COPY apps/api/pyproject.toml apps/api/uv.lock ./
-COPY apps/api/src ./src
+COPY apps/api/pyproject.toml apps/api/uv.lock ./apps/api/
+COPY packages/python/alcuin-core ./packages/python/alcuin-core
+COPY extensions/operations-copilot ./extensions/operations-copilot
+COPY apps/api/src ./apps/api/src
+WORKDIR /workspace/apps/api
 RUN uv sync --frozen --no-dev
 
 EXPOSE 8000

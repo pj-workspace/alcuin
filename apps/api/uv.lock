@@ -17,6 +17,7 @@ name = "alcuin-api"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "alcuin-core" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "jsonschema" },
@@ -32,18 +33,22 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "alcuin-operations-copilot" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "alcuin-operations-copilot" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "alcuin-core", editable = "../../packages/python/alcuin-core" },
+    { name = "alcuin-operations-copilot", marker = "extra == 'dev'", editable = "../../extensions/operations-copilot" },
     { name = "fastapi", specifier = ">=0.115.0,<1.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0" },
     { name = "jsonschema", specifier = ">=4.23.0,<5.0" },
@@ -62,9 +67,39 @@ provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "alcuin-operations-copilot", editable = "../../extensions/operations-copilot" },
     { name = "pytest", specifier = ">=8.3.0,<9.0" },
     { name = "pytest-asyncio", specifier = ">=0.24.0,<1.0" },
 ]
+
+[[package]]
+name = "alcuin-core"
+version = "0.1.0"
+source = { editable = "../../packages/python/alcuin-core" }
+dependencies = [
+    { name = "jsonschema" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "jsonschema", specifier = ">=4.23.0,<5.0" },
+    { name = "pydantic", specifier = ">=2.9.0,<3.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.3.0,<9.0" }]
+
+[[package]]
+name = "alcuin-operations-copilot"
+version = "0.1.0"
+source = { editable = "../../extensions/operations-copilot" }
+dependencies = [
+    { name = "alcuin-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "alcuin-core", editable = "../../packages/python/alcuin-core" }]
 
 [[package]]
 name = "annotated-doc"

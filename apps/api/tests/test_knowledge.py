@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from qdrant_client import models
 
 from alcuin_api.config import Settings
-from alcuin_api.contracts import (
+from alcuin_core.contracts import (
     AgentDefinition,
     KnowledgeDocumentCreate,
     KnowledgeSourceCreate,
@@ -27,7 +27,7 @@ from alcuin_api.knowledge import (
 from alcuin_api.main import create_app
 from alcuin_api.store import Store
 from alcuin_api.tools import ToolContext, ToolError
-from alcuin_extensions.operations_toolkit import seed_operations_demo
+from alcuin_operations_copilot import seed_operations_demo
 
 
 class FakeKnowledgeIndex:

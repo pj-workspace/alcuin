@@ -4,7 +4,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from .contracts import (
+from alcuin_core.contracts import (
     BuiltinEntrypoint,
     ExtensionManifest,
     MCPEntrypoint,

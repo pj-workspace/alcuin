@@ -23,9 +23,9 @@ importers:
       '@alcuin/embed':
         specifier: workspace:*
         version: link:../../packages/embed
-      '@alcuin/sse-client':
+      '@alcuin/sdk':
         specifier: workspace:*
-        version: link:../../packages/sse-client
+        version: link:../../packages/sdk
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
@@ -94,6 +94,22 @@ importers:
       '@alcuin/contracts':
         specifier: workspace:*
         version: link:../contracts
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.2
+
+  packages/sdk:
+    dependencies:
+      '@alcuin/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@alcuin/sse-client':
+        specifier: workspace:*
+        version: link:../sse-client
     devDependencies:
       '@types/node':
         specifier: ^22.0.0

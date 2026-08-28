@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from .config import Settings, get_settings
-from .contracts import (
+from alcuin_core.contracts import (
     AgentCreate,
     AgentDefinition,
     AgentVersionCreate,

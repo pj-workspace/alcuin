@@ -11,7 +11,7 @@ from typing import Any, Iterable
 from fastapi import Header, HTTPException, Request, status
 
 from .config import get_settings
-from .contracts import EmbedClaims
+from alcuin_core.contracts import EmbedClaims
 
 
 SENSITIVE_KEY_MARKERS = (

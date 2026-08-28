@@ -11,7 +11,7 @@ import httpx
 from langgraph.graph import END, START, StateGraph
 
 from .config import ProviderConfig, Settings
-from .contracts import AgentDefinition, EventType, ImageAttachment
+from alcuin_core.contracts import AgentDefinition, EventType, ImageAttachment
 from .security import redact_sensitive, redact_text
 from .store import Store
 from .tools import ToolContext, ToolError, ToolExecutor

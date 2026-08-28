@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .contracts import EventType
+from alcuin_core.contracts import EventType
 
 
 def project_execution_event(event: dict[str, Any]) -> list[dict[str, Any]]:

@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .contracts import (
+from alcuin_core.contracts import (
     AgentCreate,
     AgentDefinition,
     ExtensionManifest,

@@ -1,71 +1,26 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
+from alcuin_core.tools import ToolCitation, ToolContext, ToolError, ToolResult
 from jsonschema import Draft202012Validator
 
-
-class ToolError(Exception):
-    """A controlled tool failure safe to expose to the model and run trace."""
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-
-
-@dataclass(frozen=True)
-class ToolContext:
-    workspace_id: str
-    run_id: str
-    thread_context: dict[str, Any]
-    knowledge_source_ids: tuple[str, ...] = ()
-    mutation_authorized: bool = False
-
-
-@dataclass(frozen=True)
-class ToolCitation:
-    label: str
-    source: str
-    locator: str
-    snippet: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def as_event_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "label": self.label,
-            "source": self.source,
-            "locator": self.locator,
-        }
-        if self.snippet:
-            payload["snippet"] = self.snippet
-        if self.metadata:
-            payload["metadata"] = self.metadata
-        return payload
-
-
-@dataclass(frozen=True)
-class ToolResult:
-    data: dict[str, Any]
-    summary: str
-    citations: tuple[ToolCitation, ...] = ()
-
-    def model_content(self, *, max_chars: int = 24_000) -> str:
-        content = json.dumps(self.data, ensure_ascii=False, separators=(",", ":"))
-        if len(content) <= max_chars:
-            return content
-        envelope = {
-            "truncated": True,
-            "summary": self.summary,
-            "content": content[:max_chars],
-        }
-        return json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+__all__ = [
+    "ToolCitation",
+    "ToolContext",
+    "ToolDefinition",
+    "ToolError",
+    "ToolExecution",
+    "ToolExecutor",
+    "ToolRegistry",
+    "ToolResult",
+    "provider_tool_name",
+]
 
 
 ToolHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[ToolResult]]
