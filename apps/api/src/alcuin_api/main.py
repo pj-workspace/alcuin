@@ -32,12 +32,15 @@ from .contracts import (
     EmbedClaims,
     EmbedSessionCreate,
     EventType,
+    ExtensionCredentialBinding,
     ExtensionInstallRequest,
+    ExtensionManifest,
     ExtensionStatusUpdate,
     KnowledgeDocumentCreate,
     KnowledgeSourceCreate,
     ManifestInspectRequest,
     MCPEntrypoint,
+    MCPImportRequest,
     MCPToolCallRequest,
     OpenAPIImportRequest,
     OpenAPIEntrypoint,
@@ -54,18 +57,21 @@ from .document_parser import (
 from .extensions import (
     check_extension_health,
     inspect_manifest,
+    manifest_from_mcp,
     manifest_from_openapi,
+    missing_credential_ids,
+    refresh_mcp_manifest,
     resolve_openapi_document,
 )
-from .mcp_gateway import MCPGateway
 from .knowledge import KnowledgeService, QdrantKnowledgeIndex
+from .mcp_gateway import MCPGateway
 from .openapi_gateway import OpenAPIGateway
 from .runtime import RuntimeOrchestrator, RuntimeRequest
 from .security import RequestScope, issue_embed_token, resolve_scope
 from .store import Store
 from .tcm_sse import project_execution_event
 from .tools import ToolExecutor, ToolRegistry
-from .web_search import WebSearchService
+from .web_search import WebSearchService, is_public_http_url
 
 
 ScopeDependency = Annotated[RequestScope, Depends(resolve_scope)]
@@ -76,6 +82,8 @@ def create_app(
     store: Store | None = None,
     knowledge_service: KnowledgeService | None = None,
     document_parser: DocumentParser | None = None,
+    mcp_gateway: MCPGateway | None = None,
+    openapi_gateway: OpenAPIGateway | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     repository = store or Store(settings.database_path)
@@ -89,6 +97,10 @@ def create_app(
         else None
     )
     configured_document_parser = document_parser or FileDocumentParser(settings)
+    configured_mcp_gateway = mcp_gateway or MCPGateway()
+    configured_openapi_gateway = openapi_gateway or OpenAPIGateway(
+        timeout_seconds=settings.extension_health_timeout_seconds
+    )
     definitions = []
     if web_search_service:
         definitions.append(web_search_service.tool_definition())
@@ -170,6 +182,22 @@ def create_app(
                 detail="Workspace knowledge indexing is not configured",
             )
         return configured_knowledge_service
+
+    def validate_extension_credential_refs(
+        manifest: ExtensionManifest,
+        credential_refs: dict[str, str],
+    ) -> None:
+        allowed = {
+            str(requirement.get("id"))
+            for requirement in manifest.credential_requirements
+            if requirement.get("id")
+        }
+        unknown = sorted(set(credential_refs) - allowed)
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown credential requirements: {', '.join(unknown)}",
+            )
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -564,18 +592,79 @@ def create_app(
     async def import_openapi(payload: OpenAPIImportRequest, scope: ScopeDependency) -> dict:
         require_workspace_operator(scope)
         try:
-            resolved = await resolve_openapi_document(payload)
+            resolved = await resolve_openapi_document(
+                payload,
+                allow_private_networks=settings.extension_allow_private_networks,
+            )
             manifest = manifest_from_openapi(resolved)
-        except (ValueError, httpx.HTTPError) as exc:
+            entrypoint = next(
+                (item for item in manifest.entrypoints if item.type == "openapi"),
+                None,
+            )
+            if (
+                entrypoint
+                and entrypoint.base_url
+                and not settings.extension_allow_private_networks
+                and not await is_public_http_url(str(entrypoint.base_url))
+            ):
+                raise ValueError("OpenAPI base_url must resolve to a public HTTP endpoint")
+        except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)[:300]) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="OpenAPI specification could not be fetched",
+            ) from exc
         return inspect_manifest(manifest)
+
+    @app.post("/v1/extensions/import/mcp")
+    async def import_mcp(payload: MCPImportRequest, scope: ScopeDependency) -> dict:
+        require_workspace_operator(scope)
+        if (
+            payload.entrypoint.transport != "stdio"
+            and payload.entrypoint.url
+            and not settings.extension_allow_private_networks
+            and not await is_public_http_url(str(payload.entrypoint.url))
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Remote MCP URL must resolve to a public HTTP endpoint",
+            )
+        try:
+            tools = await configured_mcp_gateway.discover(payload.entrypoint)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="MCP connection or tool discovery failed",
+            ) from exc
+        return inspect_manifest(manifest_from_mcp(payload, tools))
 
     @app.post("/v1/extensions", status_code=201)
     async def install_extension(payload: ExtensionInstallRequest, scope: ScopeDependency) -> dict:
         require_workspace_operator(scope)
+        validate_extension_credential_refs(payload.manifest, payload.credential_refs)
         return repository.install_extension(
             scope.workspace_id, payload.manifest, payload.credential_refs
         )
+
+    @app.patch("/v1/extensions/{extension_id}/credentials")
+    async def bind_extension_credentials(
+        extension_id: str,
+        payload: ExtensionCredentialBinding,
+        scope: ScopeDependency,
+    ) -> dict:
+        require_workspace_operator(scope)
+        extension = repository.get_extension(scope.workspace_id, extension_id)
+        if not extension:
+            raise missing("Extension")
+        manifest = ExtensionManifest.model_validate(extension["manifest"])
+        validate_extension_credential_refs(manifest, payload.credential_refs)
+        updated = repository.update_extension_credentials(
+            scope.workspace_id,
+            extension_id,
+            payload.credential_refs,
+        )
+        return updated or {}
 
     @app.post("/v1/extensions/{extension_id}/health")
     async def extension_health(extension_id: str, scope: ScopeDependency) -> dict:
@@ -583,7 +672,19 @@ def create_app(
         extension = repository.get_extension(scope.workspace_id, extension_id)
         if not extension:
             raise missing("Extension")
-        report = await check_extension_health(extension)
+        report = await check_extension_health(
+            extension,
+            mcp_gateway=configured_mcp_gateway,
+            openapi_gateway=configured_openapi_gateway,
+        )
+        if report.status == "healthy" and isinstance(report.details.get("tools"), list):
+            manifest = ExtensionManifest.model_validate(extension["manifest"])
+            if any(entrypoint.type == "mcp" for entrypoint in manifest.entrypoints):
+                repository.update_extension_manifest(
+                    scope.workspace_id,
+                    extension_id,
+                    refresh_mcp_manifest(manifest, report.details["tools"]),
+                )
         repository.update_extension(scope.workspace_id, extension_id, health=report.status)
         return report.model_dump(mode="json")
 
@@ -595,6 +696,16 @@ def create_app(
         extension = repository.get_extension(scope.workspace_id, extension_id)
         if not extension:
             raise missing("Extension")
+        if payload.enabled:
+            missing_credentials = missing_credential_ids(extension)
+            if missing_credentials:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Bind required credentials before enabling: "
+                        + ", ".join(missing_credentials)
+                    ),
+                )
         if payload.enabled and extension["health"] not in {"healthy", "degraded"}:
             raise HTTPException(status_code=409, detail="Run a health check before enabling")
         updated = repository.update_extension(
@@ -618,7 +729,21 @@ def create_app(
         )
         if not entrypoint:
             raise HTTPException(status_code=409, detail="Extension has no MCP entrypoint")
-        tools = await MCPGateway().discover(MCPEntrypoint.model_validate(entrypoint))
+        try:
+            tools = await configured_mcp_gateway.discover(
+                MCPEntrypoint.model_validate(entrypoint)
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="MCP connection or tool discovery failed",
+            ) from exc
+        manifest = ExtensionManifest.model_validate(extension["manifest"])
+        repository.update_extension_manifest(
+            scope.workspace_id,
+            extension_id,
+            refresh_mcp_manifest(manifest, tools),
+        )
         repository.update_extension(scope.workspace_id, extension_id, health="healthy")
         return {"tools": tools, "count": len(tools)}
 
@@ -653,14 +778,22 @@ def create_app(
             ),
             None,
         )
+        if declared_tool is None:
+            raise missing("MCP tool")
         if declared_tool and declared_tool.get("mutating"):
             raise HTTPException(
                 status_code=409,
                 detail="Mutating tools must be called through an approval-gated Agent run",
             )
-        return await MCPGateway().call(
-            MCPEntrypoint.model_validate(entrypoint), tool_name, payload.arguments
-        )
+        try:
+            return await configured_mcp_gateway.call(
+                MCPEntrypoint.model_validate(entrypoint), tool_name, payload.arguments
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="MCP tool execution failed",
+            ) from exc
 
     @app.post("/v1/extensions/{extension_id}/openapi/{tool_name}:call")
     async def call_openapi_tool(
@@ -700,14 +833,19 @@ def create_app(
             )
         credential_reference = extension["credential_refs"].get("api-credential")
         try:
-            return await OpenAPIGateway().call(
+            return await configured_openapi_gateway.call(
                 OpenAPIEntrypoint.model_validate(entrypoint),
                 tool,
                 payload.arguments,
                 credential_reference,
             )
-        except (ValueError, httpx.HTTPError) as exc:
-            raise HTTPException(status_code=502, detail=str(exc)[:300]) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)[:300]) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="OpenAPI tool execution failed",
+            ) from exc
 
     @app.post("/v1/embed/sessions", status_code=201)
     async def create_embed_session(payload: EmbedSessionCreate, scope: ScopeDependency) -> dict:

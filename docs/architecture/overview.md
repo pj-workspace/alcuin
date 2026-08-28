@@ -70,6 +70,8 @@ Persisted `ExecutionEvent` records remain the canonical protocol. The run-events
 
 MCP processes and remote transports terminate in the API service. Browser clients only communicate with the Alcuin gateway. Embed tokens bind a workspace, published Agent Version, allowed origin, actions, and expiry.
 
+Extension installation is disabled-first. The control plane persists only reviewed operations, stores credentials as secret references, performs live MCP discovery or OpenAPI reachability checks before enablement, and blocks private-network URLs unless a local-development policy explicitly allows them.
+
 See [ADR-0001](adr-0001-runtime-extension-contracts.md) for the contract decisions implemented by the prototype.
 
 ## Remaining Decisions

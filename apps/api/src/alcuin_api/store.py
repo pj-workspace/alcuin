@@ -716,6 +716,49 @@ class Store:
             )
         return self.get_extension(workspace_id, extension_id)
 
+    def update_extension_credentials(
+        self,
+        workspace_id: str,
+        extension_id: str,
+        credential_refs: dict[str, str],
+    ) -> dict[str, Any] | None:
+        with self.lock, self.connection:
+            cursor = self.connection.execute(
+                """UPDATE extensions
+                SET credential_refs_json = ?, status = 'disabled', health = 'unchecked'
+                WHERE workspace_id = ? AND id = ?""",
+                (self._json(credential_refs), workspace_id, extension_id),
+            )
+        return (
+            self.get_extension(workspace_id, extension_id)
+            if cursor.rowcount
+            else None
+        )
+
+    def update_extension_manifest(
+        self,
+        workspace_id: str,
+        extension_id: str,
+        manifest: ExtensionManifest,
+    ) -> dict[str, Any] | None:
+        with self.lock, self.connection:
+            cursor = self.connection.execute(
+                """UPDATE extensions SET manifest_json = ?, name = ?, version = ?
+                WHERE workspace_id = ? AND id = ?""",
+                (
+                    manifest.model_dump_json(),
+                    manifest.name,
+                    manifest.version,
+                    workspace_id,
+                    extension_id,
+                ),
+            )
+        return (
+            self.get_extension(workspace_id, extension_id)
+            if cursor.rowcount
+            else None
+        )
+
     def bootstrap(self, workspace_id: str) -> dict[str, Any] | None:
         workspace = self.workspace(workspace_id)
         if not workspace:

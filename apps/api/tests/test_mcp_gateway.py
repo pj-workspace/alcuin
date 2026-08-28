@@ -19,7 +19,7 @@ async def test_stdio_mcp_discovery_and_call() -> None:
     )
     gateway = MCPGateway()
     tools = await gateway.discover(entrypoint)
-    assert [tool["name"] for tool in tools] == ["echo"]
+    assert [tool["name"] for tool in tools] == ["echo", "write_marker"]
     result = await gateway.call(entrypoint, "echo", {"message": "hello from Alcuin"})
     assert result["is_error"] is False
     assert result["structured_content"] == {"message": "hello from Alcuin"}
