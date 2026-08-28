@@ -4,12 +4,15 @@
   "packageManager": "pnpm@11.20.0",
   "scripts": {
     "dev": "concurrently -k -n api,web -c blue,magenta \"pnpm dev:api\" \"pnpm dev:web\"",
+    "dev:prepare": "docker compose up -d --wait postgres && pnpm db:migrate",
     "dev:web": "pnpm --filter @alcuin/web dev",
     "dev:api": "uv run --project apps/api uvicorn alcuin_api.main:app --reload --port 8000",
+    "db:migrate": "uv run --project apps/api alembic -c packages/python/alcuin-storage/alembic.ini upgrade head",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
-    "test": "pnpm --filter @alcuin/contracts test && uv run --project apps/api pytest",
-    "test:e2e": "playwright test && pnpm --filter @alcuin/web exec next typegen"
+    "test": "pnpm --filter @alcuin/contracts test && ./scripts/with-test-postgres.sh uv run --project apps/api pytest",
+    "test:e2e": "./scripts/with-test-postgres.sh pnpm test:e2e:run",
+    "test:e2e:run": "pnpm --filter @alcuin/web exec next typegen && playwright test"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",

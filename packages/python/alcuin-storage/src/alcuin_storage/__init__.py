@@ -1,13 +1,14 @@
 """Public persistence ports and adapters for Alcuin."""
 
 from .errors import RepositoryConflict, RepositoryError
+from .factory import open_repository
+from .postgres import PostgresStore
 from .repositories import (
     ControlPlaneRepository,
     ExtensionRepository,
     KnowledgeRepository,
     RuntimeRepository,
 )
-from .sqlite import SqliteStore
 
 __all__ = [
     "ControlPlaneRepository",
@@ -16,5 +17,6 @@ __all__ = [
     "RepositoryConflict",
     "RepositoryError",
     "RuntimeRepository",
-    "SqliteStore",
+    "PostgresStore",
+    "open_repository",
 ]

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 import httpx
-from alcuin_storage import ControlPlaneRepository, RepositoryConflict, SqliteStore
+from alcuin_storage import ControlPlaneRepository, RepositoryConflict, open_repository
 from fastapi import (
     Depends,
     FastAPI,
@@ -110,7 +110,12 @@ def create_app(
     provider_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
-    repository = store or SqliteStore(settings.database_path)
+    repository = store or open_repository(
+        database_url=settings.database_url,
+        postgres_pool_min_size=settings.postgres_pool_min_size,
+        postgres_pool_max_size=settings.postgres_pool_max_size,
+        postgres_pool_timeout_seconds=settings.postgres_pool_timeout_seconds,
+    )
     web_search_service = (
         WebSearchService(settings) if (settings.searxng_url or "").strip() else None
     )

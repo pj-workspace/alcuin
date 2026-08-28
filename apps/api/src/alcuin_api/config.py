@@ -26,7 +26,10 @@ class Settings(BaseSettings):
 
     app_name: str = "Alcuin API"
     environment: str = "development"
-    database_path: str = ".data/alcuin.db"
+    database_url: str = "postgresql://alcuin:alcuin@localhost:5432/alcuin"
+    postgres_pool_min_size: int = Field(default=1, ge=1, le=20)
+    postgres_pool_max_size: int = Field(default=10, ge=1, le=100)
+    postgres_pool_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
     signing_secret: str = "alcuin-development-signing-secret"
     cors_origins: str = "http://localhost:3000,http://localhost:3001"
     openai_api_key: str | None = None
@@ -79,6 +82,13 @@ class Settings(BaseSettings):
     @property
     def allowed_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    def model_post_init(self, context: object) -> None:
+        del context
+        if self.postgres_pool_max_size < self.postgres_pool_min_size:
+            raise ValueError(
+                "postgres_pool_max_size must be greater than or equal to postgres_pool_min_size"
+            )
 
     def provider(self, provider_id: str) -> ProviderConfig:
         if provider_id == "deepseek":

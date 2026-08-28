@@ -10,7 +10,7 @@ from alcuin_api.config import Settings
 from alcuin_core.contracts import EmbedClaims
 from alcuin_api.main import create_app
 from alcuin_api.security import issue_embed_token
-from alcuin_storage import SqliteStore as Store
+from support import create_test_store
 from alcuin_operations_copilot import operations_demo_adapter, seed_operations_demo
 
 
@@ -67,11 +67,10 @@ def make_client(
     searxng_url: str = "http://searx.test",
     operations_adapter: bool = True,
 ) -> TestClient:
-    store = Store(":memory:")
+    store = create_test_store()
     seed_operations_demo(store)
     app = create_app(
         Settings(
-            database_path=":memory:",
             openai_api_key=None,
             deepseek_api_key="test-provider-key",
             deepseek_base_url="http://provider.test/v1",
@@ -93,7 +92,7 @@ def make_client_with_operations_adapter() -> TestClient:
 
 
 def test_default_store_seeds_only_a_domain_neutral_starter() -> None:
-    store = Store(":memory:")
+    store = create_test_store()
 
     agents = store.list_agents("ws_demo")
     assert [agent["id"] for agent in agents] == ["agt_starter"]
@@ -198,9 +197,9 @@ def test_agent_creation_is_versioned_and_rejects_duplicate_workspace_slug() -> N
 
 
 def test_web_search_tool_is_registered_only_when_searxng_is_configured() -> None:
-    store = Store(":memory:")
+    store = create_test_store()
     app = create_app(
-        Settings(database_path=":memory:", searxng_url="http://searx.test"),
+        Settings(searxng_url="http://searx.test"),
         store=store,
     )
     with TestClient(app):
@@ -220,11 +219,10 @@ def test_web_search_tool_is_registered_only_when_searxng_is_configured() -> None
 def test_missing_provider_uses_domain_neutral_preview_without_inventing_tool_results() -> (
     None
 ):
-    store = Store(":memory:")
+    store = create_test_store()
     seed_operations_demo(store)
     app = create_app(
         Settings(
-            database_path=":memory:",
             deepseek_api_key=None,
             openai_api_key=None,
             searxng_url="http://searx.test",

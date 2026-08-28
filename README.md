@@ -88,19 +88,19 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - Declarative extension card/table/form blocks with scoped data binding and approval-gated Tool Runs
 - An explicit Operations Copilot example proving that a domain Extension can run in Studio and an embedded host without entering Alcuin Core
 - A framework-neutral Python `alcuin-core`, configurable `@alcuin/sdk`, enforced web feature boundaries, and an independently packaged Operations example
-- Replaceable Runtime, Extension, Knowledge, and control-plane persistence ports with a Workspace-scoped SQLite adapter
+- PostgreSQL-only control-plane persistence with Workspace-scoped Repository ports, pooled connections, Alembic migrations, and atomic Run event sequencing
 
-The contracts are versioned but not yet stable. SQLite stores local control-plane metadata, while Qdrant is the implemented local knowledge index. PostgreSQL and Redis remain optional `platform-infra` services until their production adapters land.
+The contracts are versioned but not yet stable. PostgreSQL stores control-plane metadata and canonical knowledge text, while Qdrant is the implemented knowledge vector index. Redis remains roadmap infrastructure rather than a claimed runtime dependency.
 
 ## Quick Start
 
-Requirements: Node.js 22+, pnpm 11+, Python 3.11+, and `uv`.
+Requirements: Node.js 22+, pnpm 11+, Python 3.11+, `uv`, and Docker.
 
 ```bash
 cp .env.example .env
 pnpm install
 uv sync --project apps/api
-docker compose up -d searxng qdrant
+pnpm dev:prepare
 pnpm dev
 ```
 
@@ -155,7 +155,7 @@ The initial implementation is expected to use:
 - **Protocols:** MCP, SSE, OpenAPI
 - **Operations:** Docker Compose, Alembic, OpenTelemetry-compatible traces
 
-The pre-alpha uses SQLite for zero-configuration local state. Infrastructure adapters remain replaceable behind repository and capability boundaries.
+The pre-alpha uses PostgreSQL 17 through Docker Compose and Alembic. Repository ports keep runtime and service code independent of connection and transaction details, but PostgreSQL is the single implemented control-plane database.
 
 ## Security
 

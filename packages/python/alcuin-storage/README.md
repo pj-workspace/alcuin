@@ -1,15 +1,15 @@
 # alcuin-storage
 
-Workspace-scoped persistence ports and the current SQLite adapter for Alcuin.
+Workspace-scoped persistence ports and the PostgreSQL implementation for Alcuin.
 
 Services depend on the narrow `RuntimeRepository`, `ExtensionRepository`, or
-`KnowledgeRepository` protocols. `apps/api` is the composition root and creates the concrete
-`SqliteStore`. A PostgreSQL adapter can therefore be introduced without branching inside the
-runtime, knowledge, or Extension services.
+`KnowledgeRepository` protocols. `apps/api` is the composition root and creates the pooled
+`PostgresStore`; runtime, knowledge, and Extension services never access the driver directly.
 
-The SQLite adapter preserves the pre-alpha local bootstrap and is not presented as the final
-production migration system.
+Alembic owns schema changes. PostgreSQL is the only control-plane database implementation; tests
+run against an isolated Compose project and temporary volume.
 
 ```bash
-uv run --project apps/api pytest packages/python/alcuin-storage/tests
+./scripts/with-test-postgres.sh \
+  uv run --project apps/api pytest packages/python/alcuin-storage/tests
 ```

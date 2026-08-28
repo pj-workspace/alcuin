@@ -3,7 +3,10 @@ name = "alcuin-storage"
 version = "0.1.0"
 description = "Workspace-scoped persistence ports and adapters for Alcuin"
 requires-python = ">=3.11"
-dependencies = ["alcuin-core"]
+dependencies = [
+  "alcuin-core",
+  "psycopg[binary,pool]>=3.2.0,<4.0",
+]
 
 [build-system]
 requires = ["hatchling"]

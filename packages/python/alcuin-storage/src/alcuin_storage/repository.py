@@ -1,12 +1,10 @@
-"""SQLite persistence adapter for local Alcuin development and verification."""
+"""Database-neutral SQL repository behavior used by the PostgreSQL adapter."""
 
 from __future__ import annotations
 
 import json
-import sqlite3
-import threading
 import uuid
-from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 from alcuin_core.contracts import (
@@ -24,181 +22,18 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:20]}"
 
 
-class SqliteStore:
-    """SQLite repository with Workspace scoping enforced in every resource lookup."""
-
-    def __init__(self, database_path: str) -> None:
-        if database_path != ":memory:":
-            Path(database_path).parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(database_path, check_same_thread=False)
-        self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA foreign_keys = ON")
-        self.connection.execute("PRAGMA busy_timeout = 5000")
-        if database_path != ":memory:":
-            self.connection.execute("PRAGMA journal_mode = WAL")
-        self.lock = threading.RLock()
-        self.initialize()
-
-    def initialize(self) -> None:
-        with self.lock, self.connection:
-            self.connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS workspaces (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS agents (
-                    id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-                    slug TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    current_version_id TEXT,
-                    created_at TEXT NOT NULL,
-                    UNIQUE(workspace_id, slug)
-                );
-                CREATE TABLE IF NOT EXISTS agent_versions (
-                    id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-                    agent_id TEXT NOT NULL REFERENCES agents(id),
-                    version INTEGER NOT NULL,
-                    definition_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    UNIQUE(agent_id, version)
-                );
-                CREATE TABLE IF NOT EXISTS threads (
-                    id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-                    agent_id TEXT NOT NULL REFERENCES agents(id),
-                    title TEXT NOT NULL,
-                    context_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS runs (
-                    id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-                    thread_id TEXT NOT NULL REFERENCES threads(id),
-                    agent_version_id TEXT NOT NULL REFERENCES agent_versions(id),
-                    status TEXT NOT NULL,
-                    input TEXT NOT NULL,
-                    next_event_sequence INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    completed_at TEXT
-                );
-                CREATE TABLE IF NOT EXISTS events (
-                    id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-                    run_id TEXT NOT NULL REFERENCES runs(id),
-                    sequence INTEGER NOT NULL,
-                    type TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    UNIQUE(run_id, sequence)
-                );
-                CREATE TABLE IF NOT EXISTS approvals (
-                    id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-                    run_id TEXT NOT NULL REFERENCES runs(id),
-                    status TEXT NOT NULL,
-                    request_json TEXT NOT NULL,
-                    note TEXT,
-                    created_at TEXT NOT NULL,
-                    decided_at TEXT
-                );
-                CREATE TABLE IF NOT EXISTS extensions (
-                    id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-                    manifest_id TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    version TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    health TEXT NOT NULL,
-                    manifest_json TEXT NOT NULL,
-                    credential_refs_json TEXT NOT NULL,
-                    installed_at TEXT NOT NULL,
-                    UNIQUE(workspace_id, manifest_id)
-                );
-                CREATE TABLE IF NOT EXISTS knowledge_sources (
-                    id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-                    name TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(workspace_id, name)
-                );
-                CREATE TABLE IF NOT EXISTS knowledge_documents (
-                    id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-                    source_id TEXT NOT NULL REFERENCES knowledge_sources(id) ON DELETE CASCADE,
-                    title TEXT NOT NULL,
-                    source_uri TEXT,
-                    content TEXT,
-                    content_hash TEXT NOT NULL,
-                    index_revision TEXT NOT NULL DEFAULT '',
-                    chunk_count INTEGER NOT NULL DEFAULT 0,
-                    status TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(workspace_id, source_id, content_hash)
-                );
-                CREATE INDEX IF NOT EXISTS idx_knowledge_sources_workspace
-                    ON knowledge_sources(workspace_id, created_at);
-                CREATE INDEX IF NOT EXISTS idx_knowledge_documents_source
-                    ON knowledge_documents(workspace_id, source_id, created_at);
-                """
-            )
-            document_columns = {
-                row["name"]
-                for row in self.connection.execute(
-                    "PRAGMA table_info(knowledge_documents)"
-                ).fetchall()
-            }
-            if "content" not in document_columns:
-                self.connection.execute(
-                    "ALTER TABLE knowledge_documents ADD COLUMN content TEXT"
-                )
-            if "index_revision" not in document_columns:
-                self.connection.execute(
-                    "ALTER TABLE knowledge_documents "
-                    "ADD COLUMN index_revision TEXT NOT NULL DEFAULT ''"
-                )
-            run_columns = {
-                row["name"]
-                for row in self.connection.execute(
-                    "PRAGMA table_info(runs)"
-                ).fetchall()
-            }
-            if "next_event_sequence" not in run_columns:
-                self.connection.execute(
-                    "ALTER TABLE runs ADD COLUMN "
-                    "next_event_sequence INTEGER NOT NULL DEFAULT 0"
-                )
-            self.connection.execute(
-                """UPDATE runs
-                SET next_event_sequence = COALESCE(
-                    (SELECT MAX(events.sequence) FROM events WHERE events.run_id = runs.id),
-                    0
-                )
-                WHERE next_event_sequence < COALESCE(
-                    (SELECT MAX(events.sequence) FROM events WHERE events.run_id = runs.id),
-                    0
-                )"""
-            )
-        self.seed_starter()
+class SqlRepository:
+    """Shared SQL behavior; concrete adapters own connections and migrations."""
 
     def close(self) -> None:
         self.connection.close()
 
-    def _one(self, query: str, params: tuple[Any, ...]) -> sqlite3.Row | None:
+    def _one(self, query: str, params: tuple[Any, ...]) -> Mapping[str, Any] | None:
         return self.connection.execute(query, params).fetchone()
 
-    def _all(self, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
+    def _all(
+        self, query: str, params: tuple[Any, ...] = ()
+    ) -> list[Mapping[str, Any]]:
         return list(self.connection.execute(query, params).fetchall())
 
     @staticmethod
@@ -207,7 +42,7 @@ class SqliteStore:
 
     @staticmethod
     def _agent(
-        row: sqlite3.Row, definition: dict[str, Any] | None = None
+        row: Mapping[str, Any], definition: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         result = dict(row)
         if definition is not None:
@@ -252,13 +87,15 @@ class SqliteStore:
         created_at = utc_now()
         with self.lock, self.connection:
             self.connection.execute(
-                "INSERT OR IGNORE INTO workspaces(id, name, created_at) VALUES (?, ?, ?)",
+                """INSERT INTO workspaces(id, name, created_at) VALUES (?, ?, ?)
+                ON CONFLICT DO NOTHING""",
                 ("ws_demo", "Alcuin Workspace", created_at),
             )
             self.connection.execute(
-                """INSERT OR IGNORE INTO agents
+                """INSERT INTO agents
                 (id, workspace_id, slug, name, description, status, current_version_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING""",
                 (
                     "agt_starter",
                     "ws_demo",
@@ -271,9 +108,10 @@ class SqliteStore:
                 ),
             )
             self.connection.execute(
-                """INSERT OR IGNORE INTO agent_versions
+                """INSERT INTO agent_versions
                 (id, workspace_id, agent_id, version, definition_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING""",
                 (
                     "av_starter_1",
                     "ws_demo",
@@ -359,8 +197,11 @@ class SqliteStore:
                         created_at,
                     ),
                 )
-        except sqlite3.IntegrityError as exc:
-            if "agents.workspace_id, agents.slug" in str(exc):
+        except Exception as exc:
+            if self._is_unique_violation(
+                exc,
+                postgres_constraint="agents_workspace_id_slug_key",
+            ):
                 raise RepositoryConflict(
                     "Agent slug already exists in this workspace"
                 ) from exc
@@ -605,7 +446,7 @@ class SqliteStore:
         return [self._extension(row) for row in rows]
 
     @staticmethod
-    def _extension(row: sqlite3.Row) -> dict[str, Any]:
+    def _extension(row: Mapping[str, Any]) -> dict[str, Any]:
         result = dict(row)
         result["manifest"] = json.loads(result.pop("manifest_json"))
         result["credential_refs"] = json.loads(result.pop("credential_refs_json"))
@@ -754,8 +595,11 @@ class SqliteStore:
                         created_at,
                     ),
                 )
-        except sqlite3.IntegrityError as exc:
-            if "knowledge_sources.workspace_id, knowledge_sources.name" in str(exc):
+        except Exception as exc:
+            if self._is_unique_violation(
+                exc,
+                postgres_constraint="knowledge_sources_workspace_id_name_key",
+            ):
                 raise RepositoryConflict(
                     "A knowledge source with this name already exists"
                 ) from exc
@@ -908,7 +752,7 @@ class SqliteStore:
             )
 
     @staticmethod
-    def _knowledge_document(row: sqlite3.Row | None) -> dict[str, Any]:
+    def _knowledge_document(row: Mapping[str, Any] | None) -> dict[str, Any]:
         if row is None:
             return {}
         result = dict(row)

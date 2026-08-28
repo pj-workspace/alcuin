@@ -12,7 +12,8 @@ from alcuin_api.extension_tools import (
     bounded_result,
     extension_tool_name,
 )
-from alcuin_storage import SqliteStore as Store
+from alcuin_storage import PostgresStore
+from support import create_test_store
 from alcuin_api.runtime import RuntimeOrchestrator
 from alcuin_api.tools import ToolContext, ToolError, ToolExecutor
 from alcuin_operations_copilot import seed_operations_demo
@@ -63,7 +64,11 @@ async def recording_builtin_adapter(
     )
 
 
-def install_enabled(store: Store, manifest: ExtensionManifest, refs: dict[str, str] | None = None) -> dict:
+def install_enabled(
+    store: PostgresStore,
+    manifest: ExtensionManifest,
+    refs: dict[str, str] | None = None,
+) -> dict:
     extension = store.install_extension("ws_demo", manifest, refs or {})
     store.update_extension("ws_demo", extension["id"], status="enabled", health="healthy")
     return store.get_extension("ws_demo", extension["id"]) or {}
@@ -79,9 +84,8 @@ def test_extension_event_results_are_bounded() -> None:
 def test_runtime_redacts_resolved_secret_values(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALCUIN_SECRET_WORKSPACE_RUNTIME_TEST", "runtime-secret-value")
     orchestrator = RuntimeOrchestrator(
-        Store(":memory:"),
+        create_test_store(),
         Settings(
-            database_path=":memory:",
             openai_api_key="",
             deepseek_api_key="",
             dashscope_api_key="",
@@ -95,7 +99,7 @@ def test_runtime_redacts_resolved_secret_values(monkeypatch: pytest.MonkeyPatch)
 
 @pytest.mark.asyncio
 async def test_builtin_extension_uses_explicit_registered_adapter() -> None:
-    store = Store(":memory:")
+    store = create_test_store()
     service = ExtensionToolService(
         store,
         RecordingMCPGateway(),
@@ -143,7 +147,7 @@ async def test_builtin_extension_uses_explicit_registered_adapter() -> None:
 
 @pytest.mark.asyncio
 async def test_dynamic_mcp_tool_is_workspace_scoped_and_rechecks_extension_state() -> None:
-    store = Store(":memory:")
+    store = create_test_store()
     mcp = RecordingMCPGateway()
     service = ExtensionToolService(store, mcp, RecordingOpenAPIGateway())
     manifest = ExtensionManifest.model_validate(
@@ -203,7 +207,7 @@ async def test_dynamic_mcp_tool_is_workspace_scoped_and_rechecks_extension_state
 
 @pytest.mark.asyncio
 async def test_dynamic_openapi_tool_uses_server_side_credential_reference() -> None:
-    store = Store(":memory:")
+    store = create_test_store()
     openapi = RecordingOpenAPIGateway()
     service = ExtensionToolService(store, RecordingMCPGateway(), openapi)
     manifest = ExtensionManifest.model_validate(
@@ -261,7 +265,7 @@ async def test_dynamic_openapi_tool_uses_server_side_credential_reference() -> N
 
 @pytest.mark.asyncio
 async def test_approved_mutating_extension_tool_executes_real_handler() -> None:
-    store = Store(":memory:")
+    store = create_test_store()
     openapi = RecordingOpenAPIGateway()
     service = ExtensionToolService(store, RecordingMCPGateway(), openapi)
     manifest = ExtensionManifest.model_validate(
@@ -352,7 +356,6 @@ async def test_approved_mutating_extension_tool_executes_real_handler() -> None:
     orchestrator = RuntimeOrchestrator(
         store,
         Settings(
-            database_path=":memory:",
             openai_api_key="",
             deepseek_api_key="",
             dashscope_api_key="",

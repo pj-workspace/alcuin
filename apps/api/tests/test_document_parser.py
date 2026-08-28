@@ -19,7 +19,7 @@ from alcuin_api.document_parser import (
 )
 from alcuin_api.knowledge import KnowledgeService
 from alcuin_api.main import create_app
-from alcuin_storage import SqliteStore as Store
+from support import create_test_store
 
 
 class CapturingIndex:
@@ -173,12 +173,11 @@ def test_parser_rejects_unsupported_invalid_and_oversized_files() -> None:
 
 
 def test_file_upload_api_is_scoped_idempotent_and_does_not_echo_content() -> None:
-    store = Store(":memory:")
+    store = create_test_store()
     index = CapturingIndex()
     service = KnowledgeService(store, index)
     app = create_app(
         Settings(
-            database_path=":memory:",
             searxng_url="",
             qdrant_url="",
             dashscope_api_key="",
