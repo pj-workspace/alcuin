@@ -79,6 +79,26 @@ export const alcuinApi = {
       `/v1/knowledge/sources/${sourceId}/documents`,
       { method: "POST", body: JSON.stringify(document) },
     ),
+  uploadKnowledgeFile: async (sourceId: string, file: File, title?: string) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    if (title?.trim()) form.append("title", title.trim());
+    const response = await fetch(`${API_URL}/v1/knowledge/sources/${sourceId}/files`, {
+      method: "POST",
+      headers: { "X-Alcuin-Workspace": WORKSPACE_ID },
+      body: form,
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const detail = body.detail;
+      throw new Error(typeof detail === "string" ? detail : `Alcuin API returned ${response.status}`);
+    }
+    return response.json() as Promise<{
+      document: KnowledgeDocument;
+      indexed: boolean;
+      parsed: { filename: string; kind: string; characters: number };
+    }>;
+  },
   healthExtension: (extensionId: string) =>
     request<{ status: string; details: Record<string, unknown> }>(`/v1/extensions/${extensionId}/health`, {
       method: "POST",

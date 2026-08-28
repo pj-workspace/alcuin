@@ -29,7 +29,7 @@ Qdrant is exposed at `http://localhost:6333`. Set `ALCUIN_DASHSCOPE_API_KEY` in 
 1. In **Studio**, ask for a current public fact and verify that the trace shows `web.search`, followed by citation sources and a final Markdown answer. Normal searches start in quick mode; the runtime exposes at most two web calls per Run.
 2. Attach a PNG, JPEG, WebP, or GIF and ask a question about it. The compact execution panel streams reasoning separately from the final Markdown answer and collapses after the answer starts. Attachments are limited to four images of 5 MiB each.
 3. Run “Update this incident to monitoring.” The Run must pause at an approval card. Approve or deny it and inspect the terminal trace.
-4. In **Agents → Knowledge**, import a plain-text or Markdown document. Verify that the source shows its document/chunk counts, remains bound to the draft definition, and automatically enables `knowledge.search`. Save and publish, then ask a source-specific question in Studio and verify a `Retrieve` trace plus `knowledge://` citations.
+4. In **Agents → Knowledge**, upload a TXT, Markdown, PDF, or DOCX file (8 MiB maximum), or switch to **Paste text**. Verify that the source shows its document/chunk counts, remains bound to the draft definition, and automatically enables `knowledge.search`. Save and publish, then ask a source-specific question in Studio and verify a `Retrieve` trace plus `knowledge://` citations.
 5. In **Agents**, edit identity or instructions. Saving creates another immutable version; publishing makes it embeddable.
 6. In **Extensions**, inspect the sample MCP manifest. Review its permissions and disabled-first lifecycle.
 7. In **Embed**, create an origin-bound session and copy the generated Web Component snippet.
@@ -73,3 +73,5 @@ Image bytes are validated at the API boundary and are not written into execution
 The canonical run stream is available from `GET /v1/runs/{run_id}/events`. Studio requests the lightweight compatible projection with `?protocol=tcm`, which emits `thinking-delta`, `text-delta`, tool, approval, artifact, citation, error, and terminal `done` frames. This `done` frame only closes the stream; it is not a callable tool and does not appear as an execution step.
 
 OpenAPI specifications can be submitted inline as JSON or loaded from a JSON/YAML `spec_url` through `POST /v1/extensions/import/openapi`. Imported write operations are never callable directly; they must execute through an approval-gated Agent run.
+
+File knowledge ingestion is available through `POST /v1/knowledge/sources/{source_id}/files` as multipart form data. The API derives format from the sanitized filename and validates PDF/DOCX signatures instead of trusting the declared MIME type. Unsupported, encrypted, malformed, oversized, and textless documents fail with stable client errors; parser internals and document content are not returned in errors.
