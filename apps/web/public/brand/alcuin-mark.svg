@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Alcuin</title>
+  <path fill="#20211F" d="M21.5 25.5 34 32.75 22.5 51.5V58.5H6.5Z"/>
+  <path fill="#3157D5" d="M27.5 5.5 57.5 35.25V57.5L45.75 52.5V37.5L23.25 24.5Z"/>
+  <circle fill="#3157D5" cx="34.25" cy="43.25" r="3.75"/>
+</svg>

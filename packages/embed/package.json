@@ -1,0 +1,24 @@
+{
+  "name": "@alcuin/embed",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,iife --dts --global-name AlcuinEmbed --clean",
+    "lint": "tsc --noEmit",
+    "test": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.0"
+  }
+}
