@@ -26,6 +26,9 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@alcuin/embed": [
+        "../../packages/embed/src/index.ts"
       ]
     }
   },
