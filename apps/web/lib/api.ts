@@ -168,7 +168,11 @@ export const alcuinApi = {
   createEmbedSession: (agentId: string) =>
     request<{ token: string; expires_at: number; agent_version_id: string; origin: string }>("/v1/embed/sessions", {
       method: "POST",
-      body: JSON.stringify({ agent_id: agentId, origin: "http://localhost:3000" }),
+      body: JSON.stringify({
+        agent_id: agentId,
+        origin: "http://localhost:3000",
+        allowed_actions: ["thread:create", "run:create", "run:read", "approval:decide"],
+      }),
     }),
   streamRun: async (
     runId: string,

@@ -68,7 +68,7 @@ The first registered adapter is `web.search`. It targets a configured self-hoste
 
 Persisted `ExecutionEvent` records remain the canonical protocol. The run-events endpoint also provides a lightweight TCM-compatible projection with `?protocol=tcm`, mapping reasoning, text, tools, approvals, artifacts, citations, errors, and completion into data-only SSE frames. Studio consumes that projection and renders a collapsed reasoning/tool timeline followed by the Markdown answer. Completion is a terminal stream event, not an Agent tool call; domain-specific TCM workflow states are not part of Alcuin Core.
 
-MCP processes and remote transports terminate in the API service. Browser clients only communicate with the Alcuin gateway. Embed tokens bind a workspace, published Agent Version, allowed origin, actions, and expiry.
+MCP processes and remote transports terminate in the API service. Browser clients only communicate with the Alcuin gateway. Embed tokens bind a workspace, published Agent Version, allowed origin, actions, and expiry. The framework-neutral Web Component creates scoped threads, consumes resumable canonical SSE, exposes host context and custom events, and can decide an approval only when the session explicitly includes `approval:decide`.
 
 Extension installation is disabled-first. The control plane persists only reviewed operations, stores credentials as secret references, performs live MCP discovery or OpenAPI reachability checks before enablement, and blocks private-network URLs unless a local-development policy explicitly allows them.
 
