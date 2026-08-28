@@ -16,7 +16,6 @@ test("runs an approval-gated operation through its real adapter", async ({ page 
 });
 
 test("renders declarative extension blocks and routes forms through approval", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name === "mobile", "Context Canvas is desktop-only in this prototype slice");
   await page.goto("/studio");
   await expect(page.getByText("Operations Copilot", { exact: true }).first()).toBeVisible();
 
@@ -25,6 +24,9 @@ test("renders declarative extension blocks and routes forms through approval", a
   await composer.press("Enter");
   await expect(page.getByText("Complete", { exact: true })).toBeVisible();
 
+  if (testInfo.project.name === "mobile") {
+    await page.getByRole("tab", { name: /^Canvas/ }).click();
+  }
   await page.getByRole("button", { name: /^Blocks/ }).click();
   await expect(page.getByText("Active record", { exact: true })).toBeVisible();
   await expect(page.getByText("Incident results", { exact: true })).toBeVisible();
@@ -47,6 +49,12 @@ test("keeps the mobile workspace single-panel and supports dark theme", async ({
 
   await expect(page.locator(".sidebar")).toHaveClass(/sidebar-collapsed/);
   await expect(page.locator(".context-canvas")).toBeHidden();
+  await expect(page.locator(".conversation-pane")).toBeVisible();
+  await page.getByRole("tab", { name: /^Canvas/ }).click();
+  await expect(page.locator(".conversation-pane")).toBeHidden();
+  await expect(page.locator(".context-canvas")).toBeVisible();
+  await page.getByRole("tab", { name: "Chat" }).click();
+  await expect(page.locator(".conversation-pane")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 
   await page.getByRole("button", { name: "Toggle theme" }).click();
