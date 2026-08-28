@@ -176,7 +176,9 @@ class Store:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
-    def _agent(row: sqlite3.Row, definition: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _agent(
+        row: sqlite3.Row, definition: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         result = dict(row)
         if definition is not None:
             result["definition"] = definition
@@ -203,12 +205,14 @@ class Store:
                 "tools": [
                     "web.search",
                     "ops.search_incidents",
-                    "ops.lookup_order",
                     "ops.update_ticket",
                 ],
                 "runtime": {"adapter": "langgraph-react", "max_steps": 8},
                 "policies": {"mutating_tools": "ask", "external_side_effects": "ask"},
-                "context_policy": {"accepted": ["page", "record", "selection"], "max_bytes": 16_384},
+                "context_policy": {
+                    "accepted": ["page", "record", "selection"],
+                    "max_bytes": 16_384,
+                },
                 "output_schema": {"type": "artifact", "format": "markdown"},
                 "starter_prompts": [
                     "Summarize the active checkout incident",
@@ -229,7 +233,10 @@ class Store:
                         {
                             "name": "ops.search_incidents",
                             "description": "Search incident records",
-                            "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {"query": {"type": "string"}},
+                            },
                             "mutating": False,
                         },
                         {
@@ -272,7 +279,11 @@ class Store:
                             },
                             "columns": [
                                 {"label": "Incident", "path": "id", "format": "text"},
-                                {"label": "Status", "path": "status", "format": "status"},
+                                {
+                                    "label": "Status",
+                                    "path": "status",
+                                    "format": "status",
+                                },
                             ],
                             "empty_state": "Run an incident search to populate this table.",
                         },
@@ -309,8 +320,16 @@ class Store:
                 },
                 "entrypoints": [{"type": "builtin", "adapter": "operations-demo"}],
                 "permissions": [
-                    {"id": "records:read", "reason": "Read operational records", "risk": "low"},
-                    {"id": "tickets:write", "reason": "Update incident status", "risk": "high"},
+                    {
+                        "id": "records:read",
+                        "reason": "Read operational records",
+                        "risk": "low",
+                    },
+                    {
+                        "id": "tickets:write",
+                        "reason": "Update incident status",
+                        "risk": "high",
+                    },
                 ],
             }
         )
@@ -380,7 +399,9 @@ class Store:
                     "ws_demo",
                     "agt_operations",
                     "Checkout latency review",
-                    self._json({"page": "/operations/incidents", "record": {"id": "INC-104"}}),
+                    self._json(
+                        {"page": "/operations/incidents", "record": {"id": "INC-104"}}
+                    ),
                     utc_now(),
                 ),
             )
@@ -400,7 +421,10 @@ class Store:
                 ),
             )
             demo_events = [
-                ("run.started", {"runtime": "langgraph-react", "provider": "openai-compatible"}),
+                (
+                    "run.started",
+                    {"runtime": "langgraph-react", "provider": "openai-compatible"},
+                ),
                 (
                     "tool.requested",
                     {
@@ -449,9 +473,17 @@ class Store:
                         }
                     },
                 ),
-                ("run.completed", {"status": "completed", "usage": {"input_tokens": 132, "output_tokens": 96}}),
+                (
+                    "run.completed",
+                    {
+                        "status": "completed",
+                        "usage": {"input_tokens": 132, "output_tokens": 96},
+                    },
+                ),
             ]
-            for sequence, (event_type, event_payload) in enumerate(demo_events, start=1):
+            for sequence, (event_type, event_payload) in enumerate(
+                demo_events, start=1
+            ):
                 self.connection.execute(
                     """INSERT OR IGNORE INTO events
                     (id, workspace_id, run_id, sequence, type, payload_json, created_at)
@@ -478,7 +510,13 @@ class Store:
             WHERE a.workspace_id = ? ORDER BY a.created_at""",
             (workspace_id,),
         )
-        return [self._agent(row, json.loads(row["definition_json"]) if row["definition_json"] else None) for row in rows]
+        return [
+            self._agent(
+                row,
+                json.loads(row["definition_json"]) if row["definition_json"] else None,
+            )
+            for row in rows
+        ]
 
     def get_agent(self, workspace_id: str, agent_id: str) -> dict[str, Any] | None:
         row = self._one(
@@ -489,9 +527,13 @@ class Store:
         )
         if not row:
             return None
-        return self._agent(row, json.loads(row["definition_json"]) if row["definition_json"] else None)
+        return self._agent(
+            row, json.loads(row["definition_json"]) if row["definition_json"] else None
+        )
 
-    def get_agent_version(self, workspace_id: str, version_id: str) -> dict[str, Any] | None:
+    def get_agent_version(
+        self, workspace_id: str, version_id: str
+    ) -> dict[str, Any] | None:
         row = self._one(
             "SELECT * FROM agent_versions WHERE workspace_id = ? AND id = ?",
             (workspace_id, version_id),
@@ -524,7 +566,13 @@ class Store:
                     """INSERT INTO agent_versions
                     (id, workspace_id, agent_id, version, definition_json, created_at)
                     VALUES (?, ?, ?, 1, ?, ?)""",
-                    (version_id, workspace_id, agent_id, payload.definition.model_dump_json(), created_at),
+                    (
+                        version_id,
+                        workspace_id,
+                        agent_id,
+                        payload.definition.model_dump_json(),
+                        created_at,
+                    ),
                 )
         except sqlite3.IntegrityError as exc:
             if "agents.workspace_id, agents.slug" in str(exc):
@@ -538,7 +586,10 @@ class Store:
         agent = self.get_agent(workspace_id, agent_id)
         if not agent:
             return None
-        row = self._one("SELECT COALESCE(MAX(version), 0) AS value FROM agent_versions WHERE agent_id = ?", (agent_id,))
+        row = self._one(
+            "SELECT COALESCE(MAX(version), 0) AS value FROM agent_versions WHERE agent_id = ?",
+            (agent_id,),
+        )
         version = int(row["value"]) + 1
         version_id = new_id("av")
         with self.lock, self.connection:
@@ -546,7 +597,14 @@ class Store:
                 """INSERT INTO agent_versions
                 (id, workspace_id, agent_id, version, definition_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)""",
-                (version_id, workspace_id, agent_id, version, definition.model_dump_json(), utc_now()),
+                (
+                    version_id,
+                    workspace_id,
+                    agent_id,
+                    version,
+                    definition.model_dump_json(),
+                    utc_now(),
+                ),
             )
             self.connection.execute(
                 """UPDATE agents SET current_version_id = ?, status = 'draft', name = ?, description = ?
@@ -577,13 +635,21 @@ class Store:
             self.connection.execute(
                 """INSERT INTO threads(id, workspace_id, agent_id, title, context_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)""",
-                (thread_id, workspace_id, agent_id, title, self._json(context), utc_now()),
+                (
+                    thread_id,
+                    workspace_id,
+                    agent_id,
+                    title,
+                    self._json(context),
+                    utc_now(),
+                ),
             )
         return self.get_thread(workspace_id, thread_id) or {}
 
     def get_thread(self, workspace_id: str, thread_id: str) -> dict[str, Any] | None:
         row = self._one(
-            "SELECT * FROM threads WHERE workspace_id = ? AND id = ?", (workspace_id, thread_id)
+            "SELECT * FROM threads WHERE workspace_id = ? AND id = ?",
+            (workspace_id, thread_id),
         )
         if not row:
             return None
@@ -593,7 +659,8 @@ class Store:
 
     def list_threads(self, workspace_id: str) -> list[dict[str, Any]]:
         rows = self._all(
-            "SELECT * FROM threads WHERE workspace_id = ? ORDER BY created_at DESC", (workspace_id,)
+            "SELECT * FROM threads WHERE workspace_id = ? ORDER BY created_at DESC",
+            (workspace_id,),
         )
         result = []
         for row in rows:
@@ -616,7 +683,10 @@ class Store:
         return self.get_run(workspace_id, run_id) or {}
 
     def get_run(self, workspace_id: str, run_id: str) -> dict[str, Any] | None:
-        row = self._one("SELECT * FROM runs WHERE workspace_id = ? AND id = ?", (workspace_id, run_id))
+        row = self._one(
+            "SELECT * FROM runs WHERE workspace_id = ? AND id = ?",
+            (workspace_id, run_id),
+        )
         return dict(row) if row else None
 
     def list_runs(self, workspace_id: str, limit: int = 30) -> list[dict[str, Any]]:
@@ -643,7 +713,8 @@ class Store:
     ) -> dict[str, Any]:
         with self.lock, self.connection:
             row = self._one(
-                "SELECT COALESCE(MAX(sequence), 0) AS value FROM events WHERE run_id = ?", (run_id,)
+                "SELECT COALESCE(MAX(sequence), 0) AS value FROM events WHERE run_id = ?",
+                (run_id,),
             )
             sequence = int(row["value"]) + 1
             event_id, created_at = new_id("evt"), utc_now()
@@ -651,7 +722,15 @@ class Store:
                 """INSERT INTO events
                 (id, workspace_id, run_id, sequence, type, payload_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (event_id, workspace_id, run_id, sequence, event_type, self._json(payload), created_at),
+                (
+                    event_id,
+                    workspace_id,
+                    run_id,
+                    sequence,
+                    event_type,
+                    self._json(payload),
+                    created_at,
+                ),
             )
         return {
             "id": event_id,
@@ -662,7 +741,9 @@ class Store:
             "payload": payload,
         }
 
-    def list_events(self, workspace_id: str, run_id: str, after: int = 0) -> list[dict[str, Any]]:
+    def list_events(
+        self, workspace_id: str, run_id: str, after: int = 0
+    ) -> list[dict[str, Any]]:
         rows = self._all(
             """SELECT * FROM events
             WHERE workspace_id = ? AND run_id = ? AND sequence > ? ORDER BY sequence""",
@@ -700,7 +781,9 @@ class Store:
             "created_at": created_at,
         }
 
-    def get_approval(self, workspace_id: str, approval_id: str) -> dict[str, Any] | None:
+    def get_approval(
+        self, workspace_id: str, approval_id: str
+    ) -> dict[str, Any] | None:
         row = self._one(
             "SELECT * FROM approvals WHERE workspace_id = ? AND id = ?",
             (workspace_id, approval_id),
@@ -724,7 +807,8 @@ class Store:
 
     def list_extensions(self, workspace_id: str) -> list[dict[str, Any]]:
         rows = self._all(
-            "SELECT * FROM extensions WHERE workspace_id = ? ORDER BY installed_at", (workspace_id,)
+            "SELECT * FROM extensions WHERE workspace_id = ? ORDER BY installed_at",
+            (workspace_id,),
         )
         return [self._extension(row) for row in rows]
 
@@ -735,9 +819,12 @@ class Store:
         result["credential_refs"] = json.loads(result.pop("credential_refs_json"))
         return result
 
-    def get_extension(self, workspace_id: str, extension_id: str) -> dict[str, Any] | None:
+    def get_extension(
+        self, workspace_id: str, extension_id: str
+    ) -> dict[str, Any] | None:
         row = self._one(
-            "SELECT * FROM extensions WHERE workspace_id = ? AND id = ?", (workspace_id, extension_id)
+            "SELECT * FROM extensions WHERE workspace_id = ? AND id = ?",
+            (workspace_id, extension_id),
         )
         return self._extension(row) if row else None
 
@@ -792,7 +879,12 @@ class Store:
         with self.lock, self.connection:
             self.connection.execute(
                 "UPDATE extensions SET status = ?, health = ? WHERE workspace_id = ? AND id = ?",
-                (status or extension["status"], health or extension["health"], workspace_id, extension_id),
+                (
+                    status or extension["status"],
+                    health or extension["health"],
+                    workspace_id,
+                    extension_id,
+                ),
             )
         return self.get_extension(workspace_id, extension_id)
 
@@ -810,9 +902,7 @@ class Store:
                 (self._json(credential_refs), workspace_id, extension_id),
             )
         return (
-            self.get_extension(workspace_id, extension_id)
-            if cursor.rowcount
-            else None
+            self.get_extension(workspace_id, extension_id) if cursor.rowcount else None
         )
 
     def update_extension_manifest(
@@ -834,9 +924,7 @@ class Store:
                 ),
             )
         return (
-            self.get_extension(workspace_id, extension_id)
-            if cursor.rowcount
-            else None
+            self.get_extension(workspace_id, extension_id) if cursor.rowcount else None
         )
 
     def bootstrap(self, workspace_id: str) -> dict[str, Any] | None:

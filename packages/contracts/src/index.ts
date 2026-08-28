@@ -211,6 +211,18 @@ export interface KnowledgeDocument {
   updated_at: string;
 }
 
+export interface ToolCatalogEntry {
+  id: string;
+  name: string;
+  description: string;
+  source: "builtin" | "extension";
+  extension_manifest_id: string | null;
+  extension_name: string | null;
+  mutating: boolean;
+  available: boolean;
+  status: "available" | "disabled" | "unchecked" | "unhealthy" | "adapter_missing";
+}
+
 export interface Thread {
   id: string;
   workspace_id: string;
@@ -268,6 +280,7 @@ export interface BootstrapPayload {
   workspace: { id: string; name: string; created_at: string };
   agents: Agent[];
   extensions: Extension[];
+  tools: ToolCatalogEntry[];
   knowledge_sources: KnowledgeSource[];
   threads: Thread[];
   runs: Run[];

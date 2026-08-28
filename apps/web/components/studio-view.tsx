@@ -225,7 +225,7 @@ export function StudioView({
       >
         <header className="surface-header conversation-header">
           <div>
-            <div className="eyebrow"><span className="live-dot" />{t("Published agent")} · v{agent.version}</div>
+            <div className="eyebrow"><span className="live-dot" />{t(agent.status === "published" ? "Published agent" : "Draft agent")} · v{agent.version}</div>
             <h1>{agent.name}</h1>
           </div>
           <div className="header-actions">

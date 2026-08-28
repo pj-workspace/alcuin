@@ -213,7 +213,7 @@ export function Workbench({ surface }: { surface: Surface }) {
           agent={activeAgent}
           agents={data.agents}
           knowledgeSources={data.knowledge_sources}
-          extensions={data.extensions}
+          tools={data.tools}
           onChanged={refresh}
           onCreateAgent={openCreateAgent}
           onSelectAgent={selectAgent}

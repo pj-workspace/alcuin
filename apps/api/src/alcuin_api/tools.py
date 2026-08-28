@@ -89,6 +89,7 @@ class ToolDefinition:
     mutating: bool = False
     timeout_seconds: float = 15.0
     max_calls_per_run: int = 4
+    available: bool = True
 
     @property
     def provider_name(self) -> str:
@@ -125,7 +126,9 @@ class ToolRegistry:
         if definition.name in self._definitions:
             raise ValueError(f"Tool is already registered: {definition.name}")
         if not definition.provider_name:
-            raise ValueError("Tool name must contain at least one provider-safe character")
+            raise ValueError(
+                "Tool name must contain at least one provider-safe character"
+            )
         conflict = self._provider_names.get(definition.provider_name)
         if conflict:
             raise ValueError(
@@ -140,6 +143,10 @@ class ToolRegistry:
 
     def get(self, name: str) -> ToolDefinition | None:
         return self._definitions.get(name)
+
+    def values(self) -> tuple[ToolDefinition, ...]:
+        """Return the registered definitions without exposing the mutable registry."""
+        return tuple(self._definitions.values())
 
     def canonical_name(self, provider_name: str, allowed_names: Iterable[str]) -> str:
         canonical = self._provider_names.get(provider_name, provider_name)
@@ -158,8 +165,26 @@ class ToolExecutor:
         self.dynamic_resolver = dynamic_resolver
 
     def _dynamic_registry(self, workspace_id: str) -> ToolRegistry:
-        definitions = self.dynamic_resolver(workspace_id) if self.dynamic_resolver else ()
+        definitions = (
+            self.dynamic_resolver(workspace_id) if self.dynamic_resolver else ()
+        )
         return ToolRegistry(definitions)
+
+    def builtin_catalog(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": definition.name,
+                "name": definition.name,
+                "description": definition.description,
+                "source": "builtin",
+                "extension_manifest_id": None,
+                "extension_name": None,
+                "mutating": definition.mutating,
+                "available": True,
+                "status": "available",
+            }
+            for definition in self.registry.values()
+        ]
 
     def provider_schemas(
         self,
@@ -183,7 +208,7 @@ class ToolExecutor:
         provider_names: dict[str, str] = {}
         for name in dict.fromkeys(allowed_names):
             definition = self.registry.get(name) or dynamic.get(name)
-            if definition is None:
+            if definition is None or not definition.available:
                 continue
             conflict = provider_names.get(definition.provider_name)
             if conflict and conflict != definition.name:
@@ -203,9 +228,13 @@ class ToolExecutor:
         workspace_id: str = "",
     ) -> ToolDefinition:
         allowed = set(allowed_names)
-        definition = self.registry.get(name) or self._dynamic_registry(workspace_id).get(name)
+        definition = self.registry.get(name) or self._dynamic_registry(
+            workspace_id
+        ).get(name)
         if name not in allowed or definition is None:
-            raise ToolError("tool_not_allowed", f"Tool is not available to this agent: {name}")
+            raise ToolError(
+                "tool_not_allowed", f"Tool is not available to this agent: {name}"
+            )
         return definition
 
     def canonical_name(
@@ -263,6 +292,10 @@ class ToolExecutor:
             raise ToolError("tool_failed", "Tool execution failed") from exc
 
         if not isinstance(result, ToolResult):
-            raise ToolError("invalid_result", "Tool returned an invalid result envelope")
+            raise ToolError(
+                "invalid_result", "Tool returned an invalid result envelope"
+            )
         duration_ms = max(0, round((time.perf_counter() - started) * 1000))
-        return ToolExecution(definition=definition, result=result, duration_ms=duration_ms)
+        return ToolExecution(
+            definition=definition, result=result, duration_ms=duration_ms
+        )

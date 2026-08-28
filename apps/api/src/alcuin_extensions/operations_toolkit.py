@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from alcuin_api.tools import ToolContext, ToolError, ToolResult
+from alcuin_api.tools import ToolCitation, ToolContext, ToolError, ToolResult
 
 
 async def operations_demo_adapter(
@@ -25,6 +25,20 @@ async def operations_demo_adapter(
                 ],
             },
             summary="One matching incident found",
+            citations=(
+                ToolCitation(
+                    label="Active incident",
+                    source="Operations Toolkit",
+                    locator=(
+                        "ops://incidents/"
+                        + str(
+                            context.thread_context.get("record", {}).get(
+                                "id", "INC-104"
+                            )
+                        )
+                    ),
+                ),
+            ),
         )
     if tool_name == "ops.update_ticket":
         return ToolResult(

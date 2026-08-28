@@ -4,7 +4,12 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from .contracts import BuiltinEntrypoint, ExtensionManifest, MCPEntrypoint, OpenAPIEntrypoint
+from .contracts import (
+    BuiltinEntrypoint,
+    ExtensionManifest,
+    MCPEntrypoint,
+    OpenAPIEntrypoint,
+)
 from .mcp_gateway import MCPGateway
 from .openapi_gateway import OpenAPIGateway
 from .store import Store
@@ -12,9 +17,7 @@ from .tools import ToolContext, ToolDefinition, ToolError, ToolResult
 
 
 MAX_EXTENSION_EVENT_RESULT_CHARS = 64_000
-BuiltinToolAdapter = Callable[
-    [ToolContext, str, dict[str, Any]], Awaitable[ToolResult]
-]
+BuiltinToolAdapter = Callable[[ToolContext, str, dict[str, Any]], Awaitable[ToolResult]]
 
 
 def extension_tool_name(manifest_id: str, tool_name: str) -> str:
@@ -23,7 +26,9 @@ def extension_tool_name(manifest_id: str, tool_name: str) -> str:
 
 
 def bounded_result(data: dict[str, Any]) -> dict[str, Any]:
-    serialized = json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
+    serialized = json.dumps(
+        data, ensure_ascii=False, separators=(",", ":"), default=str
+    )
     if len(serialized) <= MAX_EXTENSION_EVENT_RESULT_CHARS:
         return data
     return {
@@ -79,12 +84,17 @@ class ExtensionToolService:
                             if isinstance(entrypoint, BuiltinEntrypoint)
                             else extension_tool_name(manifest.id, raw_name)
                         ),
-                        description=str(tool.get("description") or f"Call {raw_name}")[:500],
+                        description=str(tool.get("description") or f"Call {raw_name}")[
+                            :500
+                        ],
                         input_schema=input_schema,
                         handler=self._handler(extension["id"], manifest.id, raw_name),
                         mutating=bool(tool.get("mutating")),
                         timeout_seconds=self._bounded_number(
-                            tool.get("timeout_seconds"), default=15.0, minimum=1.0, maximum=30.0
+                            tool.get("timeout_seconds"),
+                            default=15.0,
+                            minimum=1.0,
+                            maximum=30.0,
                         ),
                         max_calls_per_run=int(
                             self._bounded_number(
@@ -94,9 +104,70 @@ class ExtensionToolService:
                                 maximum=4,
                             )
                         ),
+                        available=(
+                            not isinstance(entrypoint, BuiltinEntrypoint)
+                            or entrypoint.adapter in self.builtin_adapters
+                        ),
                     )
                 )
         return definitions
+
+    def catalog(self, workspace_id: str) -> list[dict[str, Any]]:
+        """Describe installed contributions, including tools that are not runnable yet."""
+        catalog: list[dict[str, Any]] = []
+        for extension in self.store.list_extensions(workspace_id):
+            manifest = ExtensionManifest.model_validate(extension["manifest"])
+            entrypoint = next(
+                (
+                    item
+                    for item in manifest.entrypoints
+                    if item.type in {"mcp", "openapi", "builtin"}
+                ),
+                None,
+            )
+            if entrypoint is None:
+                continue
+            available = extension["status"] == "enabled" and extension["health"] in {
+                "healthy",
+                "degraded",
+            }
+            status = "available"
+            if extension["status"] != "enabled":
+                status = "disabled"
+            elif extension["health"] == "unchecked":
+                status = "unchecked"
+            elif extension["health"] not in {"healthy", "degraded"}:
+                status = "unhealthy"
+            elif (
+                isinstance(entrypoint, BuiltinEntrypoint)
+                and entrypoint.adapter not in self.builtin_adapters
+            ):
+                available = False
+                status = "adapter_missing"
+            for tool in manifest.contributions.tools:
+                raw_name = str(tool.get("name") or "").strip()
+                if not raw_name:
+                    continue
+                catalog.append(
+                    {
+                        "id": (
+                            raw_name
+                            if isinstance(entrypoint, BuiltinEntrypoint)
+                            else extension_tool_name(manifest.id, raw_name)
+                        ),
+                        "name": raw_name,
+                        "description": str(
+                            tool.get("description") or f"Call {raw_name}"
+                        )[:500],
+                        "source": "extension",
+                        "extension_manifest_id": manifest.id,
+                        "extension_name": manifest.name,
+                        "mutating": bool(tool.get("mutating")),
+                        "available": available,
+                        "status": status,
+                    }
+                )
+        return catalog
 
     @staticmethod
     def _bounded_number(
@@ -113,15 +184,22 @@ class ExtensionToolService:
         return min(maximum, max(minimum, number))
 
     def _handler(self, extension_id: str, manifest_id: str, raw_name: str):
-        async def execute(context: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+        async def execute(
+            context: ToolContext, arguments: dict[str, Any]
+        ) -> ToolResult:
             extension = self.store.get_extension(context.workspace_id, extension_id)
             if not extension or extension.get("manifest_id") != manifest_id:
-                raise ToolError("extension_unavailable", "Extension is not available in this workspace")
+                raise ToolError(
+                    "extension_unavailable",
+                    "Extension is not available in this workspace",
+                )
             if extension["status"] != "enabled" or extension["health"] not in {
                 "healthy",
                 "degraded",
             }:
-                raise ToolError("extension_unavailable", "Extension is disabled or unhealthy")
+                raise ToolError(
+                    "extension_unavailable", "Extension is disabled or unhealthy"
+                )
             manifest = ExtensionManifest.model_validate(extension["manifest"])
             tool = next(
                 (
@@ -132,12 +210,15 @@ class ExtensionToolService:
                 None,
             )
             if tool is None:
-                raise ToolError("tool_not_allowed", "Extension tool is no longer approved")
+                raise ToolError(
+                    "tool_not_allowed", "Extension tool is no longer approved"
+                )
             if tool.get("mutating") and not context.mutation_authorized:
                 raise ToolError(
                     "approval_required",
                     "Mutating extension tools require an authorized Agent execution",
                 )
+            citations = ()
             entrypoint = next(
                 (
                     item
@@ -149,9 +230,13 @@ class ExtensionToolService:
             if isinstance(entrypoint, MCPEntrypoint):
                 result = await self.mcp_gateway.call(entrypoint, raw_name, arguments)
                 if result.get("is_error"):
-                    raise ToolError("extension_tool_failed", "MCP tool reported a failure")
+                    raise ToolError(
+                        "extension_tool_failed", "MCP tool reported a failure"
+                    )
                 structured = result.get("structured_content")
-                data = structured if isinstance(structured, dict) else {"result": result}
+                data = (
+                    structured if isinstance(structured, dict) else {"result": result}
+                )
             elif isinstance(entrypoint, OpenAPIEntrypoint):
                 result = await self.openapi_gateway.call(
                     entrypoint,
@@ -170,11 +255,15 @@ class ExtensionToolService:
                     )
                 adapter_result = await adapter(context, raw_name, arguments)
                 data = adapter_result.data
+                citations = adapter_result.citations
             else:
-                raise ToolError("extension_unavailable", "Extension has no executable entrypoint")
+                raise ToolError(
+                    "extension_unavailable", "Extension has no executable entrypoint"
+                )
             return ToolResult(
                 data=bounded_result(data),
                 summary=f"{manifest.name} completed {raw_name}",
+                citations=citations,
             )
 
         return execute
