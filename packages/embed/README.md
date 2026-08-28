@@ -2,8 +2,11 @@
 
 Framework-neutral custom element for published Alcuin agents.
 
+```js
+import "@alcuin/embed";
+```
+
 ```html
-<script type="module" src="./index.js"></script>
 <alcuin-agent
   api-url="http://localhost:8000"
   session-token="SHORT_LIVED_SERVER_ISSUED_TOKEN"
@@ -18,6 +21,13 @@ Pass host context before the first message:
 const agent = document.querySelector("alcuin-agent");
 agent.setContext({ page: "/incidents", record: { id: "INC-104" } });
 agent.addEventListener("alcuin:artifact", (event) => console.log(event.detail));
+agent.addEventListener("alcuin:approval", (event) => {
+  console.log("Approval requested", event.detail);
+});
 ```
 
-The component emits `alcuin:run-start`, `alcuin:event`, `alcuin:artifact`, and `alcuin:error`.
+The component emits `alcuin:run-start`, `alcuin:event`, `alcuin:artifact`,
+`alcuin:approval`, and `alcuin:error`. Its built-in approval card calls the
+governed decision endpoint and resumes the same Run from its last SSE sequence.
+Hosts can also call `decideApproval(runId, approvalId, decision, note?)` from
+their own approval UI.

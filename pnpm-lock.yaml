@@ -20,6 +20,9 @@ importers:
       '@alcuin/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@alcuin/embed':
+        specifier: workspace:*
+        version: link:../../packages/embed
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
