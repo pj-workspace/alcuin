@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Annotated, Any, Literal
@@ -117,6 +118,31 @@ class RunCreate(StrictModel):
     def validate_content(self) -> "RunCreate":
         if not self.input.strip() and not self.attachments:
             raise ValueError("a run requires text or at least one attachment")
+        return self
+
+
+class KnowledgeSourceCreate(StrictModel):
+    name: str = Field(min_length=2, max_length=100)
+    description: str = Field(default="", max_length=500)
+
+
+class KnowledgeDocumentCreate(StrictModel):
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=2_000_000)
+    source_uri: str | None = Field(default=None, max_length=2_000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_document(self) -> "KnowledgeDocumentCreate":
+        if not self.content.strip():
+            raise ValueError("knowledge document content cannot be blank")
+        metadata_size = len(
+            json.dumps(self.metadata, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        if metadata_size > 16_384:
+            raise ValueError("knowledge document metadata must be 16 KiB or smaller")
         return self
 
 

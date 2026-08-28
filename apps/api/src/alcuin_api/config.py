@@ -45,6 +45,23 @@ class Settings(BaseSettings):
     web_page_cache_ttl_seconds: float = Field(default=1800.0, ge=0.0, le=86_400.0)
     web_page_max_bytes: int = Field(default=524_288, ge=16_384, le=2_097_152)
     web_page_max_chars: int = Field(default=6_000, ge=1_000, le=50_000)
+    qdrant_url: str | None = None
+    qdrant_api_key: str | None = None
+    qdrant_timeout_seconds: int = Field(default=10, ge=1, le=60)
+    dashscope_api_key: str | None = None
+    dashscope_http_api_url: str = (
+        "https://dashscope.aliyuncs.com/api/v1"
+    )
+    qwen_embedding_model: str = "text-embedding-v3"
+    embedding_timeout_seconds: float = Field(default=20.0, ge=2.0, le=60.0)
+    embedding_max_retries: int = Field(default=2, ge=0, le=4)
+    embedding_batch_size: int = Field(default=10, ge=1, le=10)
+    knowledge_collection: str = Field(
+        default="alcuin_knowledge_qwen_native_v1",
+        pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{2,127}$",
+    )
+    knowledge_dense_dimensions: int = Field(default=1_024, ge=32, le=4_096)
+    knowledge_index_revision: str = "qwen-native-v1"
 
     @property
     def allowed_origins(self) -> list[str]:

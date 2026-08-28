@@ -7,7 +7,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .contracts import AgentCreate, AgentDefinition, ExtensionManifest, utc_now
+from .contracts import (
+    AgentCreate,
+    AgentDefinition,
+    ExtensionManifest,
+    KnowledgeSourceCreate,
+    utc_now,
+)
 
 
 def new_id(prefix: str) -> str:
@@ -106,8 +112,54 @@ class Store:
                     installed_at TEXT NOT NULL,
                     UNIQUE(workspace_id, manifest_id)
                 );
+                CREATE TABLE IF NOT EXISTS knowledge_sources (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, name)
+                );
+                CREATE TABLE IF NOT EXISTS knowledge_documents (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    source_id TEXT NOT NULL REFERENCES knowledge_sources(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    source_uri TEXT,
+                    content TEXT,
+                    content_hash TEXT NOT NULL,
+                    index_revision TEXT NOT NULL DEFAULT '',
+                    chunk_count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, source_id, content_hash)
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_sources_workspace
+                    ON knowledge_sources(workspace_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_documents_source
+                    ON knowledge_documents(workspace_id, source_id, created_at);
                 """
             )
+            document_columns = {
+                row["name"]
+                for row in self.connection.execute(
+                    "PRAGMA table_info(knowledge_documents)"
+                ).fetchall()
+            }
+            if "content" not in document_columns:
+                self.connection.execute(
+                    "ALTER TABLE knowledge_documents ADD COLUMN content TEXT"
+                )
+            if "index_revision" not in document_columns:
+                self.connection.execute(
+                    "ALTER TABLE knowledge_documents "
+                    "ADD COLUMN index_revision TEXT NOT NULL DEFAULT ''"
+                )
         self.seed_demo()
 
     def close(self) -> None:
@@ -672,6 +724,237 @@ class Store:
             "workspace": workspace,
             "agents": self.list_agents(workspace_id),
             "extensions": self.list_extensions(workspace_id),
+            "knowledge_sources": self.list_knowledge_sources(workspace_id),
             "threads": self.list_threads(workspace_id),
             "runs": self.list_runs(workspace_id),
         }
+
+    def create_knowledge_source(
+        self,
+        workspace_id: str,
+        payload: KnowledgeSourceCreate,
+    ) -> dict[str, Any]:
+        source_id = new_id("ksrc")
+        created_at = utc_now()
+        with self.lock, self.connection:
+            self.connection.execute(
+                """INSERT INTO knowledge_sources
+                (id, workspace_id, name, description, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'ready', ?, ?)""",
+                (
+                    source_id,
+                    workspace_id,
+                    payload.name.strip(),
+                    payload.description.strip(),
+                    created_at,
+                    created_at,
+                ),
+            )
+        return self.get_knowledge_source(workspace_id, source_id) or {}
+
+    def list_knowledge_sources(self, workspace_id: str) -> list[dict[str, Any]]:
+        rows = self._all(
+            """SELECT s.*,
+                COUNT(d.id) AS document_count,
+                COALESCE(SUM(CASE WHEN d.status = 'ready' THEN d.chunk_count ELSE 0 END), 0)
+                    AS chunk_count
+            FROM knowledge_sources s
+            LEFT JOIN knowledge_documents d
+                ON d.source_id = s.id AND d.workspace_id = s.workspace_id
+            WHERE s.workspace_id = ?
+            GROUP BY s.id
+            ORDER BY s.created_at DESC""",
+            (workspace_id,),
+        )
+        return [dict(row) for row in rows]
+
+    def get_knowledge_source(
+        self,
+        workspace_id: str,
+        source_id: str,
+    ) -> dict[str, Any] | None:
+        row = self._one(
+            """SELECT s.*,
+                COUNT(d.id) AS document_count,
+                COALESCE(SUM(CASE WHEN d.status = 'ready' THEN d.chunk_count ELSE 0 END), 0)
+                    AS chunk_count
+            FROM knowledge_sources s
+            LEFT JOIN knowledge_documents d
+                ON d.source_id = s.id AND d.workspace_id = s.workspace_id
+            WHERE s.workspace_id = ? AND s.id = ?
+            GROUP BY s.id""",
+            (workspace_id, source_id),
+        )
+        return dict(row) if row else None
+
+    def begin_knowledge_document(
+        self,
+        workspace_id: str,
+        source_id: str,
+        *,
+        title: str,
+        source_uri: str | None,
+        content: str,
+        content_hash: str,
+        index_revision: str,
+        metadata: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        with self.lock, self.connection:
+            existing = self._one(
+                """SELECT * FROM knowledge_documents
+                WHERE workspace_id = ? AND source_id = ? AND content_hash = ?""",
+                (workspace_id, source_id, content_hash),
+            )
+            if (
+                existing
+                and existing["status"] == "ready"
+                and existing["index_revision"] == index_revision
+            ):
+                return self._knowledge_document(existing), False
+
+            updated_at = utc_now()
+            if existing:
+                self.connection.execute(
+                    """UPDATE knowledge_documents
+                    SET title = ?, source_uri = ?, content = ?, index_revision = ?,
+                        metadata_json = ?, status = 'indexing', error = NULL, updated_at = ?
+                    WHERE workspace_id = ? AND id = ?""",
+                    (
+                        title,
+                        source_uri,
+                        content,
+                        index_revision,
+                        self._json(metadata),
+                        updated_at,
+                        workspace_id,
+                        existing["id"],
+                    ),
+                )
+                row = self._one(
+                    "SELECT * FROM knowledge_documents WHERE workspace_id = ? AND id = ?",
+                    (workspace_id, existing["id"]),
+                )
+                return self._knowledge_document(row), True
+
+            document_id = new_id("kdoc")
+            self.connection.execute(
+                """INSERT INTO knowledge_documents
+                (id, workspace_id, source_id, title, source_uri, content, content_hash,
+                 index_revision, chunk_count, status, metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'indexing', ?, ?, ?)""",
+                (
+                    document_id,
+                    workspace_id,
+                    source_id,
+                    title,
+                    source_uri,
+                    content,
+                    content_hash,
+                    index_revision,
+                    self._json(metadata),
+                    updated_at,
+                    updated_at,
+                ),
+            )
+            row = self._one(
+                "SELECT * FROM knowledge_documents WHERE workspace_id = ? AND id = ?",
+                (workspace_id, document_id),
+            )
+            return self._knowledge_document(row), True
+
+    def finish_knowledge_document(
+        self,
+        workspace_id: str,
+        document_id: str,
+        *,
+        chunk_count: int,
+    ) -> dict[str, Any] | None:
+        with self.lock, self.connection:
+            cursor = self.connection.execute(
+                """UPDATE knowledge_documents
+                SET status = 'ready', chunk_count = ?, error = NULL, updated_at = ?
+                WHERE workspace_id = ? AND id = ?""",
+                (chunk_count, utc_now(), workspace_id, document_id),
+            )
+        return (
+            self.get_knowledge_document(workspace_id, document_id)
+            if cursor.rowcount
+            else None
+        )
+
+    def fail_knowledge_document(
+        self,
+        workspace_id: str,
+        document_id: str,
+        *,
+        error: str,
+    ) -> None:
+        with self.lock, self.connection:
+            self.connection.execute(
+                """UPDATE knowledge_documents
+                SET status = 'failed', error = ?, updated_at = ?
+                WHERE workspace_id = ? AND id = ?""",
+                (error[:300], utc_now(), workspace_id, document_id),
+            )
+
+    @staticmethod
+    def _knowledge_document(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        result = dict(row)
+        result["metadata"] = json.loads(result.pop("metadata_json"))
+        result.pop("content", None)
+        return result
+
+    def get_knowledge_document(
+        self,
+        workspace_id: str,
+        document_id: str,
+    ) -> dict[str, Any] | None:
+        row = self._one(
+            "SELECT * FROM knowledge_documents WHERE workspace_id = ? AND id = ?",
+            (workspace_id, document_id),
+        )
+        return self._knowledge_document(row) if row else None
+
+    def list_knowledge_documents(
+        self,
+        workspace_id: str,
+        source_id: str,
+    ) -> list[dict[str, Any]]:
+        rows = self._all(
+            """SELECT * FROM knowledge_documents
+            WHERE workspace_id = ? AND source_id = ? ORDER BY created_at DESC""",
+            (workspace_id, source_id),
+        )
+        return [self._knowledge_document(row) for row in rows]
+
+    def delete_knowledge_source(self, workspace_id: str, source_id: str) -> bool:
+        with self.lock, self.connection:
+            cursor = self.connection.execute(
+                "DELETE FROM knowledge_sources WHERE workspace_id = ? AND id = ?",
+                (workspace_id, source_id),
+            )
+        return bool(cursor.rowcount)
+
+    def knowledge_source_references(
+        self,
+        workspace_id: str,
+        source_id: str,
+    ) -> list[dict[str, Any]]:
+        rows = self._all(
+            """SELECT v.id AS version_id, v.agent_id, v.version, v.definition_json,
+                a.name AS agent_name
+            FROM agent_versions v JOIN agents a ON a.id = v.agent_id
+            WHERE v.workspace_id = ?""",
+            (workspace_id,),
+        )
+        references: list[dict[str, Any]] = []
+        for row in rows:
+            definition = json.loads(row["definition_json"])
+            if source_id not in definition.get("knowledge", []):
+                continue
+            item = dict(row)
+            item.pop("definition_json", None)
+            references.append(item)
+        return references

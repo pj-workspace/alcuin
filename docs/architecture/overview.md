@@ -64,6 +64,8 @@ OpenAI-compatible Chat Completions runs use a bounded tool loop. Agent tool ids 
 
 The first registered adapter is `web.search`. It targets a configured self-hosted SearXNG JSON endpoint and provides quick snippet search plus an optional bounded deep-read path. A shared HTTP client, TTL caches, canonical URL deduplication, public-address validation, response-size limits, per-page deadlines, per-Run call budgets, and citation deduplication bound latency and exposure to untrusted web content.
 
+`knowledge.search` is the governed retrieval adapter. SQLite stores Workspace-owned source and document lifecycle metadata plus canonical source text for controlled reindexing; Qdrant stores chunk payloads and named dense/sparse vectors. Ingestion normalizes content, chunks deterministically, hashes documents for idempotency, and records failed indexing without backend details. A replaceable `EmbeddingProvider` currently calls Qwen `text-embedding-v3` through DashScope and fuses its dense and sparse outputs with reciprocal-rank fusion. Requests are limited to ten texts per batch, retried within a fixed budget, and validated before indexing. Every Qdrant branch carries mandatory `workspace_id` and Agent-bound `source_id` filters, and results are checked again before they leave the adapter. Agent versions may only bind source ids owned by their Workspace, and a referenced source cannot be deleted while any immutable Agent version depends on it.
+
 Persisted `ExecutionEvent` records remain the canonical protocol. The run-events endpoint also provides a lightweight TCM-compatible projection with `?protocol=tcm`, mapping reasoning, text, tools, approvals, artifacts, citations, errors, and completion into data-only SSE frames. Studio consumes that projection and renders a collapsed reasoning/tool timeline followed by the Markdown answer. Completion is a terminal stream event, not an Agent tool call; domain-specific TCM workflow states are not part of Alcuin Core.
 
 MCP processes and remote transports terminate in the API service. Browser clients only communicate with the Alcuin gateway. Embed tokens bind a workspace, published Agent Version, allowed origin, actions, and expiry.
@@ -73,7 +75,7 @@ See [ADR-0001](adr-0001-runtime-extension-contracts.md) for the contract decisio
 ## Remaining Decisions
 
 - Checkpoint storage and resume semantics
-- Production PostgreSQL, Redis, Qdrant, and object-storage adapters
+- Production PostgreSQL, Redis, managed-Qdrant, and object-storage adapters
 - Team membership and RBAC beyond workspace ownership
 - Signed extension packaging and distribution trust
 - Evaluation and observability integration
