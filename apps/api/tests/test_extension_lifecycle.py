@@ -10,7 +10,7 @@ from alcuin_api.config import Settings
 from alcuin_api.mcp_gateway import MCPGateway
 from alcuin_api.main import create_app
 from alcuin_api.openapi_gateway import OpenAPIGateway
-from alcuin_storage import SqliteStore as Store
+from support import create_test_store
 
 
 HEADERS = {"X-Alcuin-Workspace": "ws_demo"}
@@ -20,9 +20,8 @@ def lifecycle_client(
     *,
     openapi_transport: httpx.AsyncBaseTransport | None = None,
 ) -> TestClient:
-    store = Store(":memory:")
+    store = create_test_store()
     settings = Settings(
-        database_path=":memory:",
         searxng_url="",
         qdrant_url="",
         dashscope_api_key="",

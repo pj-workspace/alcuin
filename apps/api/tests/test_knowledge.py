@@ -25,7 +25,8 @@ from alcuin_api.knowledge import (
     chunk_document,
 )
 from alcuin_api.main import create_app
-from alcuin_storage import SqliteStore as Store
+from alcuin_storage import PostgresStore
+from support import create_test_store
 from alcuin_api.tools import ToolContext, ToolError
 from alcuin_operations_copilot import seed_operations_demo
 
@@ -59,7 +60,7 @@ class FakeKnowledgeIndex:
         self.closed = True
 
 
-def add_workspace(store: Store, workspace_id: str) -> None:
+def add_workspace(store: PostgresStore, workspace_id: str) -> None:
     with store.connection:
         store.connection.execute(
             "INSERT INTO workspaces(id, name, created_at) VALUES (?, ?, ?)",
@@ -80,7 +81,7 @@ def test_chunk_document_is_bounded_and_deterministic() -> None:
 
 @pytest.mark.asyncio
 async def test_ingestion_is_idempotent_and_failure_is_sanitized() -> None:
-    store = Store(":memory:")
+    store = create_test_store()
     index = FakeKnowledgeIndex()
     service = KnowledgeService(store, index)
     source = store.create_knowledge_source(
@@ -132,7 +133,7 @@ async def test_ingestion_is_idempotent_and_failure_is_sanitized() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_intersects_agent_sources_with_workspace_ownership() -> None:
-    store = Store(":memory:")
+    store = create_test_store()
     add_workspace(store, "ws_other")
     owned = store.create_knowledge_source(
         "ws_demo", KnowledgeSourceCreate(name="Owned handbook")
@@ -377,13 +378,13 @@ async def test_qwen_embedding_retries_transient_errors_and_redacts_failures() ->
 
 
 def test_knowledge_api_is_scoped_idempotent_and_reference_safe() -> None:
-    store = Store(":memory:")
+    store = create_test_store()
     seed_operations_demo(store)
     add_workspace(store, "ws_other")
     index = FakeKnowledgeIndex()
     service = KnowledgeService(store, index)
     app = create_app(
-        Settings(database_path=":memory:", searxng_url="", qdrant_url=""),
+        Settings(searxng_url="", qdrant_url=""),
         store=store,
         knowledge_service=service,
     )

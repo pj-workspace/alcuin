@@ -12,13 +12,15 @@ def seed_operations_demo(store: Any) -> None:
     created_at = "2026-08-28T00:00:00+00:00"
     with store.lock, store.connection:
         store.connection.execute(
-            "INSERT OR IGNORE INTO workspaces(id, name, created_at) VALUES (?, ?, ?)",
+            """INSERT INTO workspaces(id, name, created_at) VALUES (?, ?, ?)
+            ON CONFLICT DO NOTHING""",
             ("ws_demo", "Alcuin Workspace", created_at),
         )
         store.connection.execute(
-            """INSERT OR IGNORE INTO agents
+            """INSERT INTO agents
             (id, workspace_id, slug, name, description, status, current_version_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING""",
             (
                 "agt_operations",
                 "ws_demo",
@@ -31,9 +33,10 @@ def seed_operations_demo(store: Any) -> None:
             ),
         )
         store.connection.execute(
-            """INSERT OR IGNORE INTO agent_versions
+            """INSERT INTO agent_versions
             (id, workspace_id, agent_id, version, definition_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING""",
             (
                 "av_operations_1",
                 "ws_demo",
@@ -44,10 +47,11 @@ def seed_operations_demo(store: Any) -> None:
             ),
         )
         store.connection.execute(
-            """INSERT OR IGNORE INTO extensions
+            """INSERT INTO extensions
             (id, workspace_id, manifest_id, name, version, status, health, manifest_json,
              credential_refs_json, installed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING""",
             (
                 "ext_ops_toolkit",
                 "ws_demo",

@@ -280,7 +280,7 @@ export function StudioView({
             />
             <div className="composer-footer">
               <div><button className="composer-tool"><Plus size={15} /></button><button className="composer-tool" aria-label={t("Attach images")} onClick={() => attachmentInputRef.current?.click()}><Paperclip size={15} /></button><input ref={attachmentInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => void addImages(event.target.files)} /><button className="context-chip"><span className="context-dot" />REC-104<ChevronDown size={11} /></button></div>
-              <div className="composer-send-group"><span>⌘ ↵</span><button className="send-button" disabled={(!prompt.trim() && attachments.length === 0) || running} onClick={() => void submit()}>{running ? <CircleStop size={16} /> : <ArrowUp size={17} />}</button></div>
+              <div className="composer-send-group"><span>⌘ ↵</span><button className="send-button" aria-label={t(running ? "Agent is running" : "Send message")} disabled={(!prompt.trim() && attachments.length === 0) || running} onClick={() => void submit()}>{running ? <CircleStop size={16} /> : <ArrowUp size={17} />}</button></div>
             </div>
           </div>
           <div className="starter-row">

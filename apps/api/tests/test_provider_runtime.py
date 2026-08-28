@@ -40,7 +40,6 @@ async def test_deepseek_responses_stream_maps_to_execution_events() -> None:
         )
 
     settings = Settings(
-        database_path=":memory:",
         deepseek_api_key="ds-test-key",
         deepseek_base_url="https://api.deepseek.com",
         deepseek_model="deepseek-v4-flash",
@@ -102,7 +101,6 @@ async def test_deepseek_vision_uses_chat_completions_image_content() -> None:
         )
 
     settings = Settings(
-        database_path=":memory:",
         deepseek_api_key="ds-test-key",
         deepseek_model="deepseek-v4-flash-vision-exp",
         deepseek_protocol="responses",
@@ -159,7 +157,7 @@ async def test_deepseek_thinking_mode_is_explicit_and_streamed() -> None:
         )
 
     runtime = OpenAICompatibleRuntime(
-        Settings(database_path=":memory:", deepseek_api_key="ds-test-key"),
+        Settings(deepseek_api_key="ds-test-key"),
         httpx.MockTransport(handler),
     )
     request = RuntimeRequest(
@@ -245,7 +243,6 @@ async def test_chat_completions_executes_tool_and_continues_to_final_answer() ->
     )
     runtime = OpenAICompatibleRuntime(
         Settings(
-            database_path=":memory:",
             deepseek_api_key="ds-test-key",
             deepseek_protocol="responses",
         ),
@@ -302,7 +299,7 @@ async def test_tool_loop_stops_at_agent_max_steps() -> None:
         return ToolResult(data={"continue": True}, summary="continue")
 
     runtime = OpenAICompatibleRuntime(
-        Settings(database_path=":memory:", deepseek_api_key="ds-test-key"),
+        Settings(deepseek_api_key="ds-test-key"),
         httpx.MockTransport(provider_handler),
         ToolExecutor(
             ToolRegistry(
@@ -372,7 +369,7 @@ async def test_tool_loop_enforces_per_tool_budget_and_allows_final_answer() -> N
         return ToolResult(data={"hits": []}, summary="No hits")
 
     runtime = OpenAICompatibleRuntime(
-        Settings(database_path=":memory:", deepseek_api_key="ds-test-key"),
+        Settings(deepseek_api_key="ds-test-key"),
         httpx.MockTransport(provider_handler),
         ToolExecutor(
             ToolRegistry(

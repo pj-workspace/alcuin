@@ -12,7 +12,6 @@ from alcuin_api.web_search import WebSearchService, canonical_url
 
 def _settings(**overrides) -> Settings:
     return Settings(
-        database_path=":memory:",
         searxng_url="http://searx.test",
         **overrides,
     )
@@ -174,7 +173,7 @@ async def test_web_search_normalizes_provider_failure_and_unconfigured_state() -
             await service.search("test", depth="quick", max_results=5, language="auto")
 
         disabled = WebSearchService(
-            Settings(database_path=":memory:", searxng_url=None),
+            Settings(searxng_url=None),
             client=client,
         )
         with pytest.raises(ToolError) as unconfigured:

@@ -1,85 +1,21 @@
 services:
-  api:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
-    environment:
-      ALCUIN_DATABASE_PATH: /data/alcuin.db
-      ALCUIN_SIGNING_SECRET: ${ALCUIN_SIGNING_SECRET:-local-compose-signing-secret}
-      ALCUIN_CORS_ORIGINS: http://localhost:3000
-      ALCUIN_OPENAI_API_KEY: ${ALCUIN_OPENAI_API_KEY:-}
-      ALCUIN_OPENAI_BASE_URL: ${ALCUIN_OPENAI_BASE_URL:-https://api.openai.com/v1}
-      ALCUIN_OPENAI_MODEL: ${ALCUIN_OPENAI_MODEL:-gpt-4.1-mini}
-      ALCUIN_PROVIDER_MODE: ${ALCUIN_PROVIDER_MODE:-responses}
-      ALCUIN_DEEPSEEK_API_KEY: ${ALCUIN_DEEPSEEK_API_KEY:-}
-      ALCUIN_DEEPSEEK_BASE_URL: ${ALCUIN_DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-      ALCUIN_DEEPSEEK_MODEL: ${ALCUIN_DEEPSEEK_MODEL:-deepseek-v4-flash-vision-exp}
-      ALCUIN_DEEPSEEK_PROTOCOL: ${ALCUIN_DEEPSEEK_PROTOCOL:-chat_completions}
-      ALCUIN_SEARXNG_URL: ${ALCUIN_SEARXNG_URL:-http://searxng:8080}
-      ALCUIN_SEARXNG_TIMEOUT_SECONDS: ${ALCUIN_SEARXNG_TIMEOUT_SECONDS:-8}
-      ALCUIN_QDRANT_URL: ${ALCUIN_QDRANT_URL:-http://qdrant:6333}
-      ALCUIN_QDRANT_API_KEY: ${ALCUIN_QDRANT_API_KEY:-}
-      ALCUIN_DASHSCOPE_API_KEY: ${ALCUIN_DASHSCOPE_API_KEY:-}
-      ALCUIN_DASHSCOPE_HTTP_API_URL: ${ALCUIN_DASHSCOPE_HTTP_API_URL:-https://dashscope.aliyuncs.com/api/v1}
-      ALCUIN_QWEN_EMBEDDING_MODEL: ${ALCUIN_QWEN_EMBEDDING_MODEL:-text-embedding-v3}
-      ALCUIN_EXTENSION_ALLOW_PRIVATE_NETWORKS: ${ALCUIN_EXTENSION_ALLOW_PRIVATE_NETWORKS:-false}
-      ALCUIN_EXTENSION_HEALTH_TIMEOUT_SECONDS: ${ALCUIN_EXTENSION_HEALTH_TIMEOUT_SECONDS:-5}
-    ports:
-      - "8000:8000"
-    volumes:
-      - alcuin-data:/data
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
-  web:
-    build:
-      context: .
-      dockerfile: apps/web/Dockerfile
-      args:
-        NEXT_PUBLIC_ALCUIN_API_URL: http://localhost:8000
-    depends_on:
-      api:
-        condition: service_healthy
-    ports:
-      - "3000:3000"
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/studio"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
   postgres:
     image: postgres:17-alpine
-    profiles: ["platform-infra"]
     environment:
-      POSTGRES_DB: alcuin
-      POSTGRES_USER: alcuin
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alcuin-local}
+      POSTGRES_USER: ${ALCUIN_POSTGRES_USER:-alcuin}
+      POSTGRES_PASSWORD: ${ALCUIN_POSTGRES_PASSWORD:-alcuin}
+      POSTGRES_DB: ${ALCUIN_POSTGRES_DB:-alcuin}
+    ports:
+      - "127.0.0.1:${ALCUIN_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 2s
+      timeout: 3s
+      retries: 20
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
-  redis:
-    image: redis:7-alpine
-    profiles: ["platform-infra"]
-
-  searxng:
-    image: docker.io/searxng/searxng:latest
-    ports:
-      - "9888:8080"
-    volumes:
-      - ./infra/searxng/settings.yml:/etc/searxng/settings.yml:ro
-
-  qdrant:
-    image: qdrant/qdrant:v1.19.0
-    ports:
-      - "6333:6333"
-    volumes:
-      - qdrant-data:/qdrant/storage
-
 volumes:
-  alcuin-data:
   postgres-data:
-  qdrant-data:

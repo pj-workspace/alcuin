@@ -56,6 +56,8 @@ const zh = {
   "Sources": "来源",
   "Source": "来源",
   "Attach images": "添加图片",
+  "Send message": "发送消息",
+  "Agent is running": "智能体正在运行",
   "Message {name}…": "给 {name} 发消息…",
   "Remove {name}": "移除 {name}",
   "Unable to read {name}": "无法读取 {name}",

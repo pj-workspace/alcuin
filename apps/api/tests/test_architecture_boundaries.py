@@ -49,9 +49,10 @@ def test_domain_extension_depends_inward_on_core_only() -> None:
 
 
 def test_storage_package_depends_inward_and_services_use_ports() -> None:
-    storage_roots = imported_roots(
+    storage_source = (
         REPOSITORY_ROOT / "packages/python/alcuin-storage/src/alcuin_storage"
     )
+    storage_roots = imported_roots(storage_source)
     assert "alcuin_core" in storage_roots
     assert storage_roots.isdisjoint(
         {
@@ -61,6 +62,11 @@ def test_storage_package_depends_inward_and_services_use_ports() -> None:
             "langgraph",
             "qdrant_client",
         }
+    )
+    assert not (storage_source / "sqlite.py").exists()
+    assert all(
+        "sqlite3" not in source.read_text()
+        for source in storage_source.rglob("*.py")
     )
 
     for service in ("runtime.py", "knowledge.py", "extension_tools.py"):
@@ -72,6 +78,10 @@ def test_storage_package_depends_inward_and_services_use_ports() -> None:
         REPOSITORY_ROOT / "apps/api/src/alcuin_api/main.py"
     ).read_text()
     assert "sqlite3" not in api_composition
+    api_config = (
+        REPOSITORY_ROOT / "apps/api/src/alcuin_api/config.py"
+    ).read_text()
+    assert "database_path" not in api_config
 
 
 def test_python_and_typescript_share_platform_contract_vocabulary() -> None:

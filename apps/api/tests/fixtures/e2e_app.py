@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import psycopg
 from alcuin_api.config import Settings
 from alcuin_api.knowledge import KnowledgeChunk, KnowledgeHit, KnowledgeService
 from alcuin_api.main import create_app
-from alcuin_storage import SqliteStore
+from alcuin_storage import PostgresStore
 from alcuin_operations_copilot import operations_demo_adapter, seed_operations_demo
 
 
@@ -93,7 +94,14 @@ class MemoryKnowledgeIndex:
 
 
 settings = Settings()
-store = SqliteStore(settings.database_path)
+with psycopg.connect(settings.database_url) as connection:
+    connection.execute(
+        """TRUNCATE TABLE
+        knowledge_documents, knowledge_sources, extensions, approvals, events,
+        runs, threads, agent_versions, agents, workspaces
+        CASCADE"""
+    )
+store = PostgresStore(settings.database_url)
 seed_operations_demo(store)
 knowledge_service = KnowledgeService(store, MemoryKnowledgeIndex())
 app = create_app(

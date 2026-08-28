@@ -281,10 +281,15 @@ test("creates, edits, publishes, persists, and switches between Agents", async (
   await page.goto("/studio");
   await expect(page.getByRole("heading", { name: publishedName, exact: true })).toBeVisible();
   const composer = page.getByPlaceholder(`Message ${publishedName}…`);
+  const firstRunResponsePromise = page.waitForResponse((response) =>
+    /\/v1\/threads\/[^/]+\/runs$/.test(new URL(response.url()).pathname)
+    && response.request().method() === "POST");
   await composer.fill("Find the active incident");
   await composer.press("Enter");
+  await firstRunResponsePromise;
   await expect(page.getByText("Complete", { exact: true })).toBeVisible();
   await expect(page.locator(".conversation-pane").getByText("I reviewed the current record for INC-104.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send message" })).toBeVisible();
 
   const webRunResponsePromise = page.waitForResponse((response) =>
     /\/v1\/threads\/[^/]+\/runs$/.test(new URL(response.url()).pathname)

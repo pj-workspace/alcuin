@@ -25,7 +25,9 @@ export default defineConfig({
       reuseExistingServer: false,
       timeout: 120_000,
       env: {
-        ALCUIN_DATABASE_PATH: ":memory:",
+        ALCUIN_DATABASE_URL:
+          process.env.ALCUIN_DATABASE_URL ??
+          "postgresql://alcuin:alcuin-test@127.0.0.1:55432/alcuin_test",
         ALCUIN_CORS_ORIGINS: E2E_WEB_URL,
         ALCUIN_DEEPSEEK_API_KEY: "e2e-provider-key",
         ALCUIN_DEEPSEEK_BASE_URL: "http://127.0.0.1:9412/v1",
