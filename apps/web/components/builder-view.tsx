@@ -1,6 +1,6 @@
 "use client";
 
-import type { Agent, KnowledgeSource } from "@alcuin/contracts";
+import type { Agent, Extension, KnowledgeSource } from "@alcuin/contracts";
 import {
   Blocks,
   Bot,
@@ -40,10 +40,12 @@ const sections = [
 export function AgentBuilderView({
   agent,
   knowledgeSources,
+  extensions,
   onChanged,
 }: {
   agent?: Agent;
   knowledgeSources: KnowledgeSource[];
+  extensions: Extension[];
   onChanged: () => Promise<void>;
 }) {
   const [active, setActive] = useState("identity");
@@ -141,7 +143,7 @@ export function AgentBuilderView({
             <small>Paste the real key into <code>.env</code>; definitions store only this Secret Reference.</small>
           </label>
         </div>}
-        {active === "capabilities" && <Capabilities definition={definition} />}
+        {active === "capabilities" && <Capabilities definition={definition} extensions={extensions} onChange={setDefinition} />}
         {active === "knowledge" && (
           <KnowledgeEditor
             sources={knowledgeSources}
@@ -332,8 +334,57 @@ function KnowledgeEditor({
   );
 }
 
-function Capabilities({ definition }: { definition: Agent["definition"] }) {
-  return <div className="capability-list"><div className="capability-toolbar"><div><strong>Bound tools</strong><p>Capabilities resolved from enabled extensions.</p></div><button className="button secondary"><Blocks size={14} />Add capability</button></div>{definition.tools.map((tool, index) => <div className="capability-row" key={tool}><span className="capability-icon"><Wrench size={15} /></span><div><strong>{tool}</strong><p>{index === 2 ? "Mutating · approval required" : "Read only · automatic"}</p></div><span className={clsx("permission-dot", index === 2 && "high")} /> <Check size={15} className="success" /></div>)}</div>;
+function extensionToolName(manifestId: string, toolName: string) {
+  return `extension.${manifestId}.${toolName}`;
+}
+
+function Capabilities({
+  definition,
+  extensions,
+  onChange,
+}: {
+  definition: Agent["definition"];
+  extensions: Extension[];
+  onChange: (definition: Agent["definition"]) => void;
+}) {
+  const available = extensions.flatMap((extension) => {
+    const executable = extension.manifest.entrypoints.some((entrypoint) => entrypoint.type === "mcp" || entrypoint.type === "openapi");
+    if (!executable || extension.status !== "enabled" || !["healthy", "degraded"].includes(extension.health)) return [];
+    return extension.manifest.contributions.tools.flatMap((tool) => {
+      const rawName = String(tool.name ?? "").trim();
+      if (!rawName) return [];
+      return [{
+        id: extensionToolName(extension.manifest.id, rawName),
+        rawName,
+        manifestId: extension.manifest.id,
+        extensionName: extension.name,
+        description: String(tool.description ?? "Extension tool"),
+        mutating: Boolean(tool.mutating),
+      }];
+    });
+  });
+  const dynamicIds = new Set(available.map((tool) => tool.id));
+  const existing = definition.tools.filter((tool) => !dynamicIds.has(tool));
+
+  function toggle(tool: (typeof available)[number]) {
+    const bound = definition.tools.includes(tool.id);
+    const tools = bound
+      ? definition.tools.filter((item) => item !== tool.id)
+      : [...definition.tools, tool.id];
+    const stillUsesExtension = available.some((candidate) =>
+      candidate.manifestId === tool.manifestId && tools.includes(candidate.id));
+    const nextExtensions = bound && !stillUsesExtension
+      ? definition.extensions.filter((item) => item !== tool.manifestId)
+      : Array.from(new Set([...definition.extensions, tool.manifestId]));
+    onChange({ ...definition, tools, extensions: nextExtensions });
+  }
+
+  return <div className="capability-list"><div className="capability-toolbar"><div><strong>Bound tools</strong><p>Capabilities are resolved from enabled, healthy Workspace extensions.</p></div><span className="capability-count">{definition.tools.length} bound</span></div>
+    {existing.length > 0 && <><div className="capability-group-label">Current definition</div>{existing.map((tool) => <div className="capability-row" key={tool}><span className="capability-icon"><Wrench size={15} /></span><div><strong>{tool}</strong><p>Built-in or previously bound capability</p></div><span className="permission-dot" /><Check size={15} className="success" /></div>)}</>}
+    <div className="capability-group-label">Installed extension tools</div>
+    {available.length ? available.map((tool) => { const bound = definition.tools.includes(tool.id); return <button type="button" className={clsx("capability-row capability-option", bound && "bound")} key={tool.id} onClick={() => toggle(tool)} aria-pressed={bound}><span className="capability-icon"><Blocks size={15} /></span><div><strong>{tool.rawName}</strong><p>{tool.extensionName} · {tool.description}</p></div><span className={clsx("permission-dot", tool.mutating && "high")} /><span className={clsx("capability-binding", bound && "active")}>{bound ? <><Check size={12} />Bound</> : "Bind"}</span></button>; }) : <div className="empty-editor compact"><Blocks size={22} /><h3>No executable extension tools</h3><p>Enable and health-check an MCP or OpenAPI extension first.</p></div>}
+    <div className="editor-tip"><ShieldCheck size={15} /><span>Read-only tools run within the Agent allow-list. Mutating tools follow the Agent approval policy before execution.</span></div>
+  </div>;
 }
 
 function sectionDescription(section: string) {

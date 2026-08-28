@@ -115,6 +115,7 @@ export function Workbench({ surface }: { surface: Surface }) {
         <AgentBuilderView
           agent={activeAgent}
           knowledgeSources={data.knowledge_sources}
+          extensions={data.extensions}
           onChanged={refresh}
         />
       );

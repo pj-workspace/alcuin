@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from alcuin_api.contracts import OpenAPIEntrypoint
-from alcuin_api.openapi_gateway import OpenAPIGateway
+from alcuin_api.openapi_gateway import MAX_OPENAPI_RESPONSE_BYTES, OpenAPIGateway
 
 
 @pytest.mark.asyncio
@@ -35,5 +35,23 @@ async def test_rejects_mutating_openapi_tool_before_network_call() -> None:
             OpenAPIEntrypoint(base_url="https://ops.example.test", auth="none"),
             {"method": "PATCH", "path": "/incidents/{id}", "mutating": True},
             {"id": "INC-104", "status": "closed"},
+            None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_rejects_oversized_openapi_response() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-length": str(MAX_OPENAPI_RESPONSE_BYTES + 1)},
+            content=b"{}",
+        )
+
+    with pytest.raises(ValueError, match="2 MiB"):
+        await OpenAPIGateway(httpx.MockTransport(handler)).call(
+            OpenAPIEntrypoint(base_url="https://ops.example.test", auth="none"),
+            {"method": "GET", "path": "/records", "mutating": False},
+            {},
             None,
         )

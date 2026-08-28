@@ -125,6 +125,42 @@ def test_stdio_mcp_completes_disabled_first_lifecycle_and_call() -> None:
         )
         assert undeclared.status_code == 404
 
+        agent = client.get("/v1/agents", headers=HEADERS).json()[0]
+        definition = agent["definition"]
+        definition["tools"] = [
+            *definition["tools"],
+            "extension.verification.echo-mcp.echo",
+        ]
+        missing_binding = client.post(
+            f"/v1/agents/{agent['id']}/versions",
+            headers=HEADERS,
+            json={"definition": definition},
+        )
+        assert missing_binding.status_code == 422
+
+        definition["extensions"] = [
+            *definition["extensions"],
+            "verification.echo-mcp",
+        ]
+        saved = client.post(
+            f"/v1/agents/{agent['id']}/versions",
+            headers=HEADERS,
+            json={"definition": definition},
+        )
+        assert saved.status_code == 201
+
+        disabled = client.patch(
+            f"/v1/extensions/{extension['id']}",
+            headers=HEADERS,
+            json={"enabled": False},
+        )
+        assert disabled.status_code == 200
+        blocked_publish = client.post(
+            f"/v1/agents/{agent['id']}/publish",
+            headers=HEADERS,
+        )
+        assert blocked_publish.status_code == 409
+
 
 def test_openapi_lifecycle_requires_resolved_secret_and_real_health(
     monkeypatch,

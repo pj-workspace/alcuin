@@ -10,6 +10,9 @@ import httpx
 from .contracts import HealthReport, OpenAPIEntrypoint
 
 
+MAX_OPENAPI_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
 def resolve_secret_reference(reference: str | None) -> str | None:
     if not reference:
         return None
@@ -120,8 +123,14 @@ class OpenAPIGateway:
                 request_kwargs["params"] = query_parameters
             request_kwargs["json"] = remaining
         async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
-            response = await client.request(method, url, **request_kwargs)
-            response.raise_for_status()
+            async with client.stream(method, url, **request_kwargs) as response:
+                response.raise_for_status()
+                declared_size = response.headers.get("content-length")
+                if declared_size and int(declared_size) > MAX_OPENAPI_RESPONSE_BYTES:
+                    raise ValueError("OpenAPI response exceeds the 2 MiB limit")
+                content = await response.aread()
+                if len(content) > MAX_OPENAPI_RESPONSE_BYTES:
+                    raise ValueError("OpenAPI response exceeds the 2 MiB limit")
         content_type = response.headers.get("content-type", "")
-        result = response.json() if "json" in content_type else response.text
+        result = response.json() if "json" in content_type else content.decode("utf-8", errors="replace")
         return {"status_code": response.status_code, "result": result}

@@ -204,7 +204,8 @@ class OpenAICompatibleRuntime:
         } and provider.protocol == "responses":
             provider = replace(provider, protocol="chat_completions")
         if request.definition.tools and self.tool_executor.provider_schemas(
-            request.definition.tools
+            request.definition.tools,
+            workspace_id=request.workspace_id,
         ):
             provider = replace(provider, protocol="chat_completions")
         if provider.protocol == "chat_completions":
@@ -293,7 +294,10 @@ class OpenAICompatibleRuntime:
             {"role": "system", "content": provider_instructions(request.definition)},
             {"role": "user", "content": user_content},
         ]
-        tool_definitions = self.tool_executor.definitions(request.definition.tools)
+        tool_definitions = self.tool_executor.definitions(
+            request.definition.tools,
+            workspace_id=request.workspace_id,
+        )
         tool_context = ToolContext(
             workspace_id=request.workspace_id,
             run_id=request.run_id,
@@ -423,7 +427,9 @@ class OpenAICompatibleRuntime:
                     function = call["function"]
                     provider_name = str(function["name"])
                     name = self.tool_executor.canonical_name(
-                        provider_name, request.definition.tools
+                        provider_name,
+                        request.definition.tools,
+                        workspace_id=request.workspace_id,
                     )
                     raw_arguments = str(function["arguments"])
                     try:
@@ -467,7 +473,9 @@ class OpenAICompatibleRuntime:
 
                     try:
                         definition = self.tool_executor.definition(
-                            name, request.definition.tools
+                            name,
+                            request.definition.tools,
+                            workspace_id=request.workspace_id,
                         )
                     except ToolError as error:
                         definition = None
