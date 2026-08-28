@@ -62,6 +62,17 @@ class Settings(BaseSettings):
     )
     knowledge_dense_dimensions: int = Field(default=1_024, ge=32, le=4_096)
     knowledge_index_revision: str = "qwen-native-v1"
+    knowledge_upload_max_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        ge=64 * 1024,
+        le=32 * 1024 * 1024,
+    )
+    knowledge_extracted_max_chars: int = Field(
+        default=2_000_000,
+        ge=1_000,
+        le=5_000_000,
+    )
+    knowledge_pdf_max_pages: int = Field(default=500, ge=1, le=2_000)
 
     @property
     def allowed_origins(self) -> list[str]:

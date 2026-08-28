@@ -183,16 +183,25 @@ function KnowledgeEditor({
 }) {
   const [importOpen, setImportOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [importMode, setImportMode] = useState<"file" | "text">("file");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [phase, setPhase] = useState<"idle" | "creating" | "indexing">("idle");
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ targetSourceId: "new", sourceName: "", description: "", title: "", content: "" });
 
   async function importDocument() {
     if (
       (form.targetSourceId === "new" && !form.sourceName.trim())
-      || !form.title.trim()
-      || !form.content.trim()
+      || (importMode === "text" && (!form.title.trim() || !form.content.trim()))
+      || (importMode === "file" && !selectedFile)
     ) {
-      setError("Choose or name a source, then provide a document title and content.");
+      setError(importMode === "file"
+        ? "Choose or name a source, then select a supported file."
+        : "Choose or name a source, then provide a document title and content.");
+      return;
+    }
+    if (selectedFile && selectedFile.size > 8 * 1024 * 1024) {
+      setError("Files must be 8 MiB or smaller.");
       return;
     }
     setSubmitting(true);
@@ -201,6 +210,7 @@ function KnowledgeEditor({
     let createdSource = false;
     try {
       if (sourceId === "new") {
+        setPhase("creating");
         const source = await alcuinApi.createKnowledgeSource(
           form.sourceName.trim(),
           form.description.trim(),
@@ -208,12 +218,18 @@ function KnowledgeEditor({
         sourceId = source.id;
         createdSource = true;
       }
-      await alcuinApi.ingestKnowledgeDocument(sourceId, {
-        title: form.title.trim(),
-        content: form.content,
-        metadata: { imported_via: "agent-builder" },
-      });
+      setPhase("indexing");
+      if (importMode === "file" && selectedFile) {
+        await alcuinApi.uploadKnowledgeFile(sourceId, selectedFile, form.title);
+      } else {
+        await alcuinApi.ingestKnowledgeDocument(sourceId, {
+          title: form.title.trim(),
+          content: form.content,
+          metadata: { imported_via: "agent-builder" },
+        });
+      }
       setForm({ targetSourceId: sourceId, sourceName: "", description: "", title: "", content: "" });
+      setSelectedFile(null);
       setImportOpen(false);
       await onImported(sourceId);
     } catch (reason) {
@@ -224,6 +240,16 @@ function KnowledgeEditor({
       setError(reason instanceof Error ? reason.message : "Unable to import knowledge");
     } finally {
       setSubmitting(false);
+      setPhase("idle");
+    }
+  }
+
+  function selectFile(file: File | null) {
+    setSelectedFile(file);
+    setError(null);
+    if (file && !form.title.trim()) {
+      const inferredTitle = file.name.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ");
+      setForm((current) => ({ ...current, title: inferredTitle }));
     }
   }
 
@@ -243,19 +269,32 @@ function KnowledgeEditor({
         <div className="knowledge-import">
           <div className="knowledge-import-heading">
             <span className="section-icon"><Upload size={16} /></span>
-            <div><strong>Create source and index document</strong><p>Plain text or Markdown · 2 MB maximum</p></div>
+            <div><strong>Create source and index document</strong><p>TXT, Markdown, PDF, or DOCX · 8 MiB maximum</p></div>
+          </div>
+          <div className="knowledge-import-mode" role="group" aria-label="Import method">
+            <button type="button" className={clsx(importMode === "file" && "active")} aria-pressed={importMode === "file"} disabled={submitting} onClick={() => setImportMode("file")}>Upload file</button>
+            <button type="button" className={clsx(importMode === "text" && "active")} aria-pressed={importMode === "text"} disabled={submitting} onClick={() => setImportMode("text")}>Paste text</button>
           </div>
           <div className="knowledge-form-grid">
             <label className="field"><span>Knowledge source</span><select value={form.targetSourceId} onChange={(event) => setForm({ ...form, targetSourceId: event.target.value })}><option value="new">Create a new source</option>{sources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}</select></label>
-            <label className="field"><span>Document title</span><input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Embedding guide" /></label>
+            <label className="field"><span>Document title {importMode === "file" && <small>Optional</small>}</span><input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Embedding guide" /></label>
           </div>
           {form.targetSourceId === "new" && <div className="knowledge-form-grid"><label className="field"><span>Source name</span><input value={form.sourceName} onChange={(event) => setForm({ ...form, sourceName: event.target.value })} placeholder="Product handbook" /></label><label className="field"><span>Description</span><input value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="Governed internal product knowledge" /></label></div>}
-          <label className="field"><span>Content</span><textarea rows={8} value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} placeholder="Paste plain text or Markdown…" /></label>
+          {importMode === "file" ? (
+            <label className={clsx("knowledge-file-picker", selectedFile && "selected")}>
+              <input type="file" accept=".txt,.md,.markdown,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" disabled={submitting} onChange={(event) => selectFile(event.target.files?.[0] ?? null)} />
+              <span className="knowledge-file-icon"><Upload size={18} /></span>
+              <span><strong>{selectedFile ? selectedFile.name : "Choose a document"}</strong><small>{selectedFile ? `${(selectedFile.size / 1024).toFixed(1)} KiB · Ready to parse` : "The file is parsed server-side, then indexed with Qwen."}</small></span>
+              <span className="knowledge-file-action">{selectedFile ? "Replace" : "Browse"}</span>
+            </label>
+          ) : (
+            <label className="field"><span>Content</span><textarea rows={8} value={form.content} onChange={(event) => setForm({ ...form, content: event.target.value })} placeholder="Paste plain text or Markdown…" /></label>
+          )}
           {error && <div className="knowledge-error">{error}</div>}
           <div className="knowledge-import-actions">
             <button className="button secondary" onClick={() => setImportOpen(false)} disabled={submitting}>Cancel</button>
             <button className="button dark" onClick={() => void importDocument()} disabled={submitting}>
-              <Upload size={13} />{submitting ? "Indexing…" : "Index and bind"}
+              <Upload size={13} />{phase === "creating" ? "Creating source…" : phase === "indexing" ? "Parsing & indexing…" : error ? "Retry import" : "Index and bind"}
             </button>
           </div>
         </div>

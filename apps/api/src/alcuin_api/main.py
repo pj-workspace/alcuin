@@ -8,7 +8,18 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -32,6 +43,13 @@ from .contracts import (
     OpenAPIEntrypoint,
     RunCreate,
     ThreadCreate,
+)
+from .document_parser import (
+    DocumentParseError,
+    DocumentParser,
+    DocumentTooLargeError,
+    FileDocumentParser,
+    UnsupportedDocumentError,
 )
 from .extensions import (
     check_extension_health,
@@ -57,6 +75,7 @@ def create_app(
     settings: Settings | None = None,
     store: Store | None = None,
     knowledge_service: KnowledgeService | None = None,
+    document_parser: DocumentParser | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     repository = store or Store(settings.database_path)
@@ -69,6 +88,7 @@ def create_app(
         and (settings.dashscope_api_key or "").strip()
         else None
     )
+    configured_document_parser = document_parser or FileDocumentParser(settings)
     definitions = []
     if web_search_service:
         definitions.append(web_search_service.tool_definition())
@@ -223,6 +243,75 @@ def create_app(
         if not indexed:
             response.status_code = status.HTTP_200_OK
         return {"document": document, "indexed": indexed}
+
+    @app.post("/v1/knowledge/sources/{source_id}/files", status_code=201)
+    async def upload_knowledge_file(
+        source_id: str,
+        scope: ScopeDependency,
+        response: Response,
+        file: Annotated[UploadFile, File(description="Knowledge document")],
+        title: Annotated[str | None, Form(max_length=200)] = None,
+    ) -> dict:
+        require_workspace_operator(scope)
+        service = require_knowledge_service()
+        if not repository.get_knowledge_source(scope.workspace_id, source_id):
+            raise missing("Knowledge source")
+        try:
+            data = await file.read(settings.knowledge_upload_max_bytes + 1)
+        finally:
+            await file.close()
+        if len(data) > settings.knowledge_upload_max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="Document exceeds the upload size limit",
+            )
+        try:
+            parsed = await asyncio.to_thread(
+                configured_document_parser.parse,
+                filename=file.filename or "",
+                content_type=file.content_type,
+                data=data,
+                title=title,
+            )
+        except DocumentTooLargeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=str(exc),
+            ) from exc
+        except UnsupportedDocumentError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail=str(exc),
+            ) from exc
+        except DocumentParseError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            document, indexed = await service.ingest_document(
+                scope.workspace_id,
+                source_id,
+                KnowledgeDocumentCreate(
+                    title=parsed.title,
+                    content=parsed.content,
+                    source_uri=parsed.source_uri,
+                    metadata=parsed.metadata,
+                ),
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Knowledge document indexing failed",
+            ) from exc
+        if not indexed:
+            response.status_code = status.HTTP_200_OK
+        return {
+            "document": document,
+            "indexed": indexed,
+            "parsed": {
+                "filename": parsed.metadata["filename"],
+                "kind": parsed.metadata["document_kind"],
+                "characters": len(parsed.content),
+            },
+        }
 
     @app.get("/v1/knowledge/health")
     async def knowledge_health(scope: ScopeDependency) -> dict:
