@@ -8,6 +8,7 @@ import {
   ChevronDown,
   Command,
   GalleryVerticalEnd,
+  Languages,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
@@ -31,6 +32,7 @@ import { ExtensionsView } from "@/components/extensions-view";
 import { RunsView } from "@/components/runs-view";
 import { StudioView } from "@/components/studio-view";
 import { alcuinApi } from "@/lib/api";
+import { statusLabel, useI18n, type MessageKey } from "@/lib/i18n";
 
 export type Surface = "studio" | "agents" | "extensions" | "runs" | "embed";
 
@@ -40,9 +42,10 @@ const nav = [
   { id: "extensions", label: "Extensions", icon: Blocks },
   { id: "runs", label: "Runs", icon: Workflow },
   { id: "embed", label: "Embed", icon: Braces },
-] satisfies Array<{ id: Surface; label: string; icon: typeof Bot }>;
+] satisfies Array<{ id: Surface; label: MessageKey; icon: typeof Bot }>;
 
 export function Workbench({ surface }: { surface: Surface }) {
+  const { locale, t, toggleLocale } = useI18n();
   const pathname = usePathname();
   const router = useRouter();
   const [data, setData] = useState<BootstrapPayload | null>(null);
@@ -139,51 +142,52 @@ export function Workbench({ surface }: { surface: Surface }) {
     <main className="app-frame">
       <header className="topbar">
         <div className="topbar-left">
-          <button className="icon-button quiet" onClick={() => setSidebarOpen((open) => !open)} aria-label="Toggle sidebar">
+          <button className="icon-button quiet" onClick={() => setSidebarOpen((open) => !open)} aria-label={t("Toggle sidebar")}>
             {sidebarOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}
           </button>
           <Link className="brand" href="/studio"><AlcuinMark size={28} /><span>Alcuin</span></Link>
           <span className="topbar-separator" />
-          <button className="workspace-switcher"><span className="workspace-glyph">N</span>{data?.workspace.name ?? "Workspace"}<ChevronDown size={13} /></button>
+          <button className="workspace-switcher"><span className="workspace-glyph">N</span>{data?.workspace.name ?? t("Workspace")}<ChevronDown size={13} /></button>
         </div>
         <div className="topbar-actions">
-          <button className="command-trigger" onClick={() => setCommandOpen(true)}><Search size={14} /><span>Search or jump to</span><kbd>⌘ K</kbd></button>
-          <button className="icon-button quiet" onClick={switchTheme} aria-label="Toggle theme">{theme === "light" ? <Moon size={16} /> : <Sun size={16} />}</button>
-          <button className="icon-button quiet" aria-label="Settings"><Settings2 size={16} /></button>
+          <button className="command-trigger" onClick={() => setCommandOpen(true)}><Search size={14} /><span>{t("Search or jump to")}</span><kbd>⌘ K</kbd></button>
+          <button className="language-switch" onClick={toggleLocale} aria-label={t(locale === "en" ? "Switch to Chinese" : "Switch to English")} title={t(locale === "en" ? "Switch to Chinese" : "Switch to English")}><Languages size={14} /><span>{locale === "en" ? "中文" : "EN"}</span></button>
+          <button className="icon-button quiet" onClick={switchTheme} aria-label={t("Toggle theme")}>{theme === "light" ? <Moon size={16} /> : <Sun size={16} />}</button>
+          <button className="icon-button quiet settings-button" aria-label={t("Settings")}><Settings2 size={16} /></button>
           <div className="avatar">PJ</div>
         </div>
       </header>
 
       <div className="workspace-frame">
         <aside className={clsx("sidebar", !sidebarOpen && "sidebar-collapsed")}>
-          <nav className="primary-nav" aria-label="Primary">
+          <nav className="primary-nav" aria-label={t("Primary")}>
             {nav.map((item) => (
               <Link key={item.id} href={`/${item.id}`} className={clsx("nav-item", pathname === `/${item.id}` && "active")} title={item.label}>
-                <item.icon size={16} /><span>{item.label}</span>
+                <item.icon size={16} /><span>{t(item.label)}</span>
               </Link>
             ))}
           </nav>
           <div className="sidebar-section">
-            <div className="sidebar-heading"><span>Agents</span><button aria-label="New agent"><Plus size={14} /></button></div>
+            <div className="sidebar-heading"><span>{t("Agents")}</span><button aria-label={t("New agent")}><Plus size={14} /></button></div>
             {data?.agents.map((agent) => (
               <Link href="/agents" className="resource-row active-resource" key={agent.id}>
                 <span className="agent-glyph"><Command size={13} /></span>
-                <span><strong>{agent.name}</strong><small>v{agent.version} · {agent.status}</small></span>
+                <span><strong>{agent.name}</strong><small>v{agent.version} · {statusLabel(agent.status, locale)}</small></span>
               </Link>
             ))}
           </div>
           <div className="sidebar-section threads-section">
-            <div className="sidebar-heading"><span>Recent threads</span></div>
+            <div className="sidebar-heading"><span>{t("Recent threads")}</span></div>
             {data?.threads.slice(0, 4).map((thread) => (
               <Link href="/studio" className="thread-row" key={thread.id}><Play size={11} fill="currentColor" /><span>{thread.title}</span></Link>
             ))}
           </div>
-          <div className="sidebar-footer"><span className="runtime-dot" />API connected <span className="version-label">pre-alpha</span></div>
+          <div className="sidebar-footer"><span className="runtime-dot" />{t("API connected")} <span className="version-label">pre-alpha</span></div>
         </aside>
 
         <section className="surface">
-          {loading && <div className="loading-state"><AlcuinMark className="pulse" size={44} /><p>Composing workspace…</p></div>}
-          {!loading && error && <div className="connection-error"><span className="mini-mark">!</span><h2>Alcuin API is offline</h2><p>{error}</p><code>pnpm dev:api</code><button onClick={() => void refresh()}>Try again</button></div>}
+          {loading && <div className="loading-state"><AlcuinMark className="pulse" size={44} /><p>{t("Composing workspace…")}</p></div>}
+          {!loading && error && <div className="connection-error"><span className="mini-mark">!</span><h2>{t("Alcuin API is offline")}</h2><p>{error === "Unable to connect to Alcuin API" ? t("Unable to connect to Alcuin API") : error}</p><code>pnpm dev:api</code><button onClick={() => void refresh()}>{t("Try again")}</button></div>}
           {!loading && !error && view}
         </section>
       </div>
@@ -191,9 +195,9 @@ export function Workbench({ surface }: { surface: Surface }) {
       {commandOpen && (
         <div className="command-backdrop" onMouseDown={() => setCommandOpen(false)}>
           <div className="command-menu" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="command-input"><Search size={17} /><input autoFocus placeholder="Search agents, extensions, runs…" /><button onClick={() => setCommandOpen(false)}><X size={16} /></button></div>
-            <p className="command-label">Go to</p>
-            {nav.map((item) => <button key={item.id} className="command-item" onClick={() => navigate(item.id)}><item.icon size={16} /><span>{item.label}</span><small>Open {item.label}</small></button>)}
+            <div className="command-input"><Search size={17} /><input autoFocus placeholder={t("Search agents, extensions, runs…")} /><button onClick={() => setCommandOpen(false)}><X size={16} /></button></div>
+            <p className="command-label">{t("Go to")}</p>
+            {nav.map((item) => <button key={item.id} className="command-item" onClick={() => navigate(item.id)}><item.icon size={16} /><span>{t(item.label)}</span><small>{t("Open {label}", { label: t(item.label) })}</small></button>)}
           </div>
         </div>
       )}

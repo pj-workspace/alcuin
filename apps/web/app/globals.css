@@ -71,6 +71,8 @@ a { color: inherit; text-decoration: none; }
 .icon-button.quiet { border-color: transparent; background: transparent; }
 .command-trigger { width: 228px; height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 7px 0 10px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); background: var(--panel); text-align: left; font-size: 12px; }
 .command-trigger span { flex: 1; }
+.language-switch { height: 32px; display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); background: var(--surface); font-size: 10px; font-weight: 680; transition: color 160ms ease, border-color 160ms ease, background 160ms ease; }
+.language-switch:hover { color: var(--ink); border-color: color-mix(in srgb, var(--ultramarine) 32%, var(--line)); background: var(--ultramarine-soft); }
 kbd { padding: 1px 5px; border: 1px solid var(--line); border-radius: 5px; color: var(--faint); background: var(--surface-strong); font-family: inherit; font-size: 10px; }
 .avatar { width: 28px; height: 28px; display: grid; place-items: center; margin-left: 3px; border-radius: 9px; color: #fff; background: #5a6258; font-size: 10px; font-weight: 700; }
 
@@ -496,7 +498,7 @@ kbd { padding: 1px 5px; border: 1px solid var(--line); border-radius: 5px; color
 }
 
 @media (max-width: 520px) {
-  .topbar-actions .icon-button[aria-label="Settings"] { display: none; }.conversation-inner { width: calc(100% - 28px); }.surface-header { padding-inline: 14px; }.conversation-header .header-actions .secondary { display: none; }
+  .topbar-actions .settings-button { display: none; }.conversation-inner { width: calc(100% - 28px); }.surface-header { padding-inline: 14px; }.conversation-header .header-actions .secondary { display: none; }
   .starter-row { display: none; }.composer-wrap { bottom: 10px; }
   .extension-grid, .extensions-toolbar, .wide-header { padding-inline: 16px; }.metric-strip > div, .run-kpis > div { padding-inline: 16px; }
   .definition-editor { padding-inline: 18px; }.builder-nav > button span { display: none; }

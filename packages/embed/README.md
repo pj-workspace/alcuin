@@ -12,8 +12,12 @@ import "@alcuin/embed";
   session-token="SHORT_LIVED_SERVER_ISSUED_TOKEN"
   agent-name="Operations Copilot"
   theme="auto"
+  lang="zh-CN"
 ></alcuin-agent>
 ```
+
+Set `lang="en"` or `lang="zh-CN"` to localize the component-owned interface.
+Agent responses, tool names, and host-provided content remain unchanged.
 
 Pass host context before the first message:
 

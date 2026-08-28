@@ -75,13 +75,14 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - A bounded OpenAI-compatible tool loop with Agent allow-lists, JSON Schema validation, workspace context, per-tool deadlines, call budgets, and structured results
 - A built-in `web.search` adapter for self-hosted SearXNG with quick/deep modes, TTL caches, URL deduplication, bounded page extraction, SSRF guards, and citation events
 - A built-in `knowledge.search` adapter with Builder-based document import, deterministic chunking, Qwen dense+sparse hybrid retrieval, Agent-version source binding, and `knowledge://` citations
+- A persisted English/Chinese interface switch across Studio, Builder, Extensions, Runs, and Embed, while keeping Agent and extension-owned content unchanged
 - Persisted normalized execution events with resumable SSE delivery and a lightweight TCM-compatible stream projection
 - Extension inspection, disabled-first installation, permission review, live health state, and enable/disable lifecycle
 - A typed `@alcuin/extension-sdk` with offline conformance validation, stable tool-id helpers, and a runnable stdio MCP scaffold
 - Workspace-scoped MCP/OpenAPI tool resolution from enabled extensions into Agent Definitions and model tool loops, with runtime state rechecks and bounded results
 - MCP discovery and invocation over stdio, SSE, and Streamable HTTP
 - OpenAPI JSON/YAML import from request bodies or URLs and read-only execution, with mutating operations routed to approval-gated runs
-- Origin-bound Embed Session tokens and a framework-neutral `<alcuin-agent>` Web Component
+- Origin-bound Embed Session tokens and a framework-neutral `<alcuin-agent>` Web Component with `lang="en|zh-CN"` localization
 - Standard `Last-Event-ID` recovery shared by Studio and Embed, with bounded reconnects and replay suppression
 - Declarative extension card/table/form blocks with scoped data binding and approval-gated Tool Runs
 - An Operations Copilot demo proving that one published agent can run in Studio and an embedded host

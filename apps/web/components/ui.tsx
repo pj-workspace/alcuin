@@ -4,9 +4,11 @@ import { Check, CircleAlert, LoaderCircle, X } from "lucide-react";
 import { clsx } from "clsx";
 
 import { AlcuinMark } from "@/components/alcuin-mark";
+import { statusLabel, useI18n } from "@/lib/i18n";
 
 export function StatusPill({ status }: { status: string }) {
-  const normalized = status.replaceAll("_", " ");
+  const { locale } = useI18n();
+  const normalized = statusLabel(status, locale);
   const icon = status === "completed" || status === "healthy" || status === "enabled"
     ? <Check size={11} />
     : status === "failed" || status === "unhealthy"

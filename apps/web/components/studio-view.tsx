@@ -31,6 +31,7 @@ import { RunOutput } from "@/components/run-output";
 import { Toast } from "@/components/ui";
 import { usePinnedTurnScroll } from "@/components/use-pinned-turn-scroll";
 import { resolveExtensionUIBlocks, type ResolvedExtensionUIBlock } from "@/lib/extension-ui";
+import { useI18n } from "@/lib/i18n";
 
 type CanvasTab = "artifact" | "trace" | "extensions" | "context";
 type MobileSurface = "conversation" | "canvas";
@@ -48,6 +49,7 @@ export function StudioView({
   initialEvents: ExecutionEvent[];
   onRunCreated: (runId: string) => Promise<void>;
 }) {
+  const { t } = useI18n();
   const [events, setEvents] = useState(initialEvents);
   const [canvasTab, setCanvasTab] = useState<CanvasTab>("artifact");
   const [mobileSurface, setMobileSurface] = useState<MobileSurface>("conversation");
@@ -110,7 +112,7 @@ export function StudioView({
     if ((!value && selectedAttachments.length === 0) || !agent || running) return;
     setPrompt("");
     setAttachments([]);
-    setLastPrompt(value || "Describe the attached image.");
+    setLastPrompt(value || t("Describe the attached image."));
     setLastAttachments(selectedAttachments);
     setEvents([]);
     setRunning(true);
@@ -121,7 +123,7 @@ export function StudioView({
       await alcuinApi.streamRun(run.id, (event) => setEvents((current) => [...current, event]));
       await onRunCreated(run.id);
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Run failed");
+      showToast(error instanceof Error ? error.message : t("Run failed"));
     } finally {
       setRunning(false);
     }
@@ -152,7 +154,7 @@ export function StudioView({
       await alcuinApi.streamRun(run.id, (event) => setEvents((current) => [...current, event]));
       await onRunCreated(run.id);
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Extension action failed");
+      showToast(error instanceof Error ? error.message : t("Extension action failed"));
     } finally {
       setRunning(false);
     }
@@ -164,7 +166,7 @@ export function StudioView({
       ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type),
     );
     const valid = accepted.filter((file) => file.size <= 5 * 1024 * 1024);
-    if (valid.length !== files.length) showToast("Use PNG, JPEG, WebP, or GIF images up to 5 MiB");
+    if (valid.length !== files.length) showToast(t("Use PNG, JPEG, WebP, or GIF images up to 5 MiB"));
     const available = valid.slice(0, Math.max(0, 4 - attachments.length));
     const next = await Promise.all(available.map(fileToImageAttachment));
     setAttachments((current) => [...current, ...next].slice(0, 4));
@@ -179,10 +181,10 @@ export function StudioView({
       await alcuinApi.decideApproval(runId, approvalId, decision);
       const run = await alcuinApi.getRun(runId);
       setEvents(run.events);
-      showToast(decision === "approved" ? "Operation approved and completed" : "Operation denied — no changes made");
+      showToast(t(decision === "approved" ? "Operation approved and completed" : "Operation denied — no changes made"));
       await onRunCreated(runId);
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "Approval failed");
+      showToast(error instanceof Error ? error.message : t("Approval failed"));
     } finally {
       setRunning(false);
     }
@@ -192,7 +194,7 @@ export function StudioView({
 
   return (
     <div className="studio-layout">
-      <div className="mobile-studio-switch" role="tablist" aria-label="Studio panel">
+      <div className="mobile-studio-switch" role="tablist" aria-label={t("Studio panel")}>
         <button
           id="mobile-conversation-tab"
           role="tab"
@@ -201,7 +203,7 @@ export function StudioView({
           className={clsx(mobileSurface === "conversation" && "active")}
           onClick={() => setMobileSurface("conversation")}
         >
-          Chat
+          {t("Chat")}
         </button>
         <button
           id="mobile-canvas-tab"
@@ -211,7 +213,7 @@ export function StudioView({
           className={clsx(mobileSurface === "canvas" && "active")}
           onClick={() => setMobileSurface("canvas")}
         >
-          Canvas
+          {t("Canvas")}
           <span>{events.length + extensionBlocks.length}</span>
         </button>
       </div>
@@ -223,18 +225,18 @@ export function StudioView({
       >
         <header className="surface-header conversation-header">
           <div>
-            <div className="eyebrow"><span className="live-dot" />Published agent · v{agent.version}</div>
+            <div className="eyebrow"><span className="live-dot" />{t("Published agent")} · v{agent.version}</div>
             <h1>{agent.name}</h1>
           </div>
           <div className="header-actions">
-            <button className="button secondary"><Link2 size={14} />Share</button>
-            <button className="button dark"><Play size={13} fill="currentColor" />Deploy<ChevronDown size={13} /></button>
+            <button className="button secondary"><Link2 size={14} />{t("Share")}</button>
+            <button className="button dark"><Play size={13} fill="currentColor" />{t("Deploy")}<ChevronDown size={13} /></button>
           </div>
         </header>
 
         <div className="conversation-scroll" ref={timelineRef}>
           <div className="conversation-inner">
-            <div className="thread-meta"><span>{workspace.name}</span><i />Operations review<i />Now</div>
+            <div className="thread-meta"><span>{workspace.name}</span><i />{t("Operations review")}<i />{t("Now")}</div>
             <article className="user-turn" ref={anchorRef}>
               <div className="user-message">{lastAttachments.length > 0 && <div className="turn-images">{lastAttachments.map((attachment) => <NextImage key={`${attachment.name}-${attachment.data_url.length}`} src={attachment.data_url} alt={attachment.name} width={92} height={68} unoptimized />)}</div>}<p>{lastPrompt}</p></div>
             </article>
@@ -245,17 +247,17 @@ export function StudioView({
                   events={events}
                   running={running}
                   assistantText={assistantText}
-                  onCopy={() => { void navigator.clipboard.writeText(assistantText); showToast("Response copied"); }}
+                  onCopy={() => { void navigator.clipboard.writeText(assistantText); showToast(t("Response copied")); }}
                 />
                 {approval && !events.some((event) => event.type === "run.completed") && (
                   <div className="approval-card">
-                    <div className="approval-top"><span className="approval-icon"><ShieldCheck size={16} /></span><div><strong>{approval.payload.title}</strong><p>{approval.payload.description}</p></div><span className="risk-label">High impact</span></div>
+                    <div className="approval-top"><span className="approval-icon"><ShieldCheck size={16} /></span><div><strong>{approval.payload.title}</strong><p>{approval.payload.description}</p></div><span className="risk-label">{t("High impact")}</span></div>
                     <div className="approval-command"><code>{approval.payload.tool}</code><span>{JSON.stringify(approval.payload.arguments)}</span></div>
-                    <div className="approval-actions"><button className="button secondary" onClick={() => void decide("denied")}><X size={14} />Deny</button><button className="button dark" onClick={() => void decide("approved")}><Check size={14} />Approve once</button></div>
+                    <div className="approval-actions"><button className="button secondary" onClick={() => void decide("denied")}><X size={14} />{t("Deny")}</button><button className="button dark" onClick={() => void decide("approved")}><Check size={14} />{t("Approve once")}</button></div>
                   </div>
                 )}
                 {citations.length > 0 && (
-                  <button className="citation-chip" title={citations.map((event) => String(event.payload.label ?? event.payload.source ?? "Source")).join(" · ")}><FileText size={12} />Sources <span>{citations.length}</span></button>
+                  <button className="citation-chip" title={citations.map((event) => String(event.payload.label ?? event.payload.source ?? t("Source"))).join(" · ")}><FileText size={12} />{t("Sources")} <span>{citations.length}</span></button>
                 )}
               </div>
             </article>
@@ -265,7 +267,7 @@ export function StudioView({
 
         <div className="composer-wrap">
           <div className={clsx("composer", composerFocused && "focused")}>
-            {attachments.length > 0 && <div className="composer-attachments">{attachments.map((attachment, index) => <div className="composer-image" key={`${attachment.name}-${index}`}><NextImage src={attachment.data_url} alt={attachment.name} width={54} height={42} unoptimized /><button aria-label={`Remove ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={11} /></button><span>{attachment.name}</span></div>)}</div>}
+            {attachments.length > 0 && <div className="composer-attachments">{attachments.map((attachment, index) => <div className="composer-image" key={`${attachment.name}-${index}`}><NextImage src={attachment.data_url} alt={attachment.name} width={54} height={42} unoptimized /><button aria-label={t("Remove {name}", { name: attachment.name })} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={11} /></button><span>{attachment.name}</span></div>)}</div>}
             <textarea
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
@@ -274,10 +276,10 @@ export function StudioView({
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); }
               }}
-              placeholder={`Message ${agent.name}…`}
+              placeholder={t("Message {name}…", { name: agent.name })}
             />
             <div className="composer-footer">
-              <div><button className="composer-tool"><Plus size={15} /></button><button className="composer-tool" aria-label="Attach images" onClick={() => attachmentInputRef.current?.click()}><Paperclip size={15} /></button><input ref={attachmentInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => void addImages(event.target.files)} /><button className="context-chip"><span className="context-dot" />INC-104<ChevronDown size={11} /></button></div>
+              <div><button className="composer-tool"><Plus size={15} /></button><button className="composer-tool" aria-label={t("Attach images")} onClick={() => attachmentInputRef.current?.click()}><Paperclip size={15} /></button><input ref={attachmentInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => void addImages(event.target.files)} /><button className="context-chip"><span className="context-dot" />INC-104<ChevronDown size={11} /></button></div>
               <div className="composer-send-group"><span>⌘ ↵</span><button className="send-button" disabled={(!prompt.trim() && attachments.length === 0) || running} onClick={() => void submit()}>{running ? <CircleStop size={16} /> : <ArrowUp size={17} />}</button></div>
             </div>
           </div>
@@ -295,22 +297,22 @@ export function StudioView({
       >
         <header className="canvas-header">
           <div className="canvas-tabs">
-            <button className={clsx(canvasTab === "artifact" && "active")} onClick={() => setCanvasTab("artifact")}>Artifact</button>
-            <button className={clsx(canvasTab === "trace" && "active")} onClick={() => setCanvasTab("trace")}>Trace <span>{events.length}</span></button>
-            <button className={clsx(canvasTab === "extensions" && "active")} onClick={() => setCanvasTab("extensions")}>Blocks <span>{extensionBlocks.length}</span></button>
-            <button className={clsx(canvasTab === "context" && "active")} onClick={() => setCanvasTab("context")}>Context</button>
+            <button className={clsx(canvasTab === "artifact" && "active")} onClick={() => setCanvasTab("artifact")}>{t("Artifact")}</button>
+            <button className={clsx(canvasTab === "trace" && "active")} onClick={() => setCanvasTab("trace")}>{t("Trace")} <span>{events.length}</span></button>
+            <button className={clsx(canvasTab === "extensions" && "active")} onClick={() => setCanvasTab("extensions")}>{t("Blocks")} <span>{extensionBlocks.length}</span></button>
+            <button className={clsx(canvasTab === "context" && "active")} onClick={() => setCanvasTab("context")}>{t("Context")}</button>
           </div>
-          <div><button className="icon-button quiet" title="Regenerate"><RotateCcw size={14} /></button><button className="icon-button quiet" title="Copy" onClick={() => { if (artifact) void navigator.clipboard.writeText(artifact.content); showToast("Artifact copied"); }}><Copy size={14} /></button></div>
+          <div><button className="icon-button quiet" title={t("Regenerate")}><RotateCcw size={14} /></button><button className="icon-button quiet" title={t("Copy")} onClick={() => { if (artifact) void navigator.clipboard.writeText(artifact.content); showToast(t("Artifact copied")); }}><Copy size={14} /></button></div>
         </header>
         <div className="canvas-content">
           {canvasTab === "artifact" && (
-            visibleArtifact ? <ArtifactDocument artifact={visibleArtifact} citationCount={citations.length} /> : <div className="artifact-empty"><Sparkles size={22} /><h3>Artifact canvas</h3><p>{running ? "The artifact will settle here when the response is complete." : "Structured output will appear here as the agent works."}</p></div>
+            visibleArtifact ? <ArtifactDocument artifact={visibleArtifact} citationCount={citations.length} /> : <div className="artifact-empty"><Sparkles size={22} /><h3>{t("Artifact canvas")}</h3><p>{t(running ? "The artifact will settle here when the response is complete." : "Structured output will appear here as the agent works.")}</p></div>
           )}
           {canvasTab === "trace" && <TraceTimeline events={events} />}
           {canvasTab === "extensions" && <ExtensionUIBlocks blocks={extensionBlocks} events={events} context={hostContext} busy={running} onSubmit={submitExtensionAction} />}
           {canvasTab === "context" && <ContextInspector agent={agent} />}
         </div>
-        <footer className="canvas-footer"><span><Clock3 size={12} />Updated just now</span><span>{canvasTab === "extensions" ? `Declarative UI · ${extensionBlocks.length} blocks` : `Markdown · v${visibleArtifact?.version ?? 1}`}</span></footer>
+        <footer className="canvas-footer"><span><Clock3 size={12} />{t("Updated just now")}</span><span>{canvasTab === "extensions" ? t("Declarative UI · {count} blocks", { count: extensionBlocks.length }) : `Markdown · v${visibleArtifact?.version ?? 1}`}</span></footer>
       </aside>
       {toast && <Toast message={toast} />}
     </div>
@@ -332,30 +334,33 @@ function fileToImageAttachment(file: File): Promise<ImageAttachment> {
 }
 
 function ArtifactDocument({ artifact, citationCount }: { artifact: Artifact; citationCount: number }) {
+  const { t } = useI18n();
   return (
     <article className="artifact-document">
-      <div className="document-kicker">Operations / Incident brief</div>
+      <div className="document-kicker">{t("Operations / Incident brief")}</div>
       <h2>{artifact.title}</h2>
       <div className="document-rule" />
       <MarkdownContent content={artifact.content} variant="artifact" />
-      <div className="artifact-signoff"><AlcuinMark size={30} /><span>Prepared by Alcuin<small>{citationCount > 0 ? `Grounded in ${citationCount} source${citationCount === 1 ? "" : "s"}` : "No external sources used"}</small></span></div>
+      <div className="artifact-signoff"><AlcuinMark size={30} /><span>{t("Prepared by Alcuin")}<small>{citationCount > 0 ? t(citationCount === 1 ? "Grounded in {count} source" : "Grounded in {count} sources", { count: citationCount }) : t("No external sources used")}</small></span></div>
     </article>
   );
 }
 
 function TraceTimeline({ events }: { events: ExecutionEvent[] }) {
+  const { t } = useI18n();
   return <div className="trace-timeline">{events.map((event) => (
     <div className="trace-item" key={event.id}>
       <span className={clsx("trace-node", event.type === "run.completed" && "done")} />
-      <div><strong>{event.type}</strong><p>{event.payload.summary ?? event.payload.result_summary ?? event.payload.label ?? event.payload.status ?? "Event recorded"}</p><small>#{event.sequence} · {new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</small></div>
+      <div><strong>{event.type}</strong><p>{event.payload.summary ?? event.payload.result_summary ?? event.payload.label ?? event.payload.status ?? t("Event recorded")}</p><small>#{event.sequence} · {new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</small></div>
     </div>
   ))}</div>;
 }
 
 function ContextInspector({ agent }: { agent: Agent }) {
+  const { t } = useI18n();
   return <div className="context-inspector">
-    <div className="context-group"><label>Agent version</label><strong>{agent.name} · v{agent.version}</strong><span>Immutable published definition</span></div>
-    <div className="context-group"><label>Host context</label><code>{`{\n  "page": "/operations/incidents",\n  "record": { "id": "INC-104" }\n}`}</code></div>
-    <div className="context-group"><label>Bound capabilities</label>{agent.definition.tools.map((tool) => <span className="tool-binding" key={tool}><TerminalSquare size={12} />{tool}</span>)}</div>
+    <div className="context-group"><label>{t("Agent version")}</label><strong>{agent.name} · v{agent.version}</strong><span>{t("Immutable published definition")}</span></div>
+    <div className="context-group"><label>{t("Host context")}</label><code>{`{\n  "page": "/operations/incidents",\n  "record": { "id": "INC-104" }\n}`}</code></div>
+    <div className="context-group"><label>{t("Bound capabilities")}</label>{agent.definition.tools.map((tool) => <span className="tool-binding" key={tool}><TerminalSquare size={12} />{tool}</span>)}</div>
   </div>;
 }
