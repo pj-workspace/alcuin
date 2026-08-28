@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import yaml
 
-from .contracts import (
+from alcuin_core.contracts import (
     ExtensionContributions,
     ExtensionManifest,
     HealthReport,

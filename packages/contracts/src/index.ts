@@ -1,3 +1,11 @@
+import type { ExecutionEventType } from "./platform";
+
+export {
+  AGENT_SCHEMA_VERSION,
+  EXECUTION_EVENT_TYPES,
+  type ExecutionEventType,
+} from "./platform";
+
 export type RunStatus =
   | "queued"
   | "running"
@@ -5,18 +13,6 @@ export type RunStatus =
   | "completed"
   | "failed"
   | "cancelled";
-
-export type ExecutionEventType =
-  | "run.started"
-  | "reasoning.delta"
-  | "message.delta"
-  | "tool.requested"
-  | "tool.completed"
-  | "approval.required"
-  | "artifact.updated"
-  | "citation.created"
-  | "run.completed"
-  | "run.failed";
 
 export interface AgentDefinition {
   schema_version: string;

@@ -77,7 +77,7 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - A built-in `web.search` adapter for self-hosted SearXNG with quick/deep modes, TTL caches, URL deduplication, bounded page extraction, SSRF guards, and citation events
 - A built-in `knowledge.search` adapter with Builder-based document import, deterministic chunking, Qwen dense+sparse hybrid retrieval, Agent-version source binding, and `knowledge://` citations
 - A persisted English/Chinese interface switch across Studio, Builder, Extensions, Runs, and Embed, while keeping Agent and extension-owned content unchanged
-- Persisted normalized execution events with resumable SSE delivery and a lightweight TCM-compatible stream projection
+- Persisted normalized execution events with resumable SSE delivery and Alcuin's compact chat stream projection
 - Extension inspection, disabled-first installation, permission review, live health state, and enable/disable lifecycle
 - A typed `@alcuin/extension-sdk` with offline conformance validation, stable tool-id helpers, and a runnable stdio MCP scaffold
 - Workspace-scoped MCP/OpenAPI tool resolution from enabled extensions into Agent Definitions and model tool loops, with runtime state rechecks and bounded results
@@ -87,6 +87,7 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - Standard `Last-Event-ID` recovery shared by Studio and Embed, with bounded reconnects and replay suppression
 - Declarative extension card/table/form blocks with scoped data binding and approval-gated Tool Runs
 - An explicit Operations Copilot example proving that a domain Extension can run in Studio and an embedded host without entering Alcuin Core
+- A framework-neutral Python `alcuin-core`, configurable `@alcuin/sdk`, enforced web feature boundaries, and an independently packaged Operations example
 
 The contracts are versioned but not yet stable. SQLite stores local control-plane metadata, while Qdrant is the implemented local knowledge index. PostgreSQL and Redis remain optional `platform-infra` services until their production adapters land.
 

@@ -48,18 +48,25 @@ Streaming output should distinguish assistant content, reasoning summaries, tool
 
 ## Implemented Pre-alpha Boundary
 
-The current repository is organized as a small monorepo:
+The current repository is organized as a layered monorepo:
 
 ```text
-apps/api          FastAPI control plane, runtime orchestration, SSE, MCP gateway
-apps/web          Next.js Studio, Builder, Extensions, Runs, Embed Playground
-packages/contracts Shared TypeScript contract vocabulary
-packages/embed     Framework-neutral Web Component
-packages/sse-client Browser-neutral resumable SSE transport
-alcuin_extensions   Explicit first-party example adapters, never default Core behavior
+apps/api                         FastAPI routes, security, composition, and transitional adapters
+apps/web/app                     Next.js routing only
+apps/web/features                Studio, Agents, Extensions, Runs, Embed, and Shell modules
+apps/web/shared                  Shared web UI, localization, and application SDK wiring
+packages/python/alcuin-core      Framework-neutral Python contracts and tool envelopes
+packages/contracts              Shared TypeScript contract vocabulary
+packages/sdk                    Configurable framework-neutral REST/SSE client
+packages/embed                  Framework-neutral Web Component
+packages/extension-sdk          TypeScript Extension authoring boundary
+packages/sse-client             Browser-neutral resumable SSE transport
+extensions/operations-copilot   Explicit domain example depending inward on Core
 ```
 
-A fresh Core store creates only the domain-neutral **Alcuin Starter**, with no tools or Extensions bound. Domain examples must install their Agent Definition, Manifest, and adapter explicitly; the Operations Copilot example does this under `examples/operations_copilot` and is not imported by `alcuin_api.main`.
+Dependencies point inward: applications may compose packages; Core cannot import applications, runtime frameworks, infrastructure clients, or domain Extensions; web shared modules cannot import features; features cannot import Next routes. Repository tests enforce these initial boundaries. Runtime orchestration, storage, and connector implementations still live inside `apps/api` during the staged extraction and must not be described as independent packages until they move.
+
+A fresh Core store creates only the domain-neutral **Alcuin Starter**, with no tools or Extensions bound. Domain examples must install their Agent Definition, Manifest, and adapter explicitly; the Operations Copilot package lives under `extensions/operations-copilot`, and `examples/operations_copilot` is only its composition root. Neither is imported by `alcuin_api.main`.
 
 The HTTP API never exposes LangGraph state. Runtime adapters receive a normalized text-and-attachment request and emit ordered `ExecutionEvent` records. Provider events, MCP results, approval interrupts, and artifacts are translated at this boundary. DeepSeek vision uses native Chat Completions streaming and maps provider reasoning into `reasoning.delta` separately from visible `message.delta` output. Studio enables thinking by default, while headless clients can disable it per run.
 
@@ -90,6 +97,7 @@ Executable extension tools use portable Agent Definition ids in the form `extens
 Mutating tools pause at `approval.required`. An approval decision does not manufacture a success event: the runtime reloads the Run's frozen Agent Version and thread context, revalidates the tool against the current Workspace extension state, executes the real adapter with a one-call mutation authorization, and then persists the actual result or a controlled failure.
 
 See [ADR-0001](adr-0001-runtime-extension-contracts.md) for the contract decisions implemented by the prototype.
+See [ADR-0002](adr-0002-modular-package-boundaries.md) for the implemented package dependency rules and staged extraction order.
 
 ## Remaining Decisions
 

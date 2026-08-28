@@ -8,7 +8,7 @@ import pytest
 from jsonschema import validate
 from pydantic import ValidationError
 
-from alcuin_api.contracts import (
+from alcuin_core.contracts import (
     ExtensionInstallRequest,
     ExtensionManifest,
     MCPEntrypoint,
@@ -25,7 +25,7 @@ def test_sample_manifest_matches_public_json_schema() -> None:
         (REPOSITORY_ROOT / "docs/schemas/alcuin-extension.schema.json").read_text()
     )
     manifest = json.loads(
-        (REPOSITORY_ROOT / "extensions/operations-toolkit/alcuin.extension.json").read_text()
+        (REPOSITORY_ROOT / "extensions/operations-copilot/alcuin.extension.json").read_text()
     )
     validate(instance=manifest, schema=schema)
     parsed = ExtensionManifest.model_validate(manifest)

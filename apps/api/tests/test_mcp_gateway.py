@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from alcuin_api.contracts import MCPEntrypoint
+from alcuin_core.contracts import MCPEntrypoint
 from alcuin_api.mcp_gateway import MCPGateway
 
 

@@ -12,7 +12,7 @@ import httpx
 from qdrant_client import QdrantClient, models
 
 from .config import Settings
-from .contracts import KnowledgeDocumentCreate
+from alcuin_core.contracts import KnowledgeDocumentCreate
 from .store import Store
 from .tools import ToolCitation, ToolContext, ToolDefinition, ToolError, ToolResult
 

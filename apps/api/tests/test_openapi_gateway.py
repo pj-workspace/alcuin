@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from alcuin_api.contracts import OpenAPIEntrypoint
+from alcuin_core.contracts import OpenAPIEntrypoint
 from alcuin_api.openapi_gateway import MAX_OPENAPI_RESPONSE_BYTES, OpenAPIGateway
 
 

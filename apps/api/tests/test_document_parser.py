@@ -10,7 +10,7 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from alcuin_api.config import Settings
-from alcuin_api.contracts import KnowledgeSourceCreate
+from alcuin_core.contracts import KnowledgeSourceCreate
 from alcuin_api.document_parser import (
     DocumentParseError,
     DocumentTooLargeError,

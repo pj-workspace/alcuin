@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from alcuin_api.config import Settings
-from alcuin_api.contracts import AgentDefinition, EventType, ImageAttachment
+from alcuin_core.contracts import AgentDefinition, EventType, ImageAttachment
 from alcuin_api.runtime import OpenAICompatibleRuntime, RuntimeRequest
 from alcuin_api.tools import (
     ToolCitation,

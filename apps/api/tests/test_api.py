@@ -7,14 +7,11 @@ import httpx
 from fastapi.testclient import TestClient
 
 from alcuin_api.config import Settings
-from alcuin_api.contracts import EmbedClaims
+from alcuin_core.contracts import EmbedClaims
 from alcuin_api.main import create_app
 from alcuin_api.security import issue_embed_token
 from alcuin_api.store import Store
-from alcuin_extensions.operations_toolkit import (
-    operations_demo_adapter,
-    seed_operations_demo,
-)
+from alcuin_operations_copilot import operations_demo_adapter, seed_operations_demo
 
 
 def fake_provider_transport() -> httpx.MockTransport:

@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 
-import { Workbench } from "@/components/workbench";
+import { Workbench } from "@/features/shell";
 
 const surfaces = ["studio", "agents", "extensions", "runs", "embed"] as const;
 type Surface = (typeof surfaces)[number];
