@@ -44,4 +44,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --project apps/api --frozen
-      - run: uv run --project apps/api pytest
+      - run: ./scripts/with-test-services.sh uv run --project apps/api pytest
