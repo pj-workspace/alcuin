@@ -1,0 +1,68 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      ALCUIN_DATABASE_PATH: /data/alcuin.db
+      ALCUIN_SIGNING_SECRET: ${ALCUIN_SIGNING_SECRET:-local-compose-signing-secret}
+      ALCUIN_CORS_ORIGINS: http://localhost:3000
+      ALCUIN_OPENAI_API_KEY: ${ALCUIN_OPENAI_API_KEY:-}
+      ALCUIN_OPENAI_BASE_URL: ${ALCUIN_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      ALCUIN_OPENAI_MODEL: ${ALCUIN_OPENAI_MODEL:-gpt-4.1-mini}
+      ALCUIN_PROVIDER_MODE: ${ALCUIN_PROVIDER_MODE:-responses}
+      ALCUIN_DEEPSEEK_API_KEY: ${ALCUIN_DEEPSEEK_API_KEY:-}
+      ALCUIN_DEEPSEEK_BASE_URL: ${ALCUIN_DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      ALCUIN_DEEPSEEK_MODEL: ${ALCUIN_DEEPSEEK_MODEL:-deepseek-v4-flash-vision-exp}
+      ALCUIN_DEEPSEEK_PROTOCOL: ${ALCUIN_DEEPSEEK_PROTOCOL:-chat_completions}
+    ports:
+      - "8000:8000"
+    volumes:
+      - alcuin-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_ALCUIN_API_URL: http://localhost:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/studio"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:17-alpine
+    profiles: ["platform-infra"]
+    environment:
+      POSTGRES_DB: alcuin
+      POSTGRES_USER: alcuin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alcuin-local}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    profiles: ["platform-infra"]
+
+  qdrant:
+    image: qdrant/qdrant:v1.15
+    profiles: ["platform-infra"]
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+volumes:
+  alcuin-data:
+  postgres-data:
+  qdrant-data:
