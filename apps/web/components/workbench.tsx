@@ -126,6 +126,7 @@ export function Workbench({ surface }: { surface: Surface }) {
         <StudioView
           workspace={data.workspace}
           agent={activeAgent}
+          extensions={data.extensions}
           initialEvents={events}
           onRunCreated={refresh}
         />

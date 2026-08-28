@@ -54,6 +54,27 @@ export const alcuinApi = {
       method: "POST",
       body: JSON.stringify({ input, attachments, thinking }),
     }),
+  createToolRun: (
+    threadId: string,
+    input: string,
+    name: string,
+    arguments_: Record<string, unknown>,
+    extensionManifestId: string,
+    uiBlockId: string,
+  ) =>
+    request<Run>(`/v1/threads/${threadId}/runs`, {
+      method: "POST",
+      body: JSON.stringify({
+        input,
+        thinking: false,
+        requested_tool: {
+          name,
+          arguments: arguments_,
+          extension_manifest_id: extensionManifestId,
+          ui_block_id: uiBlockId,
+        },
+      }),
+    }),
   decideApproval: (runId: string, approvalId: string, decision: "approved" | "denied") =>
     request(`/v1/runs/${runId}/approvals/${approvalId}`, {
       method: "POST",

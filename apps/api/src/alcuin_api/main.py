@@ -46,6 +46,7 @@ from .contracts import (
     MCPToolCallRequest,
     OpenAPIImportRequest,
     OpenAPIEntrypoint,
+    RequestedToolCall,
     RunCreate,
     ThreadCreate,
 )
@@ -288,6 +289,44 @@ def create_app(
                     detail="Enable and health-check Agent extensions before publishing: "
                     + ", ".join(unavailable),
                 )
+
+    def validate_requested_ui_tool(
+        workspace_id: str,
+        definition: AgentDefinition,
+        requested: RequestedToolCall,
+    ) -> None:
+        if requested.extension_manifest_id not in definition.extensions:
+            raise HTTPException(status_code=409, detail="UI action is not bound to this Agent")
+        extension = next(
+            (
+                item
+                for item in repository.list_extensions(workspace_id)
+                if item["manifest_id"] == requested.extension_manifest_id
+            ),
+            None,
+        )
+        if (
+            not extension
+            or extension["status"] != "enabled"
+            or extension["health"] not in {"healthy", "degraded"}
+        ):
+            raise HTTPException(status_code=409, detail="UI extension is unavailable")
+        manifest = ExtensionManifest.model_validate(extension["manifest"])
+        block = next(
+            (
+                item
+                for item in manifest.contributions.ui_blocks
+                if item.type == "form" and item.id == requested.ui_block_id
+            ),
+            None,
+        )
+        if block is None:
+            raise HTTPException(status_code=409, detail="UI form is unavailable")
+        raw_tool = block.submit.tool
+        builtin = any(entrypoint.type == "builtin" for entrypoint in manifest.entrypoints)
+        expected_tool = raw_tool if builtin else extension_tool_name(manifest.id, raw_tool)
+        if requested.name != expected_tool or expected_tool not in definition.tools:
+            raise HTTPException(status_code=409, detail="UI form tool is unavailable")
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -562,6 +601,13 @@ def create_app(
         version = repository.get_agent_version(scope.workspace_id, version_id)
         if not version or version["agent_id"] != thread["agent_id"]:
             raise HTTPException(status_code=403, detail="Agent version is outside the embed scope")
+        definition = AgentDefinition.model_validate(version["definition"])
+        if payload.requested_tool:
+            validate_requested_ui_tool(
+                scope.workspace_id,
+                definition,
+                payload.requested_tool,
+            )
         run = repository.create_run(
             scope.workspace_id, thread_id, version_id, payload.input
         )
@@ -570,9 +616,14 @@ def create_app(
             run_id=run["id"],
             prompt=payload.input,
             thread_context=thread["context"],
-            definition=AgentDefinition.model_validate(version["definition"]),
+            definition=definition,
             attachments=tuple(payload.attachments),
             thinking=payload.thinking,
+            requested_tool=(
+                payload.requested_tool.model_dump(mode="json")
+                if payload.requested_tool
+                else None
+            ),
         )
         task = asyncio.create_task(app.state.runtime.execute(runtime_request))
         app.state.tasks.add(task)

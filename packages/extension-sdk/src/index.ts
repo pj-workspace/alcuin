@@ -3,6 +3,7 @@ import type {
   ExtensionManifest,
   ExtensionPermission,
   ExtensionToolContribution,
+  ExtensionUIBlock,
 } from "@alcuin/contracts";
 
 export type {
@@ -11,6 +12,11 @@ export type {
   ExtensionManifest,
   ExtensionPermission,
   ExtensionToolContribution,
+  ExtensionUIBlock,
+  ExtensionUIDataSource,
+  ExtensionUIFormBlock,
+  ExtensionUICardBlock,
+  ExtensionUITableBlock,
   JsonSchema,
 } from "@alcuin/contracts";
 
@@ -165,6 +171,105 @@ function validateTools(value: unknown, issues: ManifestIssue[]): ExtensionToolCo
   return tools;
 }
 
+function validUiPath(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length <= 200
+    && /^[a-zA-Z0-9_.-]*$/.test(value)
+    && !value.split(".").some((segment) => ["__proto__", "prototype", "constructor"].includes(segment));
+}
+
+function validateUiBlocks(
+  value: unknown,
+  tools: ExtensionToolContribution[],
+  issues: ManifestIssue[],
+): ExtensionUIBlock[] {
+  if (!Array.isArray(value)) return [];
+  if (value.length > 24) {
+    addIssue(issues, "contributions.ui_blocks", "ui-blocks.limit", "An extension may declare at most 24 UI blocks.");
+  }
+  const toolNames = new Set(tools.map((tool) => tool.name));
+  const blockIds = new Set<string>();
+  const blocks: ExtensionUIBlock[] = [];
+  value.forEach((item, index) => {
+    const path = `contributions.ui_blocks[${index}]`;
+    if (!isObject(item)) {
+      addIssue(issues, path, "ui-block.object", "UI block must be an object.");
+      return;
+    }
+    const id = typeof item.id === "string" ? item.id : "";
+    if (!/^[a-z][a-z0-9-]{1,63}$/.test(id)) {
+      addIssue(issues, `${path}.id`, "ui-block.id", "UI block id must be a lowercase kebab-case id.");
+    } else if (blockIds.has(id)) {
+      addIssue(issues, `${path}.id`, "ui-block.duplicate", `Duplicate UI block id: ${id}.`);
+    }
+    if (id) blockIds.add(id);
+    if (typeof item.title !== "string" || !item.title.trim() || item.title.length > 100) {
+      addIssue(issues, `${path}.title`, "ui-block.title", "UI block title must contain 1 to 100 characters.");
+    }
+    if (item.type === "card" || item.type === "table") {
+      if (!isObject(item.source)) {
+        addIssue(issues, `${path}.source`, "ui-block.source", "Card and table blocks require a data source.");
+      } else {
+        const kind = item.source.kind;
+        if (!["context", "artifact", "tool_result"].includes(String(kind))) {
+          addIssue(issues, `${path}.source.kind`, "ui-block.source-kind", "UI source kind is not supported.");
+        }
+        if (!validUiPath(item.source.path ?? "")) {
+          addIssue(issues, `${path}.source.path`, "ui-block.source-path", "UI source path is invalid.");
+        }
+        if (kind === "tool_result" && (typeof item.source.tool !== "string" || !toolNames.has(item.source.tool))) {
+          addIssue(issues, `${path}.source.tool`, "ui-block.source-tool", "Tool-result source must reference a declared tool.");
+        }
+        if (kind !== "tool_result" && item.source.tool !== undefined) {
+          addIssue(issues, `${path}.source.tool`, "ui-block.source-tool", "Only tool-result sources may declare a tool.");
+        }
+      }
+      const values = item.type === "card" ? item.fields : item.columns;
+      const valuesPath = item.type === "card" ? "fields" : "columns";
+      if (!Array.isArray(values) || values.length < 1 || values.length > 12) {
+        addIssue(issues, `${path}.${valuesPath}`, "ui-block.values", "UI blocks require 1 to 12 value fields.");
+      } else {
+        values.forEach((field, fieldIndex) => {
+          if (!isObject(field) || typeof field.label !== "string" || !validUiPath(field.path)) {
+            addIssue(issues, `${path}.${valuesPath}[${fieldIndex}]`, "ui-block.value", "UI value fields require a label and safe path.");
+          }
+        });
+      }
+    } else if (item.type === "form") {
+      if (!Array.isArray(item.fields) || item.fields.length < 1 || item.fields.length > 12) {
+        addIssue(issues, `${path}.fields`, "ui-block.form-fields", "UI forms require 1 to 12 fields.");
+      } else {
+        const names = new Set<string>();
+        item.fields.forEach((field, fieldIndex) => {
+          const fieldPath = `${path}.fields[${fieldIndex}]`;
+          if (!isObject(field) || typeof field.name !== "string" || !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(field.name)) {
+            addIssue(issues, `${fieldPath}.name`, "ui-block.form-field", "UI form field name is invalid.");
+            return;
+          }
+          if (names.has(field.name)) addIssue(issues, `${fieldPath}.name`, "ui-block.form-field-duplicate", `Duplicate form field: ${field.name}.`);
+          names.add(field.name);
+          if (!["text", "textarea", "number", "select"].includes(String(field.input))) {
+            addIssue(issues, `${fieldPath}.input`, "ui-block.form-input", "UI form input type is not supported.");
+          }
+          if (!validUiPath(field.default_path ?? "")) {
+            addIssue(issues, `${fieldPath}.default_path`, "ui-block.default-path", "UI form default path is invalid.");
+          }
+          if (field.input === "select" && (!Array.isArray(field.options) || field.options.length === 0)) {
+            addIssue(issues, `${fieldPath}.options`, "ui-block.select-options", "Select fields require options.");
+          }
+        });
+      }
+      if (!isObject(item.submit) || typeof item.submit.tool !== "string" || !toolNames.has(item.submit.tool)) {
+        addIssue(issues, `${path}.submit.tool`, "ui-block.submit-tool", "UI form must submit to a declared tool.");
+      }
+    } else {
+      addIssue(issues, `${path}.type`, "ui-block.type", "UI block type must be card, table, or form.");
+    }
+    blocks.push(item as unknown as ExtensionUIBlock);
+  });
+  return blocks;
+}
+
 function validatePermissions(value: unknown, issues: ManifestIssue[]): ExtensionPermission[] {
   if (!Array.isArray(value)) {
     addIssue(issues, "permissions", "permissions.array", "Permissions must be an array.");
@@ -231,6 +336,7 @@ export function validateExtensionManifest(value: unknown): ManifestValidationRes
     });
   }
   const tools = validateTools(contributions?.tools, issues);
+  validateUiBlocks(contributions?.ui_blocks, tools, issues);
   if (!Array.isArray(value.entrypoints) || value.entrypoints.length === 0) {
     addIssue(issues, "entrypoints", "entrypoints.required", "At least one entrypoint is required.");
   } else {

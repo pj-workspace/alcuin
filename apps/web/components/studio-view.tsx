@@ -1,6 +1,6 @@
 "use client";
 
-import type { Agent, Artifact, ExecutionEvent, ImageAttachment } from "@alcuin/contracts";
+import type { Agent, Artifact, ExecutionEvent, Extension, ImageAttachment } from "@alcuin/contracts";
 import NextImage from "next/image";
 import {
   ArrowUp,
@@ -25,21 +25,25 @@ import { clsx } from "clsx";
 
 import { alcuinApi } from "@/lib/api";
 import { AlcuinMark } from "@/components/alcuin-mark";
+import { ExtensionUIBlocks } from "@/components/extension-ui-blocks";
 import { MarkdownContent } from "@/components/markdown-content";
 import { RunOutput } from "@/components/run-output";
 import { Toast } from "@/components/ui";
 import { usePinnedTurnScroll } from "@/components/use-pinned-turn-scroll";
+import { resolveExtensionUIBlocks, type ResolvedExtensionUIBlock } from "@/lib/extension-ui";
 
-type CanvasTab = "artifact" | "trace" | "context";
+type CanvasTab = "artifact" | "trace" | "extensions" | "context";
 
 export function StudioView({
   workspace,
   agent,
+  extensions,
   initialEvents,
   onRunCreated,
 }: {
   workspace: { id: string; name: string };
   agent?: Agent;
+  extensions: Extension[];
   initialEvents: ExecutionEvent[];
   onRunCreated: () => Promise<void>;
 }) {
@@ -54,6 +58,10 @@ export function StudioView({
   const [toast, setToast] = useState<string | null>(null);
   const [composerFocused, setComposerFocused] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const hostContext = useMemo(() => ({
+    page: "/operations/incidents",
+    record: { id: "INC-104", type: "incident" },
+  }), []);
 
   useEffect(() => {
     if (!running) {
@@ -85,6 +93,10 @@ export function StudioView({
         return true;
       });
   }, [events]);
+  const extensionBlocks = useMemo(
+    () => agent ? resolveExtensionUIBlocks(agent, extensions) : [],
+    [agent, extensions],
+  );
 
   const showToast = (message: string) => {
     setToast(message);
@@ -101,16 +113,43 @@ export function StudioView({
     setEvents([]);
     setRunning(true);
     try {
-      const thread = await alcuinApi.createThread(agent.id, {
-        page: "/operations/incidents",
-        record: { id: "INC-104", type: "incident" },
-      });
+      const thread = await alcuinApi.createThread(agent.id, hostContext);
       const run = await alcuinApi.createRun(thread.id, value, selectedAttachments);
       setRunId(run.id);
       await alcuinApi.streamRun(run.id, (event) => setEvents((current) => [...current, event]));
       await onRunCreated();
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Run failed");
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  async function submitExtensionAction(
+    resolved: ResolvedExtensionUIBlock,
+    tool: string,
+    arguments_: Record<string, unknown>,
+  ) {
+    if (!agent || running) return;
+    setLastPrompt(`${resolved.extensionName} · ${resolved.block.title}`);
+    setLastAttachments([]);
+    setEvents([]);
+    setRunning(true);
+    try {
+      const thread = await alcuinApi.createThread(agent.id, hostContext);
+      const run = await alcuinApi.createToolRun(
+        thread.id,
+        `${resolved.block.title} · declarative extension action`,
+        tool,
+        arguments_,
+        resolved.manifestId,
+        resolved.block.id,
+      );
+      setRunId(run.id);
+      await alcuinApi.streamRun(run.id, (event) => setEvents((current) => [...current, event]));
+      await onRunCreated();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Extension action failed");
     } finally {
       setRunning(false);
     }
@@ -222,6 +261,7 @@ export function StudioView({
           <div className="canvas-tabs">
             <button className={clsx(canvasTab === "artifact" && "active")} onClick={() => setCanvasTab("artifact")}>Artifact</button>
             <button className={clsx(canvasTab === "trace" && "active")} onClick={() => setCanvasTab("trace")}>Trace <span>{events.length}</span></button>
+            <button className={clsx(canvasTab === "extensions" && "active")} onClick={() => setCanvasTab("extensions")}>Blocks <span>{extensionBlocks.length}</span></button>
             <button className={clsx(canvasTab === "context" && "active")} onClick={() => setCanvasTab("context")}>Context</button>
           </div>
           <div><button className="icon-button quiet" title="Regenerate"><RotateCcw size={14} /></button><button className="icon-button quiet" title="Copy" onClick={() => { if (artifact) void navigator.clipboard.writeText(artifact.content); showToast("Artifact copied"); }}><Copy size={14} /></button></div>
@@ -231,9 +271,10 @@ export function StudioView({
             visibleArtifact ? <ArtifactDocument artifact={visibleArtifact} citationCount={citations.length} /> : <div className="artifact-empty"><Sparkles size={22} /><h3>Artifact canvas</h3><p>{running ? "The artifact will settle here when the response is complete." : "Structured output will appear here as the agent works."}</p></div>
           )}
           {canvasTab === "trace" && <TraceTimeline events={events} />}
+          {canvasTab === "extensions" && <ExtensionUIBlocks blocks={extensionBlocks} events={events} context={hostContext} busy={running} onSubmit={submitExtensionAction} />}
           {canvasTab === "context" && <ContextInspector agent={agent} />}
         </div>
-        <footer className="canvas-footer"><span><Clock3 size={12} />Updated just now</span><span>Markdown · v{visibleArtifact?.version ?? 1}</span></footer>
+        <footer className="canvas-footer"><span><Clock3 size={12} />Updated just now</span><span>{canvasTab === "extensions" ? `Declarative UI · ${extensionBlocks.length} blocks` : `Markdown · v${visibleArtifact?.version ?? 1}`}</span></footer>
       </aside>
       {toast && <Toast message={toast} />}
     </div>

@@ -46,6 +46,37 @@ const valid = defineExtension({
 assert.equal(valid.id, "verification.sdk");
 assert.equal(extensionToolId(valid.id, "echo"), "extension.verification.sdk.echo");
 
+const validUi = validateExtensionManifest({
+  ...valid,
+  contributions: {
+    ...valid.contributions,
+    ui_blocks: [
+      {
+        id: "context-card",
+        type: "card",
+        title: "Context",
+        source: { kind: "context", path: "record" },
+        fields: [{ label: "ID", path: "id" }],
+      },
+      {
+        id: "result-table",
+        type: "table",
+        title: "Results",
+        source: { kind: "tool_result", tool: "echo", path: "rows" },
+        columns: [{ label: "Value", path: "value" }],
+      },
+      {
+        id: "echo-form",
+        type: "form",
+        title: "Echo",
+        fields: [{ name: "message", label: "Message", input: "text" }],
+        submit: { tool: "echo", label: "Send" },
+      },
+    ],
+  },
+});
+assert.equal(validUi.valid, true);
+
 const invalid = validateExtensionManifest({
   ...valid,
   contributions: {
@@ -66,5 +97,23 @@ assert.deepEqual(
   invalid.errors.map((issue) => issue.code).sort(),
   ["permissions.mutation-risk", "tool.mutation-approval"],
 );
+
+const invalidUi = validateExtensionManifest({
+  ...valid,
+  contributions: {
+    ...valid.contributions,
+    ui_blocks: [
+      {
+        id: "lookup",
+        type: "form",
+        title: "Lookup",
+        fields: [{ name: "query", label: "Query", input: "text" }],
+        submit: { tool: "missing", label: "Run" },
+      },
+    ],
+  },
+});
+assert.equal(invalidUi.valid, false);
+assert.equal(invalidUi.errors.some((issue) => issue.code === "ui-block.submit-tool"), true);
 
 console.log("extension-sdk contract tests passed");

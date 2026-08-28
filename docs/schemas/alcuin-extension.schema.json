@@ -5,6 +5,94 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["manifest_version", "id", "name", "version", "contributions", "entrypoints", "permissions"],
+  "$defs": {
+    "uiSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["context", "artifact", "tool_result"] },
+        "tool": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "path": { "type": "string", "maxLength": 200, "pattern": "^[a-zA-Z0-9_.-]*$" }
+      }
+    },
+    "uiValueField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "path"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "path": { "type": "string", "maxLength": 200, "pattern": "^[a-zA-Z0-9_.-]*$" },
+        "format": { "enum": ["text", "number", "status", "date", "json"] }
+      }
+    },
+    "uiCard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "title", "source", "fields"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+        "type": { "const": "card" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 300 },
+        "source": { "$ref": "#/$defs/uiSource" },
+        "fields": { "type": "array", "minItems": 1, "maxItems": 12, "items": { "$ref": "#/$defs/uiValueField" } }
+      }
+    },
+    "uiTable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "title", "source", "columns"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+        "type": { "const": "table" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 300 },
+        "source": { "$ref": "#/$defs/uiSource" },
+        "columns": { "type": "array", "minItems": 1, "maxItems": 12, "items": { "$ref": "#/$defs/uiValueField" } },
+        "empty_state": { "type": "string", "maxLength": 160 }
+      }
+    },
+    "uiForm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "title", "fields", "submit"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+        "type": { "const": "form" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 300 },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "label", "input"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$" },
+              "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+              "input": { "enum": ["text", "textarea", "number", "select"] },
+              "required": { "type": "boolean" },
+              "placeholder": { "type": "string", "maxLength": 160 },
+              "default_path": { "type": "string", "maxLength": 200, "pattern": "^[a-zA-Z0-9_.-]*$" },
+              "options": { "type": "array", "maxItems": 20, "uniqueItems": true, "items": { "type": "string" } }
+            }
+          }
+        },
+        "submit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "label"],
+          "properties": {
+            "tool": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "label": { "type": "string", "minLength": 1, "maxLength": 80 }
+          }
+        }
+      }
+    }
+  },
   "properties": {
     "$schema": { "type": "string" },
     "manifest_version": { "const": "1" },
@@ -21,7 +109,17 @@
         "skills": { "type": "array", "items": { "type": "object" } },
         "agent_templates": { "type": "array", "items": { "type": "object" } },
         "knowledge_connectors": { "type": "array", "items": { "type": "object" } },
-        "ui_blocks": { "type": "array", "items": { "type": "object" } }
+        "ui_blocks": {
+          "type": "array",
+          "maxItems": 24,
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/uiCard" },
+              { "$ref": "#/$defs/uiTable" },
+              { "$ref": "#/$defs/uiForm" }
+            ]
+          }
+        }
       }
     },
     "entrypoints": {
