@@ -154,3 +154,65 @@ test("runs the real Embed component through origin-scoped read and approval flow
     window as unknown as { __alcuinHostEvents?: string[] }
   ).__alcuinHostEvents ?? [])).not.toContain("alcuin:error");
 });
+
+test("installs and enables real MCP and OpenAPI extensions through the governed lifecycle", async ({ page }, testInfo) => {
+  const suffix = testInfo.project.name;
+  const mcpName = `E2E Echo MCP ${suffix}`;
+  const openApiName = `E2E Records API ${suffix}`;
+
+  await page.goto("/extensions");
+  await page.getByRole("button", { name: "Connect capability", exact: true }).click();
+  let wizard = page.locator(".extension-wizard");
+  await wizard.getByLabel("Name", { exact: true }).fill(mcpName);
+  await wizard.getByLabel("Extension ID", { exact: true }).fill(`e2e.${suffix}.mcp`);
+  await wizard.getByLabel("Description", { exact: true }).fill("Live stdio lifecycle verification");
+  await wizard.getByLabel("Command", { exact: true }).fill("uv");
+  await wizard.locator("textarea.code-editor").fill(JSON.stringify([
+    "run",
+    "--project",
+    "apps/api",
+    "python",
+    "apps/api/tests/fixtures/echo_mcp.py",
+  ]));
+  await wizard.getByRole("button", { name: "Inspect connection" }).click();
+  await expect(wizard.getByText("Contract is valid", { exact: true })).toBeVisible();
+  await expect(wizard.locator(".tool-selection").filter({ hasText: "echo" })).toBeVisible();
+  const mutatingMcpTool = wizard.locator(".tool-selection").filter({ hasText: "write_marker" });
+  await expect(mutatingMcpTool).toContainText("write · approval");
+  await mutatingMcpTool.getByRole("checkbox").uncheck();
+  await wizard.getByRole("button", { name: "Review selected permissions" }).click();
+  await expect(wizard.locator(".tool-selection").filter({ hasText: "write_marker" })).toHaveCount(0);
+  await wizard.getByRole("button", { name: "Install disabled" }).click();
+  await expect(wizard.getByText("disabled", { exact: true })).toBeVisible();
+  await wizard.getByRole("button", { name: "Run health check" }).click();
+  await expect(wizard.getByText("healthy", { exact: true }).first()).toBeVisible();
+  await wizard.getByRole("button", { name: "Enable extension" }).click();
+  await expect(wizard.getByText("enabled", { exact: true })).toBeVisible();
+  await wizard.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByRole("heading", { name: mcpName, exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Connect capability", exact: true }).click();
+  wizard = page.locator(".extension-wizard");
+  await wizard.getByRole("button", { name: "OpenAPI", exact: true }).click();
+  await wizard.getByLabel("Name", { exact: true }).fill(openApiName);
+  await wizard.getByLabel("Extension ID", { exact: true }).fill(`e2e.${suffix}.records`);
+  await wizard.getByRole("button", { name: "Specification URL" }).click();
+  await wizard.getByLabel("OpenAPI URL", { exact: true }).fill("http://127.0.0.1:9411/openapi.json");
+  await wizard.getByRole("button", { name: "Inspect connection" }).click();
+  await expect(wizard.getByText("Contract is valid", { exact: true })).toBeVisible();
+  await expect(wizard.locator(".tool-selection").filter({ hasText: "getRecord" })).toContainText("read only");
+  const mutatingOpenApiTool = wizard.locator(".tool-selection").filter({ hasText: "updateRecord" });
+  await expect(mutatingOpenApiTool).toContainText("write · approval");
+  const healthOperation = wizard.locator(".tool-selection").filter({ hasText: "healthCheck" });
+  await healthOperation.getByRole("checkbox").uncheck();
+  await wizard.getByRole("button", { name: "Review selected permissions" }).click();
+  await expect(wizard.locator(".tool-selection").filter({ hasText: "healthCheck" })).toHaveCount(0);
+  await wizard.getByRole("button", { name: "Install disabled" }).click();
+  await expect(wizard.getByText("disabled", { exact: true })).toBeVisible();
+  await wizard.getByRole("button", { name: "Run health check" }).click();
+  await expect(wizard.getByText("healthy", { exact: true }).first()).toBeVisible();
+  await wizard.getByRole("button", { name: "Enable extension" }).click();
+  await expect(wizard.getByText("enabled", { exact: true })).toBeVisible();
+  await wizard.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByRole("heading", { name: openApiName, exact: true })).toBeVisible();
+});

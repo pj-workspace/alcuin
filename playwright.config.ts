@@ -28,6 +28,7 @@ export default defineConfig({
         ALCUIN_DATABASE_PATH: ":memory:",
         ALCUIN_CORS_ORIGINS: E2E_WEB_URL,
         ALCUIN_DEEPSEEK_API_KEY: "",
+        ALCUIN_EXTENSION_ALLOW_PRIVATE_NETWORKS: "true",
         ALCUIN_OPENAI_API_KEY: "",
       },
     },
@@ -41,6 +42,12 @@ export default defineConfig({
         NEXT_PUBLIC_ALCUIN_API_URL: E2E_API_URL,
         NEXT_PUBLIC_ALCUIN_WORKSPACE_ID: "ws_demo",
       },
+    },
+    {
+      command: "uv run --project apps/api uvicorn examples.records_api.app:app --port 9411",
+      url: "http://127.0.0.1:9411/health",
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
     },
   ],
 });
