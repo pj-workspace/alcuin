@@ -4,6 +4,7 @@ import asyncio
 import json
 import sqlite3
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
@@ -63,7 +64,7 @@ from .extensions import (
     refresh_mcp_manifest,
     resolve_openapi_document,
 )
-from .extension_tools import ExtensionToolService, extension_tool_name
+from .extension_tools import BuiltinToolAdapter, ExtensionToolService, extension_tool_name
 from .knowledge import KnowledgeService, QdrantKnowledgeIndex
 from .mcp_gateway import MCPGateway
 from .openapi_gateway import OpenAPIGateway
@@ -85,6 +86,7 @@ def create_app(
     document_parser: DocumentParser | None = None,
     mcp_gateway: MCPGateway | None = None,
     openapi_gateway: OpenAPIGateway | None = None,
+    builtin_adapters: Mapping[str, BuiltinToolAdapter] | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     repository = store or Store(settings.database_path)
@@ -112,6 +114,7 @@ def create_app(
         repository,
         configured_mcp_gateway,
         configured_openapi_gateway,
+        builtin_adapters,
     )
     tool_executor = ToolExecutor(
         tool_registry,
@@ -954,4 +957,7 @@ def create_app(
     return app
 
 
-app = create_app()
+from alcuin_extensions.operations_toolkit import operations_demo_adapter
+
+
+app = create_app(builtin_adapters={"operations-demo": operations_demo_adapter})

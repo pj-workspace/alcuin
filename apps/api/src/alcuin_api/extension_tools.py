@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from .contracts import ExtensionManifest, MCPEntrypoint, OpenAPIEntrypoint
+from .contracts import BuiltinEntrypoint, ExtensionManifest, MCPEntrypoint, OpenAPIEntrypoint
 from .mcp_gateway import MCPGateway
 from .openapi_gateway import OpenAPIGateway
 from .store import Store
@@ -11,6 +12,9 @@ from .tools import ToolContext, ToolDefinition, ToolError, ToolResult
 
 
 MAX_EXTENSION_EVENT_RESULT_CHARS = 64_000
+BuiltinToolAdapter = Callable[
+    [ToolContext, str, dict[str, Any]], Awaitable[ToolResult]
+]
 
 
 def extension_tool_name(manifest_id: str, tool_name: str) -> str:
@@ -37,10 +41,12 @@ class ExtensionToolService:
         store: Store,
         mcp_gateway: MCPGateway,
         openapi_gateway: OpenAPIGateway,
+        builtin_adapters: Mapping[str, BuiltinToolAdapter] | None = None,
     ) -> None:
         self.store = store
         self.mcp_gateway = mcp_gateway
         self.openapi_gateway = openapi_gateway
+        self.builtin_adapters = dict(builtin_adapters or {})
 
     def definitions(self, workspace_id: str) -> list[ToolDefinition]:
         definitions: list[ToolDefinition] = []
@@ -55,7 +61,7 @@ class ExtensionToolService:
                 (
                     item
                     for item in manifest.entrypoints
-                    if item.type in {"mcp", "openapi"}
+                    if item.type in {"mcp", "openapi", "builtin"}
                 ),
                 None,
             )
@@ -68,7 +74,11 @@ class ExtensionToolService:
                     continue
                 definitions.append(
                     ToolDefinition(
-                        name=extension_tool_name(manifest.id, raw_name),
+                        name=(
+                            raw_name
+                            if isinstance(entrypoint, BuiltinEntrypoint)
+                            else extension_tool_name(manifest.id, raw_name)
+                        ),
                         description=str(tool.get("description") or f"Call {raw_name}")[:500],
                         input_schema=input_schema,
                         handler=self._handler(extension["id"], manifest.id, raw_name),
@@ -132,7 +142,7 @@ class ExtensionToolService:
                 (
                     item
                     for item in manifest.entrypoints
-                    if item.type in {"mcp", "openapi"}
+                    if item.type in {"mcp", "openapi", "builtin"}
                 ),
                 None,
             )
@@ -151,6 +161,15 @@ class ExtensionToolService:
                     allow_mutating=context.mutation_authorized,
                 )
                 data = result if isinstance(result, dict) else {"result": result}
+            elif isinstance(entrypoint, BuiltinEntrypoint):
+                adapter = self.builtin_adapters.get(entrypoint.adapter)
+                if adapter is None:
+                    raise ToolError(
+                        "extension_unavailable",
+                        "Built-in extension adapter is not registered",
+                    )
+                adapter_result = await adapter(context, raw_name, arguments)
+                data = adapter_result.data
             else:
                 raise ToolError("extension_unavailable", "Extension has no executable entrypoint")
             return ToolResult(
