@@ -1,0 +1,47 @@
+{
+  "$schema": "../../docs/schemas/alcuin-extension.schema.json",
+  "manifest_version": "1",
+  "id": "ops-toolkit",
+  "name": "Operations Toolkit",
+  "version": "0.1.0",
+  "description": "Read operational records and perform approval-gated ticket updates.",
+  "compatibility": ">=0.1.0",
+  "contributions": {
+    "tools": [
+      {
+        "name": "ops.search_incidents",
+        "description": "Search incident records",
+        "input_schema": {
+          "type": "object",
+          "properties": { "query": { "type": "string" } },
+          "required": ["query"]
+        },
+        "mutating": false
+      },
+      {
+        "name": "ops.update_ticket",
+        "description": "Update an incident ticket",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ticket_id": { "type": "string" },
+            "status": { "type": "string" }
+          },
+          "required": ["ticket_id", "status"]
+        },
+        "mutating": true
+      }
+    ],
+    "skills": [{ "id": "incident-brief", "name": "Incident brief" }],
+    "agent_templates": [],
+    "knowledge_connectors": [],
+    "ui_blocks": [{ "type": "table", "id": "incident-summary" }]
+  },
+  "entrypoints": [{ "type": "builtin", "adapter": "operations-demo" }],
+  "config_schema": { "type": "object" },
+  "permissions": [
+    { "id": "records:read", "reason": "Read operational records", "risk": "low", "required": true },
+    { "id": "tickets:write", "reason": "Update incident status", "risk": "high", "required": true }
+  ],
+  "credential_requirements": []
+}

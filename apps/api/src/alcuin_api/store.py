@@ -1,0 +1,672 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+import uuid
+from pathlib import Path
+from typing import Any
+
+from .contracts import AgentCreate, AgentDefinition, ExtensionManifest, utc_now
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:20]}"
+
+
+class Store:
+    """Small SQL repository with workspace scoping enforced in every lookup."""
+
+    def __init__(self, database_path: str) -> None:
+        if database_path != ":memory:":
+            Path(database_path).parent.mkdir(parents=True, exist_ok=True)
+        self.connection = sqlite3.connect(database_path, check_same_thread=False)
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA foreign_keys = ON")
+        self.lock = threading.RLock()
+        self.initialize()
+
+    def initialize(self) -> None:
+        with self.lock, self.connection:
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS agents (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    slug TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    current_version_id TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, slug)
+                );
+                CREATE TABLE IF NOT EXISTS agent_versions (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    agent_id TEXT NOT NULL REFERENCES agents(id),
+                    version INTEGER NOT NULL,
+                    definition_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(agent_id, version)
+                );
+                CREATE TABLE IF NOT EXISTS threads (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    agent_id TEXT NOT NULL REFERENCES agents(id),
+                    title TEXT NOT NULL,
+                    context_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS runs (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    thread_id TEXT NOT NULL REFERENCES threads(id),
+                    agent_version_id TEXT NOT NULL REFERENCES agent_versions(id),
+                    status TEXT NOT NULL,
+                    input TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS events (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    run_id TEXT NOT NULL REFERENCES runs(id),
+                    sequence INTEGER NOT NULL,
+                    type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(run_id, sequence)
+                );
+                CREATE TABLE IF NOT EXISTS approvals (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    run_id TEXT NOT NULL REFERENCES runs(id),
+                    status TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    note TEXT,
+                    created_at TEXT NOT NULL,
+                    decided_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS extensions (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    manifest_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    health TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL,
+                    credential_refs_json TEXT NOT NULL,
+                    installed_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, manifest_id)
+                );
+                """
+            )
+        self.seed_demo()
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def _one(self, query: str, params: tuple[Any, ...]) -> sqlite3.Row | None:
+        return self.connection.execute(query, params).fetchone()
+
+    def _all(self, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
+        return list(self.connection.execute(query, params).fetchall())
+
+    @staticmethod
+    def _json(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _agent(row: sqlite3.Row, definition: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = dict(row)
+        if definition is not None:
+            result["definition"] = definition
+        return result
+
+    def seed_demo(self) -> None:
+        definition = AgentDefinition.model_validate(
+            {
+                "identity": {
+                    "name": "Operations Copilot",
+                    "description": "A governed operator for incidents, orders, and status communication.",
+                    "icon": "command",
+                },
+                "instructions": (
+                    "Help operators investigate incidents and customer records. Use read-only tools freely. "
+                    "Request explicit approval before changing external systems. Produce concise operational artifacts."
+                ),
+                "model": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-flash-vision-exp",
+                    "credential_ref": "secret://workspace/deepseek-primary",
+                },
+                "extensions": ["ops-toolkit"],
+                "tools": ["ops.search_incidents", "ops.lookup_order", "ops.update_ticket"],
+                "runtime": {"adapter": "langgraph-react", "max_steps": 8},
+                "policies": {"mutating_tools": "ask", "external_side_effects": "ask"},
+                "context_policy": {"accepted": ["page", "record", "selection"], "max_bytes": 16_384},
+                "output_schema": {"type": "artifact", "format": "markdown"},
+                "starter_prompts": [
+                    "Summarize the active checkout incident",
+                    "Look up order AC-2048 and draft a customer update",
+                    "Update incident INC-104 to monitoring",
+                ],
+            }
+        )
+        manifest = ExtensionManifest.model_validate(
+            {
+                "id": "ops-toolkit",
+                "name": "Operations Toolkit",
+                "version": "0.1.0",
+                "description": "Read operational records and perform approval-gated updates.",
+                "compatibility": ">=0.1.0",
+                "contributions": {
+                    "tools": [
+                        {
+                            "name": "ops.search_incidents",
+                            "description": "Search incident records",
+                            "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+                            "mutating": False,
+                        },
+                        {
+                            "name": "ops.update_ticket",
+                            "description": "Update an incident ticket",
+                            "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}},
+                            "mutating": True,
+                        },
+                    ],
+                    "skills": [{"id": "incident-brief", "name": "Incident brief"}],
+                    "ui_blocks": [{"type": "table", "id": "incident-summary"}],
+                },
+                "entrypoints": [{"type": "builtin", "adapter": "operations-demo"}],
+                "permissions": [
+                    {"id": "records:read", "reason": "Read operational records", "risk": "low"},
+                    {"id": "tickets:write", "reason": "Update incident status", "risk": "high"},
+                ],
+            }
+        )
+        with self.lock, self.connection:
+            self.connection.execute(
+                "INSERT OR IGNORE INTO workspaces(id, name, created_at) VALUES (?, ?, ?)",
+                ("ws_demo", "Northstar Operations", utc_now()),
+            )
+            self.connection.execute(
+                """INSERT OR IGNORE INTO agents
+                (id, workspace_id, slug, name, description, status, current_version_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "agt_operations",
+                    "ws_demo",
+                    "operations-copilot",
+                    definition.identity.name,
+                    definition.identity.description,
+                    "published",
+                    "av_operations_1",
+                    utc_now(),
+                ),
+            )
+            self.connection.execute(
+                """INSERT OR IGNORE INTO agent_versions
+                (id, workspace_id, agent_id, version, definition_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    "av_operations_1",
+                    "ws_demo",
+                    "agt_operations",
+                    1,
+                    definition.model_dump_json(),
+                    utc_now(),
+                ),
+            )
+            self.connection.execute(
+                """INSERT OR IGNORE INTO extensions
+                (id, workspace_id, manifest_id, name, version, status, health, manifest_json,
+                 credential_refs_json, installed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "ext_ops_toolkit",
+                    "ws_demo",
+                    manifest.id,
+                    manifest.name,
+                    manifest.version,
+                    "enabled",
+                    "healthy",
+                    manifest.model_dump_json(),
+                    "{}",
+                    utc_now(),
+                ),
+            )
+            self.connection.execute(
+                """INSERT OR IGNORE INTO threads
+                (id, workspace_id, agent_id, title, context_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    "thr_demo_incident",
+                    "ws_demo",
+                    "agt_operations",
+                    "Checkout latency review",
+                    self._json({"page": "/operations/incidents", "record": {"id": "INC-104"}}),
+                    utc_now(),
+                ),
+            )
+            self.connection.execute(
+                """INSERT OR IGNORE INTO runs
+                (id, workspace_id, thread_id, agent_version_id, status, input, created_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "run_demo_incident",
+                    "ws_demo",
+                    "thr_demo_incident",
+                    "av_operations_1",
+                    "completed",
+                    "Summarize the active checkout incident and prepare a handoff brief.",
+                    utc_now(),
+                    utc_now(),
+                ),
+            )
+            demo_events = [
+                ("run.started", {"runtime": "langgraph-react", "provider": "openai-compatible"}),
+                (
+                    "tool.requested",
+                    {
+                        "tool": "ops.search_incidents",
+                        "summary": "Read current operational records",
+                        "arguments": {"query": "checkout latency"},
+                        "mutating": False,
+                    },
+                ),
+                (
+                    "tool.completed",
+                    {
+                        "tool": "ops.search_incidents",
+                        "status": "succeeded",
+                        "result_summary": "1 active incident and 3 related notes found.",
+                        "duration_ms": 82,
+                    },
+                ),
+                (
+                    "message.delta",
+                    {
+                        "delta": "Checkout latency is recovering. The mitigation is active and no new payment failures have appeared in the last 20 minutes."
+                    },
+                ),
+                (
+                    "citation.created",
+                    {
+                        "label": "Incident INC-104",
+                        "source": "Operations Toolkit",
+                        "locator": "ops://incidents/INC-104",
+                    },
+                ),
+                (
+                    "artifact.updated",
+                    {
+                        "artifact": {
+                            "id": "artifact-demo-incident",
+                            "title": "INC-104 · Operational brief",
+                            "kind": "document",
+                            "version": 1,
+                            "content": "## Current state\n\nMitigation is active and checkout latency is trending down.\n\n## Evidence\n\n- No new payment failures in 20 minutes\n- Error rate returned below the alert threshold\n\n## Next action\n\nKeep the incident in monitoring and reassess in 30 minutes.",
+                        }
+                    },
+                ),
+                ("run.completed", {"status": "completed", "usage": {"input_tokens": 132, "output_tokens": 96}}),
+            ]
+            for sequence, (event_type, event_payload) in enumerate(demo_events, start=1):
+                self.connection.execute(
+                    """INSERT OR IGNORE INTO events
+                    (id, workspace_id, run_id, sequence, type, payload_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        f"evt_demo_{sequence}",
+                        "ws_demo",
+                        "run_demo_incident",
+                        sequence,
+                        event_type,
+                        self._json(event_payload),
+                        utc_now(),
+                    ),
+                )
+
+    def workspace(self, workspace_id: str) -> dict[str, Any] | None:
+        row = self._one("SELECT * FROM workspaces WHERE id = ?", (workspace_id,))
+        return dict(row) if row else None
+
+    def list_agents(self, workspace_id: str) -> list[dict[str, Any]]:
+        rows = self._all(
+            """SELECT a.*, v.version, v.definition_json
+            FROM agents a LEFT JOIN agent_versions v ON v.id = a.current_version_id
+            WHERE a.workspace_id = ? ORDER BY a.created_at""",
+            (workspace_id,),
+        )
+        return [self._agent(row, json.loads(row["definition_json"]) if row["definition_json"] else None) for row in rows]
+
+    def get_agent(self, workspace_id: str, agent_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            """SELECT a.*, v.version, v.definition_json
+            FROM agents a LEFT JOIN agent_versions v ON v.id = a.current_version_id
+            WHERE a.workspace_id = ? AND a.id = ?""",
+            (workspace_id, agent_id),
+        )
+        if not row:
+            return None
+        return self._agent(row, json.loads(row["definition_json"]) if row["definition_json"] else None)
+
+    def get_agent_version(self, workspace_id: str, version_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            "SELECT * FROM agent_versions WHERE workspace_id = ? AND id = ?",
+            (workspace_id, version_id),
+        )
+        if not row:
+            return None
+        result = dict(row)
+        result["definition"] = json.loads(result.pop("definition_json"))
+        return result
+
+    def create_agent(self, workspace_id: str, payload: AgentCreate) -> dict[str, Any]:
+        agent_id, version_id, created_at = new_id("agt"), new_id("av"), utc_now()
+        with self.lock, self.connection:
+            self.connection.execute(
+                """INSERT INTO agents
+                (id, workspace_id, slug, name, description, status, current_version_id, created_at)
+                VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)""",
+                (
+                    agent_id,
+                    workspace_id,
+                    payload.slug,
+                    payload.definition.identity.name,
+                    payload.definition.identity.description,
+                    version_id,
+                    created_at,
+                ),
+            )
+            self.connection.execute(
+                """INSERT INTO agent_versions
+                (id, workspace_id, agent_id, version, definition_json, created_at)
+                VALUES (?, ?, ?, 1, ?, ?)""",
+                (version_id, workspace_id, agent_id, payload.definition.model_dump_json(), created_at),
+            )
+        return self.get_agent(workspace_id, agent_id) or {}
+
+    def create_agent_version(
+        self, workspace_id: str, agent_id: str, definition: AgentDefinition
+    ) -> dict[str, Any] | None:
+        agent = self.get_agent(workspace_id, agent_id)
+        if not agent:
+            return None
+        row = self._one("SELECT COALESCE(MAX(version), 0) AS value FROM agent_versions WHERE agent_id = ?", (agent_id,))
+        version = int(row["value"]) + 1
+        version_id = new_id("av")
+        with self.lock, self.connection:
+            self.connection.execute(
+                """INSERT INTO agent_versions
+                (id, workspace_id, agent_id, version, definition_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (version_id, workspace_id, agent_id, version, definition.model_dump_json(), utc_now()),
+            )
+            self.connection.execute(
+                """UPDATE agents SET current_version_id = ?, status = 'draft', name = ?, description = ?
+                WHERE id = ? AND workspace_id = ?""",
+                (
+                    version_id,
+                    definition.identity.name,
+                    definition.identity.description,
+                    agent_id,
+                    workspace_id,
+                ),
+            )
+        return self.get_agent(workspace_id, agent_id)
+
+    def publish_agent(self, workspace_id: str, agent_id: str) -> dict[str, Any] | None:
+        with self.lock, self.connection:
+            cursor = self.connection.execute(
+                "UPDATE agents SET status = 'published' WHERE id = ? AND workspace_id = ?",
+                (agent_id, workspace_id),
+            )
+        return self.get_agent(workspace_id, agent_id) if cursor.rowcount else None
+
+    def create_thread(
+        self, workspace_id: str, agent_id: str, title: str, context: dict[str, Any]
+    ) -> dict[str, Any]:
+        thread_id = new_id("thr")
+        with self.lock, self.connection:
+            self.connection.execute(
+                """INSERT INTO threads(id, workspace_id, agent_id, title, context_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (thread_id, workspace_id, agent_id, title, self._json(context), utc_now()),
+            )
+        return self.get_thread(workspace_id, thread_id) or {}
+
+    def get_thread(self, workspace_id: str, thread_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            "SELECT * FROM threads WHERE workspace_id = ? AND id = ?", (workspace_id, thread_id)
+        )
+        if not row:
+            return None
+        result = dict(row)
+        result["context"] = json.loads(result.pop("context_json"))
+        return result
+
+    def list_threads(self, workspace_id: str) -> list[dict[str, Any]]:
+        rows = self._all(
+            "SELECT * FROM threads WHERE workspace_id = ? ORDER BY created_at DESC", (workspace_id,)
+        )
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["context"] = json.loads(item.pop("context_json"))
+            result.append(item)
+        return result
+
+    def create_run(
+        self, workspace_id: str, thread_id: str, agent_version_id: str, prompt: str
+    ) -> dict[str, Any]:
+        run_id = new_id("run")
+        with self.lock, self.connection:
+            self.connection.execute(
+                """INSERT INTO runs
+                (id, workspace_id, thread_id, agent_version_id, status, input, created_at)
+                VALUES (?, ?, ?, ?, 'queued', ?, ?)""",
+                (run_id, workspace_id, thread_id, agent_version_id, prompt, utc_now()),
+            )
+        return self.get_run(workspace_id, run_id) or {}
+
+    def get_run(self, workspace_id: str, run_id: str) -> dict[str, Any] | None:
+        row = self._one("SELECT * FROM runs WHERE workspace_id = ? AND id = ?", (workspace_id, run_id))
+        return dict(row) if row else None
+
+    def list_runs(self, workspace_id: str, limit: int = 30) -> list[dict[str, Any]]:
+        rows = self._all(
+            """SELECT r.*, t.title, a.name AS agent_name
+            FROM runs r JOIN threads t ON t.id = r.thread_id
+            JOIN agent_versions v ON v.id = r.agent_version_id
+            JOIN agents a ON a.id = v.agent_id
+            WHERE r.workspace_id = ? ORDER BY r.created_at DESC LIMIT ?""",
+            (workspace_id, limit),
+        )
+        return [dict(row) for row in rows]
+
+    def set_run_status(self, workspace_id: str, run_id: str, status: str) -> None:
+        terminal = status in {"completed", "failed", "cancelled"}
+        with self.lock, self.connection:
+            self.connection.execute(
+                "UPDATE runs SET status = ?, completed_at = ? WHERE id = ? AND workspace_id = ?",
+                (status, utc_now() if terminal else None, run_id, workspace_id),
+            )
+
+    def append_event(
+        self, workspace_id: str, run_id: str, event_type: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        with self.lock, self.connection:
+            row = self._one(
+                "SELECT COALESCE(MAX(sequence), 0) AS value FROM events WHERE run_id = ?", (run_id,)
+            )
+            sequence = int(row["value"]) + 1
+            event_id, created_at = new_id("evt"), utc_now()
+            self.connection.execute(
+                """INSERT INTO events
+                (id, workspace_id, run_id, sequence, type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (event_id, workspace_id, run_id, sequence, event_type, self._json(payload), created_at),
+            )
+        return {
+            "id": event_id,
+            "run_id": run_id,
+            "sequence": sequence,
+            "type": event_type,
+            "timestamp": created_at,
+            "payload": payload,
+        }
+
+    def list_events(self, workspace_id: str, run_id: str, after: int = 0) -> list[dict[str, Any]]:
+        rows = self._all(
+            """SELECT * FROM events
+            WHERE workspace_id = ? AND run_id = ? AND sequence > ? ORDER BY sequence""",
+            (workspace_id, run_id, after),
+        )
+        return [
+            {
+                "id": row["id"],
+                "run_id": row["run_id"],
+                "sequence": row["sequence"],
+                "type": row["type"],
+                "timestamp": row["created_at"],
+                "payload": json.loads(row["payload_json"]),
+            }
+            for row in rows
+        ]
+
+    def create_approval(
+        self, workspace_id: str, run_id: str, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        approval_id, created_at = new_id("apr"), utc_now()
+        with self.lock, self.connection:
+            self.connection.execute(
+                """INSERT INTO approvals
+                (id, workspace_id, run_id, status, request_json, created_at)
+                VALUES (?, ?, ?, 'pending', ?, ?)""",
+                (approval_id, workspace_id, run_id, self._json(request), created_at),
+            )
+        return {
+            "id": approval_id,
+            "workspace_id": workspace_id,
+            "run_id": run_id,
+            "status": "pending",
+            "request": request,
+            "created_at": created_at,
+        }
+
+    def get_approval(self, workspace_id: str, approval_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            "SELECT * FROM approvals WHERE workspace_id = ? AND id = ?",
+            (workspace_id, approval_id),
+        )
+        if not row:
+            return None
+        result = dict(row)
+        result["request"] = json.loads(result.pop("request_json"))
+        return result
+
+    def decide_approval(
+        self, workspace_id: str, approval_id: str, decision: str, note: str | None
+    ) -> dict[str, Any] | None:
+        with self.lock, self.connection:
+            cursor = self.connection.execute(
+                """UPDATE approvals SET status = ?, note = ?, decided_at = ?
+                WHERE workspace_id = ? AND id = ? AND status = 'pending'""",
+                (decision, note, utc_now(), workspace_id, approval_id),
+            )
+        return self.get_approval(workspace_id, approval_id) if cursor.rowcount else None
+
+    def list_extensions(self, workspace_id: str) -> list[dict[str, Any]]:
+        rows = self._all(
+            "SELECT * FROM extensions WHERE workspace_id = ? ORDER BY installed_at", (workspace_id,)
+        )
+        return [self._extension(row) for row in rows]
+
+    @staticmethod
+    def _extension(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["manifest"] = json.loads(result.pop("manifest_json"))
+        result["credential_refs"] = json.loads(result.pop("credential_refs_json"))
+        return result
+
+    def get_extension(self, workspace_id: str, extension_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            "SELECT * FROM extensions WHERE workspace_id = ? AND id = ?", (workspace_id, extension_id)
+        )
+        return self._extension(row) if row else None
+
+    def install_extension(
+        self,
+        workspace_id: str,
+        manifest: ExtensionManifest,
+        credential_refs: dict[str, str],
+    ) -> dict[str, Any]:
+        extension_id = new_id("ext")
+        with self.lock, self.connection:
+            self.connection.execute(
+                """INSERT INTO extensions
+                (id, workspace_id, manifest_id, name, version, status, health, manifest_json,
+                 credential_refs_json, installed_at)
+                VALUES (?, ?, ?, ?, ?, 'disabled', 'unchecked', ?, ?, ?)
+                ON CONFLICT(workspace_id, manifest_id) DO UPDATE SET
+                  name = excluded.name,
+                  version = excluded.version,
+                  status = 'disabled',
+                  health = 'unchecked',
+                  manifest_json = excluded.manifest_json,
+                  credential_refs_json = excluded.credential_refs_json""",
+                (
+                    extension_id,
+                    workspace_id,
+                    manifest.id,
+                    manifest.name,
+                    manifest.version,
+                    manifest.model_dump_json(),
+                    self._json(credential_refs),
+                    utc_now(),
+                ),
+            )
+            row = self._one(
+                "SELECT * FROM extensions WHERE workspace_id = ? AND manifest_id = ?",
+                (workspace_id, manifest.id),
+            )
+        return self._extension(row) if row else {}
+
+    def update_extension(
+        self,
+        workspace_id: str,
+        extension_id: str,
+        *,
+        status: str | None = None,
+        health: str | None = None,
+    ) -> dict[str, Any] | None:
+        extension = self.get_extension(workspace_id, extension_id)
+        if not extension:
+            return None
+        with self.lock, self.connection:
+            self.connection.execute(
+                "UPDATE extensions SET status = ?, health = ? WHERE workspace_id = ? AND id = ?",
+                (status or extension["status"], health or extension["health"], workspace_id, extension_id),
+            )
+        return self.get_extension(workspace_id, extension_id)
+
+    def bootstrap(self, workspace_id: str) -> dict[str, Any] | None:
+        workspace = self.workspace(workspace_id)
+        if not workspace:
+            return None
+        return {
+            "workspace": workspace,
+            "agents": self.list_agents(workspace_id),
+            "extensions": self.list_extensions(workspace_id),
+            "threads": self.list_threads(workspace_id),
+            "runs": self.list_runs(workspace_id),
+        }
