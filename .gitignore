@@ -1,0 +1,39 @@
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Node.js
+node_modules/
+.next/
+coverage/
+*.tsbuildinfo
+
+# Logs and local runtime state
+*.log
+.cache/
+tmp/
+
+# Generated artifacts
+artifacts/
+outputs/
+
