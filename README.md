@@ -71,6 +71,7 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 
 - A Next.js Agent Studio with a conversation timeline, Artifact canvas, run trace, approvals, light/dark themes, and responsive navigation
 - Workspace-scoped Agent creation and selection with versioned declarative definitions behind a FastAPI control plane
+- An authoritative Workspace Tool Catalog that exposes configured built-ins and installed Extension tools with runtime availability, mutation metadata, and contributing Extension ownership
 - A replaceable runtime boundary with a LangGraph ReAct demo adapter and an optional OpenAI-compatible streaming adapter
 - A bounded OpenAI-compatible tool loop with Agent allow-lists, JSON Schema validation, workspace context, per-tool deadlines, call budgets, and structured results
 - A built-in `web.search` adapter for self-hosted SearXNG with quick/deep modes, TTL caches, URL deduplication, bounded page extraction, SSRF guards, and citation events

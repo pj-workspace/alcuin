@@ -31,6 +31,7 @@ from .contracts import (
     AgentDefinition,
     AgentVersionCreate,
     ApprovalDecision,
+    BuiltinEntrypoint,
     EmbedClaims,
     EmbedSessionCreate,
     EventType,
@@ -66,7 +67,11 @@ from .extensions import (
     refresh_mcp_manifest,
     resolve_openapi_document,
 )
-from .extension_tools import BuiltinToolAdapter, ExtensionToolService, extension_tool_name
+from .extension_tools import (
+    BuiltinToolAdapter,
+    ExtensionToolService,
+    extension_tool_name,
+)
 from .knowledge import KnowledgeService, QdrantKnowledgeIndex
 from .mcp_gateway import MCPGateway
 from .openapi_gateway import OpenAPIGateway
@@ -80,6 +85,7 @@ from alcuin_extensions.operations_toolkit import operations_demo_adapter
 
 
 ScopeDependency = Annotated[RequestScope, Depends(resolve_scope)]
+BUILTIN_TOOL_IDS = frozenset({"web.search", "knowledge.search"})
 
 
 def resolve_event_cursor(after: int, last_event_id: str | None) -> int:
@@ -103,6 +109,7 @@ def create_app(
     mcp_gateway: MCPGateway | None = None,
     openapi_gateway: OpenAPIGateway | None = None,
     builtin_adapters: Mapping[str, BuiltinToolAdapter] | None = None,
+    provider_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     repository = store or Store(settings.database_path)
@@ -167,10 +174,17 @@ def create_app(
     app.state.web_search_service = web_search_service
     app.state.knowledge_service = configured_knowledge_service
     app.state.extension_tool_service = extension_tool_service
-    app.state.runtime = RuntimeOrchestrator(repository, settings, tool_executor)
+    app.state.runtime = RuntimeOrchestrator(
+        repository,
+        settings,
+        tool_executor,
+        provider_transport=provider_transport,
+    )
 
     def missing(resource: str) -> HTTPException:
-        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{resource} not found")
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"{resource} not found"
+        )
 
     def require_workspace_operator(scope: RequestScope) -> None:
         if scope.embed:
@@ -248,27 +262,41 @@ def create_app(
         dynamic_tools: dict[str, str] = {}
         for manifest_id, extension in installed.items():
             manifest = ExtensionManifest.model_validate(extension["manifest"])
-            if not any(item.type in {"mcp", "openapi"} for item in manifest.entrypoints):
+            entrypoint = next(
+                (
+                    item
+                    for item in manifest.entrypoints
+                    if item.type in {"mcp", "openapi", "builtin"}
+                ),
+                None,
+            )
+            if entrypoint is None:
                 continue
             for tool in manifest.contributions.tools:
                 raw_name = str(tool.get("name") or "").strip()
                 if raw_name:
-                    dynamic_tools[extension_tool_name(manifest_id, raw_name)] = manifest_id
+                    tool_id = (
+                        raw_name
+                        if isinstance(entrypoint, BuiltinEntrypoint)
+                        else extension_tool_name(manifest_id, raw_name)
+                    )
+                    dynamic_tools[tool_id] = manifest_id
         unknown_tools = sorted(
             tool
             for tool in definition.tools
-            if tool.startswith("extension.") and tool not in dynamic_tools
+            if tool not in BUILTIN_TOOL_IDS and tool not in dynamic_tools
         )
         if unknown_tools:
             raise HTTPException(
                 status_code=422 if not require_runnable else 409,
-                detail="Agent references unavailable extension tools: "
+                detail="Agent references unavailable tools: "
                 + ", ".join(unknown_tools),
             )
         unbound_tools = sorted(
             tool
             for tool in definition.tools
-            if tool in dynamic_tools and dynamic_tools[tool] not in definition.extensions
+            if tool in dynamic_tools
+            and dynamic_tools[tool] not in definition.extensions
         )
         if unbound_tools:
             raise HTTPException(
@@ -289,6 +317,29 @@ def create_app(
                     detail="Enable and health-check Agent extensions before publishing: "
                     + ", ".join(unavailable),
                 )
+            catalog = {
+                item["id"]: item
+                for item in extension_tool_service.catalog(workspace_id)
+            }
+            unrunnable_tools = sorted(
+                tool
+                for tool in definition.tools
+                if tool in dynamic_tools and not catalog.get(tool, {}).get("available")
+            )
+            if unrunnable_tools:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Agent tools are not runnable: " + ", ".join(unrunnable_tools),
+                )
+
+    def tool_catalog(workspace_id: str) -> list[dict]:
+        return sorted(
+            [
+                *tool_executor.builtin_catalog(),
+                *extension_tool_service.catalog(workspace_id),
+            ],
+            key=lambda item: (str(item["source"]), str(item["id"])),
+        )
 
     def validate_requested_ui_tool(
         workspace_id: str,
@@ -296,7 +347,9 @@ def create_app(
         requested: RequestedToolCall,
     ) -> None:
         if requested.extension_manifest_id not in definition.extensions:
-            raise HTTPException(status_code=409, detail="UI action is not bound to this Agent")
+            raise HTTPException(
+                status_code=409, detail="UI action is not bound to this Agent"
+            )
         extension = next(
             (
                 item
@@ -323,8 +376,12 @@ def create_app(
         if block is None:
             raise HTTPException(status_code=409, detail="UI form is unavailable")
         raw_tool = block.submit.tool
-        builtin = any(entrypoint.type == "builtin" for entrypoint in manifest.entrypoints)
-        expected_tool = raw_tool if builtin else extension_tool_name(manifest.id, raw_tool)
+        builtin = any(
+            entrypoint.type == "builtin" for entrypoint in manifest.entrypoints
+        )
+        expected_tool = (
+            raw_tool if builtin else extension_tool_name(manifest.id, raw_tool)
+        )
         if requested.name != expected_tool or expected_tool not in definition.tools:
             raise HTTPException(status_code=409, detail="UI form tool is unavailable")
 
@@ -338,7 +395,13 @@ def create_app(
         result = repository.bootstrap(scope.workspace_id)
         if not result:
             raise missing("Workspace")
+        result["tools"] = tool_catalog(scope.workspace_id)
         return result
+
+    @app.get("/v1/tools")
+    async def list_tools(scope: ScopeDependency) -> list[dict]:
+        require_workspace_operator(scope)
+        return tool_catalog(scope.workspace_id)
 
     @app.get("/v1/providers")
     async def list_providers(scope: ScopeDependency) -> list[dict[str, object]]:
@@ -529,15 +592,21 @@ def create_app(
         if not agent:
             raise missing("Agent")
         if scope.agent_id and scope.agent_id != agent_id:
-            raise HTTPException(status_code=403, detail="Embed session is bound to another agent")
+            raise HTTPException(
+                status_code=403, detail="Embed session is bound to another agent"
+            )
         return agent
 
     @app.post("/v1/agents/{agent_id}/versions", status_code=201)
-    async def create_agent_version(agent_id: str, payload: AgentVersionCreate, scope: ScopeDependency) -> dict:
+    async def create_agent_version(
+        agent_id: str, payload: AgentVersionCreate, scope: ScopeDependency
+    ) -> dict:
         require_workspace_operator(scope)
         validate_knowledge_references(scope.workspace_id, payload.definition)
         validate_agent_extension_references(scope.workspace_id, payload.definition)
-        agent = repository.create_agent_version(scope.workspace_id, agent_id, payload.definition)
+        agent = repository.create_agent_version(
+            scope.workspace_id, agent_id, payload.definition
+        )
         if not agent:
             raise missing("Agent")
         return agent
@@ -562,6 +631,11 @@ def create_app(
             )
         if "knowledge.search" in definition.tools:
             require_knowledge_service()
+        if "web.search" in definition.tools and not web_search_service:
+            raise HTTPException(
+                status_code=409,
+                detail="Configure web search before publishing web.search",
+            )
         agent = repository.publish_agent(scope.workspace_id, agent_id)
         if not agent:
             raise missing("Agent")
@@ -576,12 +650,16 @@ def create_app(
     async def create_thread(payload: ThreadCreate, scope: ScopeDependency) -> dict:
         scope.require("thread:create")
         if scope.agent_id and scope.agent_id != payload.agent_id:
-            raise HTTPException(status_code=403, detail="Embed session is bound to another agent")
+            raise HTTPException(
+                status_code=403, detail="Embed session is bound to another agent"
+            )
         agent = repository.get_agent(scope.workspace_id, payload.agent_id)
         if not agent:
             raise missing("Agent")
         if scope.embed and agent["status"] != "published":
-            raise HTTPException(status_code=409, detail="Embedded agents must be published")
+            raise HTTPException(
+                status_code=409, detail="Embedded agents must be published"
+            )
         return repository.create_thread(
             scope.workspace_id,
             payload.agent_id,
@@ -590,20 +668,26 @@ def create_app(
         )
 
     @app.post("/v1/threads/{thread_id}/runs", status_code=202)
-    async def create_run(thread_id: str, payload: RunCreate, scope: ScopeDependency) -> dict:
+    async def create_run(
+        thread_id: str, payload: RunCreate, scope: ScopeDependency
+    ) -> dict:
         scope.require("run:create")
         thread = repository.get_thread(scope.workspace_id, thread_id)
         if not thread:
             raise missing("Thread")
         if scope.agent_id and scope.agent_id != thread["agent_id"]:
-            raise HTTPException(status_code=403, detail="Embed session is bound to another agent")
+            raise HTTPException(
+                status_code=403, detail="Embed session is bound to another agent"
+            )
         agent = repository.get_agent(scope.workspace_id, thread["agent_id"])
         if not agent or not agent.get("current_version_id"):
             raise HTTPException(status_code=409, detail="Agent has no runnable version")
         version_id = scope.agent_version_id or agent["current_version_id"]
         version = repository.get_agent_version(scope.workspace_id, version_id)
         if not version or version["agent_id"] != thread["agent_id"]:
-            raise HTTPException(status_code=403, detail="Agent version is outside the embed scope")
+            raise HTTPException(
+                status_code=403, detail="Agent version is outside the embed scope"
+            )
         definition = AgentDefinition.model_validate(version["definition"])
         if payload.requested_tool:
             validate_requested_ui_tool(
@@ -690,13 +774,21 @@ def create_app(
                             EventType.RUN_COMPLETED,
                             EventType.RUN_FAILED,
                         }:
-                            if protocol == "execution" or event["type"] == EventType.RUN_FAILED:
+                            if (
+                                protocol == "execution"
+                                or event["type"] == EventType.RUN_FAILED
+                            ):
                                 yield "data: [DONE]\n\n"
                             return
                 else:
                     idle_ticks += 1
                     run = repository.get_run(scope.workspace_id, run_id)
-                    if run and run["status"] in {"completed", "failed", "cancelled", "waiting_for_approval"}:
+                    if run and run["status"] in {
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "waiting_for_approval",
+                    }:
                         yield "data: [DONE]\n\n"
                         break
                     if idle_ticks % 20 == 0:
@@ -738,12 +830,16 @@ def create_app(
         return repository.list_extensions(scope.workspace_id)
 
     @app.post("/v1/extensions/inspect")
-    async def inspect_extension(payload: ManifestInspectRequest, scope: ScopeDependency) -> dict:
+    async def inspect_extension(
+        payload: ManifestInspectRequest, scope: ScopeDependency
+    ) -> dict:
         require_workspace_operator(scope)
         return inspect_manifest(payload.manifest)
 
     @app.post("/v1/extensions/import/openapi")
-    async def import_openapi(payload: OpenAPIImportRequest, scope: ScopeDependency) -> dict:
+    async def import_openapi(
+        payload: OpenAPIImportRequest, scope: ScopeDependency
+    ) -> dict:
         require_workspace_operator(scope)
         try:
             resolved = await resolve_openapi_document(
@@ -761,7 +857,9 @@ def create_app(
                 and not settings.extension_allow_private_networks
                 and not await is_public_http_url(str(entrypoint.base_url))
             ):
-                raise ValueError("OpenAPI base_url must resolve to a public HTTP endpoint")
+                raise ValueError(
+                    "OpenAPI base_url must resolve to a public HTTP endpoint"
+                )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)[:300]) from exc
         except httpx.HTTPError as exc:
@@ -794,7 +892,9 @@ def create_app(
         return inspect_manifest(manifest_from_mcp(payload, tools))
 
     @app.post("/v1/extensions", status_code=201)
-    async def install_extension(payload: ExtensionInstallRequest, scope: ScopeDependency) -> dict:
+    async def install_extension(
+        payload: ExtensionInstallRequest, scope: ScopeDependency
+    ) -> dict:
         require_workspace_operator(scope)
         validate_extension_credential_refs(payload.manifest, payload.credential_refs)
         return repository.install_extension(
@@ -839,7 +939,9 @@ def create_app(
                     extension_id,
                     refresh_mcp_manifest(manifest, report.details["tools"]),
                 )
-        repository.update_extension(scope.workspace_id, extension_id, health=report.status)
+        repository.update_extension(
+            scope.workspace_id, extension_id, health=report.status
+        )
         return report.model_dump(mode="json")
 
     @app.patch("/v1/extensions/{extension_id}")
@@ -861,14 +963,20 @@ def create_app(
                     ),
                 )
         if payload.enabled and extension["health"] not in {"healthy", "degraded"}:
-            raise HTTPException(status_code=409, detail="Run a health check before enabling")
+            raise HTTPException(
+                status_code=409, detail="Run a health check before enabling"
+            )
         updated = repository.update_extension(
-            scope.workspace_id, extension_id, status="enabled" if payload.enabled else "disabled"
+            scope.workspace_id,
+            extension_id,
+            status="enabled" if payload.enabled else "disabled",
         )
         return updated or {}
 
     @app.post("/v1/extensions/{extension_id}/tools/refresh")
-    async def refresh_extension_tools(extension_id: str, scope: ScopeDependency) -> dict:
+    async def refresh_extension_tools(
+        extension_id: str, scope: ScopeDependency
+    ) -> dict:
         require_workspace_operator(scope)
         extension = repository.get_extension(scope.workspace_id, extension_id)
         if not extension:
@@ -882,7 +990,9 @@ def create_app(
             None,
         )
         if not entrypoint:
-            raise HTTPException(status_code=409, detail="Extension has no MCP entrypoint")
+            raise HTTPException(
+                status_code=409, detail="Extension has no MCP entrypoint"
+            )
         try:
             tools = await configured_mcp_gateway.discover(
                 MCPEntrypoint.model_validate(entrypoint)
@@ -923,11 +1033,15 @@ def create_app(
             None,
         )
         if not entrypoint:
-            raise HTTPException(status_code=409, detail="Extension has no MCP entrypoint")
+            raise HTTPException(
+                status_code=409, detail="Extension has no MCP entrypoint"
+            )
         declared_tool = next(
             (
                 tool
-                for tool in extension["manifest"].get("contributions", {}).get("tools", [])
+                for tool in extension["manifest"]
+                .get("contributions", {})
+                .get("tools", [])
                 if tool.get("name") == tool_name
             ),
             None,
@@ -973,7 +1087,9 @@ def create_app(
         tool = next(
             (
                 item
-                for item in extension["manifest"].get("contributions", {}).get("tools", [])
+                for item in extension["manifest"]
+                .get("contributions", {})
+                .get("tools", [])
                 if item.get("name") == tool_name
             ),
             None,
@@ -1002,13 +1118,17 @@ def create_app(
             ) from exc
 
     @app.post("/v1/embed/sessions", status_code=201)
-    async def create_embed_session(payload: EmbedSessionCreate, scope: ScopeDependency) -> dict:
+    async def create_embed_session(
+        payload: EmbedSessionCreate, scope: ScopeDependency
+    ) -> dict:
         require_workspace_operator(scope)
         agent = repository.get_agent(scope.workspace_id, payload.agent_id)
         if not agent:
             raise missing("Agent")
         if agent["status"] != "published":
-            raise HTTPException(status_code=409, detail="Publish the agent before embedding")
+            raise HTTPException(
+                status_code=409, detail="Publish the agent before embedding"
+            )
         now = int(time.time())
         claims = EmbedClaims(
             workspace_id=scope.workspace_id,
@@ -1027,5 +1147,6 @@ def create_app(
         }
 
     return app
+
 
 app = create_app(builtin_adapters={"operations-demo": operations_demo_adapter})

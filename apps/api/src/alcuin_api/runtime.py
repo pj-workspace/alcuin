@@ -55,135 +55,71 @@ class RuntimeEmission:
 
 
 class AgentRuntime(Protocol):
-    async def stream(self, request: RuntimeRequest) -> AsyncIterator[RuntimeEmission]: ...
+    async def stream(
+        self, request: RuntimeRequest
+    ) -> AsyncIterator[RuntimeEmission]: ...
 
 
 class DemoState(TypedDict):
     prompt: str
-    intent: str
+    summary: str
 
 
-def _classify_demo_intent(state: DemoState) -> DemoState:
-    mutating_terms = {
-        "update",
-        "change",
-        "close",
-        "resolve",
-        "escalate",
-        "更新",
-        "修改",
-        "关闭",
-        "解决",
-        "升级",
-    }
-    prompt = state["prompt"].lower()
-    return {**state, "intent": "mutating" if any(term in prompt for term in mutating_terms) else "read"}
-
-
-def _finish_demo_plan(state: DemoState) -> DemoState:
-    return state
+def _prepare_preview(state: DemoState) -> DemoState:
+    prompt = " ".join(state["prompt"].split())
+    summary = prompt[:180] if prompt else "No text prompt was provided."
+    return {**state, "summary": summary}
 
 
 def build_demo_graph():
     graph = StateGraph(DemoState)
-    graph.add_node("classify", _classify_demo_intent)
-    graph.add_node("finish", _finish_demo_plan)
-    graph.add_edge(START, "classify")
-    graph.add_edge("classify", "finish")
-    graph.add_edge("finish", END)
+    graph.add_node("prepare", _prepare_preview)
+    graph.add_edge(START, "prepare")
+    graph.add_edge("prepare", END)
     return graph.compile()
 
 
 class LangGraphReactRuntime:
-    """Deterministic prototype adapter exercising the same event boundary as a model runtime."""
+    """Domain-neutral local preview used only when no model credential is configured."""
 
     def __init__(self) -> None:
         self.graph = build_demo_graph()
 
     async def stream(self, request: RuntimeRequest) -> AsyncIterator[RuntimeEmission]:
-        plan = await self.graph.ainvoke({"prompt": request.prompt, "intent": "read"})
-        incident = request.thread_context.get("record", {}).get("id", "INC-104")
-        if plan["intent"] == "mutating":
-            arguments = {"ticket_id": incident, "status": "monitoring"}
-            yield RuntimeEmission(
-                EventType.TOOL_REQUESTED,
-                {
-                    "tool": "ops.update_ticket",
-                    "summary": f"Update {incident} to monitoring",
-                    "arguments": arguments,
-                    "mutating": True,
-                },
-            )
-            yield RuntimeEmission(
-                EventType.APPROVAL_REQUIRED,
-                {
-                    "title": "Approve external update",
-                    "description": f"Operations Toolkit will update {incident} to monitoring.",
-                    "tool": "ops.update_ticket",
-                    "arguments": arguments,
-                    "risk": "high",
-                },
-            )
-            return
-
+        plan = await self.graph.ainvoke({"prompt": request.prompt, "summary": ""})
         yield RuntimeEmission(
-            EventType.TOOL_REQUESTED,
-            {
-                "tool": "ops.search_incidents",
-                "summary": "Read current operational records",
-                "arguments": {"query": request.prompt[:120]},
-                "mutating": False,
-            },
-        )
-        await asyncio.sleep(0.08)
-        yield RuntimeEmission(
-            EventType.TOOL_COMPLETED,
-            {
-                "tool": "ops.search_incidents",
-                "status": "succeeded",
-                "result_summary": "1 active incident and 3 related operational notes found.",
-                "result": {
-                    "query": request.prompt[:120],
-                    "incidents": [{"id": incident, "status": "monitoring"}],
-                },
-                "duration_ms": 82,
-            },
+            EventType.REASONING_DELTA,
+            {"delta": "Preparing a domain-neutral local preview."},
         )
         response = (
-            f"I reviewed the current record for {incident}. Checkout latency is recovering, "
-            "the mitigation is active, and no new payment failures have appeared in the last 20 minutes."
+            f"{request.definition.identity.name} received your request, but no model credential is "
+            "configured for this provider. The local preview never invokes bound tools or invents "
+            "their results. Configure the provider Secret Reference to run the Agent."
         )
-        for chunk in [response[index : index + 32] for index in range(0, len(response), 32)]:
+        for chunk in [
+            response[index : index + 48] for index in range(0, len(response), 48)
+        ]:
             yield RuntimeEmission(EventType.MESSAGE_DELTA, {"delta": chunk})
-            await asyncio.sleep(0.035)
-        yield RuntimeEmission(
-            EventType.CITATION_CREATED,
-            {
-                "label": f"Incident {incident}",
-                "source": "Operations Toolkit",
-                "locator": f"ops://incidents/{incident}",
-            },
-        )
+            await asyncio.sleep(0.01)
         yield RuntimeEmission(
             EventType.ARTIFACT_UPDATED,
             {
                 "artifact": {
                     "id": f"artifact-{request.run_id}",
-                    "title": f"{incident} · Operational brief",
+                    "title": f"{request.definition.identity.name} · Local preview",
                     "kind": "document",
                     "version": 1,
                     "content": (
-                        "## Current state\n\nMitigation is active and checkout latency is trending down.\n\n"
-                        "## Evidence\n\n- No new payment failures in 20 minutes\n"
-                        "- Error rate returned below the alert threshold\n\n"
-                        "## Next action\n\nKeep the incident in monitoring and reassess in 30 minutes."
+                        "## Request received\n\n"
+                        f"{plan['summary']}\n\n"
+                        "## Runtime state\n\nNo model credential is configured. Bound tools were not invoked."
                     ),
                 }
             },
         )
         yield RuntimeEmission(
             EventType.RUN_COMPLETED,
-            {"status": "completed", "usage": {"input_tokens": 132, "output_tokens": 96}},
+            {"status": "completed", "mode": "local_preview"},
         )
 
 
@@ -204,10 +140,15 @@ class OpenAICompatibleRuntime:
         provider = self.settings.provider(request.definition.model.provider)
         if not provider.api_key:
             raise RuntimeError(f"Provider credential is not configured: {provider.id}")
-        if provider.id == "deepseek" and request.definition.model.model in {
-            "deepseek-v4-pro",
-            "deepseek-v4-flash-vision-exp",
-        } and provider.protocol == "responses":
+        if (
+            provider.id == "deepseek"
+            and request.definition.model.model
+            in {
+                "deepseek-v4-pro",
+                "deepseek-v4-flash-vision-exp",
+            }
+            and provider.protocol == "responses"
+        ):
             provider = replace(provider, protocol="chat_completions")
         if request.definition.tools and self.tool_executor.provider_schemas(
             request.definition.tools,
@@ -251,7 +192,9 @@ class OpenAICompatibleRuntime:
         headers = {"Authorization": f"Bearer {provider.api_key}"}
         final_text = ""
         async with httpx.AsyncClient(timeout=90, transport=self.transport) as client:
-            async with client.stream("POST", url, headers=headers, json=payload) as response:
+            async with client.stream(
+                "POST", url, headers=headers, json=payload
+            ) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
@@ -266,7 +209,9 @@ class OpenAICompatibleRuntime:
                         yield RuntimeEmission(EventType.MESSAGE_DELTA, {"delta": delta})
                     elif event.get("type") == "response.failed":
                         error = event.get("response", {}).get("error", {})
-                        raise RuntimeError(error.get("message", "Provider response failed"))
+                        raise RuntimeError(
+                            error.get("message", "Provider response failed")
+                        )
         yield RuntimeEmission(
             EventType.ARTIFACT_UPDATED,
             {
@@ -343,7 +288,9 @@ class OpenAICompatibleRuntime:
 
                 turn_text = ""
                 pending_calls: dict[int, dict[str, str]] = {}
-                async with client.stream("POST", url, headers=headers, json=payload) as response:
+                async with client.stream(
+                    "POST", url, headers=headers, json=payload
+                ) as response:
                     response.raise_for_status()
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
@@ -368,7 +315,9 @@ class OpenAICompatibleRuntime:
                         if delta:
                             turn_text += delta
                             if not buffer_content_until_tool_decision:
-                                yield RuntimeEmission(EventType.MESSAGE_DELTA, {"delta": delta})
+                                yield RuntimeEmission(
+                                    EventType.MESSAGE_DELTA, {"delta": delta}
+                                )
                         for call_delta in provider_delta.get("tool_calls") or []:
                             index = int(call_delta.get("index", 0))
                             current = pending_calls.setdefault(
@@ -387,7 +336,9 @@ class OpenAICompatibleRuntime:
 
                 if not pending_calls:
                     if buffer_content_until_tool_decision and turn_text:
-                        yield RuntimeEmission(EventType.MESSAGE_DELTA, {"delta": turn_text})
+                        yield RuntimeEmission(
+                            EventType.MESSAGE_DELTA, {"delta": turn_text}
+                        )
                     yield RuntimeEmission(
                         EventType.ARTIFACT_UPDATED,
                         {
@@ -400,7 +351,9 @@ class OpenAICompatibleRuntime:
                             }
                         },
                     )
-                    yield RuntimeEmission(EventType.RUN_COMPLETED, {"status": "completed"})
+                    yield RuntimeEmission(
+                        EventType.RUN_COMPLETED, {"status": "completed"}
+                    )
                     return
 
                 if turn_text:
@@ -444,7 +397,9 @@ class OpenAICompatibleRuntime:
                             raise ValueError("arguments must be a JSON object")
                         arguments = decoded
                     except (json.JSONDecodeError, ValueError) as exc:
-                        error = ToolError("invalid_arguments", f"Invalid JSON arguments: {exc}")
+                        error = ToolError(
+                            "invalid_arguments", f"Invalid JSON arguments: {exc}"
+                        )
                         yield RuntimeEmission(
                             EventType.TOOL_REQUESTED,
                             {
@@ -470,7 +425,12 @@ class OpenAICompatibleRuntime:
                                 "role": "tool",
                                 "tool_call_id": call_id,
                                 "content": json.dumps(
-                                    {"error": {"code": error.code, "message": error.message}},
+                                    {
+                                        "error": {
+                                            "code": error.code,
+                                            "message": error.message,
+                                        }
+                                    },
                                     ensure_ascii=False,
                                 ),
                             }
@@ -511,7 +471,10 @@ class OpenAICompatibleRuntime:
                                     "tool": name,
                                     "call_id": call_id,
                                     "status": "failed",
-                                    "error": {"code": error.code, "message": error.message},
+                                    "error": {
+                                        "code": error.code,
+                                        "message": error.message,
+                                    },
                                     "duration_ms": 0,
                                 },
                             )
@@ -520,7 +483,12 @@ class OpenAICompatibleRuntime:
                                     "role": "tool",
                                     "tool_call_id": call_id,
                                     "content": json.dumps(
-                                        {"error": {"code": error.code, "message": error.message}},
+                                        {
+                                            "error": {
+                                                "code": error.code,
+                                                "message": error.message,
+                                            }
+                                        },
                                         ensure_ascii=False,
                                     ),
                                 }
@@ -554,7 +522,10 @@ class OpenAICompatibleRuntime:
                                     "tool": name,
                                     "call_id": call_id,
                                     "status": "failed",
-                                    "error": {"code": error.code, "message": error.message},
+                                    "error": {
+                                        "code": error.code,
+                                        "message": error.message,
+                                    },
                                     "duration_ms": 0,
                                 },
                             )
@@ -563,7 +534,12 @@ class OpenAICompatibleRuntime:
                                     "role": "tool",
                                     "tool_call_id": call_id,
                                     "content": json.dumps(
-                                        {"error": {"code": error.code, "message": error.message}}
+                                        {
+                                            "error": {
+                                                "code": error.code,
+                                                "message": error.message,
+                                            }
+                                        }
                                     ),
                                 }
                             )
@@ -599,7 +575,12 @@ class OpenAICompatibleRuntime:
                                 "role": "tool",
                                 "tool_call_id": call_id,
                                 "content": json.dumps(
-                                    {"error": {"code": error.code, "message": error.message}},
+                                    {
+                                        "error": {
+                                            "code": error.code,
+                                            "message": error.message,
+                                        }
+                                    },
                                     ensure_ascii=False,
                                 ),
                             }
@@ -623,7 +604,11 @@ class OpenAICompatibleRuntime:
                         seen_citation_locators.add(citation.locator)
                         yield RuntimeEmission(
                             EventType.CITATION_CREATED,
-                            {"tool": name, "call_id": call_id, **citation.as_event_payload()},
+                            {
+                                "tool": name,
+                                "call_id": call_id,
+                                **citation.as_event_payload(),
+                            },
                         )
                     messages.append(
                         {
@@ -644,6 +629,7 @@ class RuntimeOrchestrator:
         store: Store,
         settings: Settings,
         tool_executor: ToolExecutor | None = None,
+        provider_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.store = store
         self.settings = settings
@@ -660,7 +646,9 @@ class RuntimeOrchestrator:
             ),
         )
         self.provider_runtime: AgentRuntime = OpenAICompatibleRuntime(
-            settings, tool_executor=self.tool_executor
+            settings,
+            transport=provider_transport,
+            tool_executor=self.tool_executor,
         )
         self.demo_runtime: AgentRuntime = LangGraphReactRuntime()
 
@@ -679,7 +667,10 @@ class RuntimeOrchestrator:
                 "runtime": request.definition.runtime.adapter,
                 "provider": request.definition.model.provider,
                 "model": request.definition.model.model,
-                "input_modalities": ["text", *(["image"] if request.attachments else [])],
+                "input_modalities": [
+                    "text",
+                    *(["image"] if request.attachments else []),
+                ],
                 "attachment_count": len(request.attachments),
                 "thinking": request.thinking,
                 "invocation": "requested_tool" if request.requested_tool else "agent",
@@ -694,13 +685,23 @@ class RuntimeOrchestrator:
             async for emission in runtime.stream(request):
                 payload = self.redact_payload(emission.payload)
                 if emission.type == EventType.APPROVAL_REQUIRED:
-                    approval = self.store.create_approval(request.workspace_id, request.run_id, payload)
+                    approval = self.store.create_approval(
+                        request.workspace_id, request.run_id, payload
+                    )
                     payload = {**payload, "approval_id": approval["id"]}
-                    self.store.set_run_status(request.workspace_id, request.run_id, "waiting_for_approval")
-                self.store.append_event(request.workspace_id, request.run_id, emission.type, payload)
+                    self.store.set_run_status(
+                        request.workspace_id, request.run_id, "waiting_for_approval"
+                    )
+                self.store.append_event(
+                    request.workspace_id, request.run_id, emission.type, payload
+                )
                 if emission.type == EventType.RUN_COMPLETED:
-                    self.store.set_run_status(request.workspace_id, request.run_id, "completed")
-        except Exception as exc:  # provider errors are normalized and never expose credentials
+                    self.store.set_run_status(
+                        request.workspace_id, request.run_id, "completed"
+                    )
+        except (
+            Exception
+        ) as exc:  # provider errors are normalized and never expose credentials
             self.store.append_event(
                 request.workspace_id,
                 request.run_id,
@@ -729,9 +730,7 @@ class RuntimeOrchestrator:
                 workspace_id=request.workspace_id,
             )
         except ToolError as error:
-            self._fail_requested_tool(
-                request, tool, call_id, error, event_arguments
-            )
+            self._fail_requested_tool(request, tool, call_id, error, event_arguments)
             return
 
         self.store.append_event(
@@ -810,9 +809,7 @@ class RuntimeOrchestrator:
                 ),
             )
         except ToolError as error:
-            self._fail_requested_tool(
-                request, tool, call_id, error, event_arguments
-            )
+            self._fail_requested_tool(request, tool, call_id, error, event_arguments)
             return
 
         result = self.redact_payload(execution.result.data)
@@ -917,11 +914,16 @@ class RuntimeOrchestrator:
                     run["agent_version_id"],
                 )
                 if not version:
-                    raise ToolError("agent_version_unavailable", "Agent version is no longer available")
+                    raise ToolError(
+                        "agent_version_unavailable",
+                        "Agent version is no longer available",
+                    )
                 definition = AgentDefinition.model_validate(version["definition"])
                 thread = self.store.get_thread(workspace_id, run["thread_id"])
                 if not thread:
-                    raise ToolError("thread_unavailable", "Thread is no longer available")
+                    raise ToolError(
+                        "thread_unavailable", "Thread is no longer available"
+                    )
                 execution = await self.tool_executor.execute(
                     tool,
                     arguments,
@@ -976,7 +978,10 @@ class RuntimeOrchestrator:
                     workspace_id,
                     run_id,
                     EventType.RUN_FAILED,
-                    {"code": "tool_failed", "message": "Approved tool execution failed"},
+                    {
+                        "code": "tool_failed",
+                        "message": "Approved tool execution failed",
+                    },
                 )
                 self.store.set_run_status(workspace_id, run_id, "failed")
                 return
@@ -1031,13 +1036,19 @@ class RuntimeOrchestrator:
                 workspace_id,
                 run_id,
                 EventType.TOOL_COMPLETED,
-                {"tool": tool, "status": "denied", "result_summary": "Operation denied by the user."},
+                {
+                    "tool": tool,
+                    "status": "denied",
+                    "result_summary": "Operation denied by the user.",
+                },
             )
             self.store.append_event(
                 workspace_id,
                 run_id,
                 EventType.MESSAGE_DELTA,
-                {"delta": "No external changes were made because the approval request was denied."},
+                {
+                    "delta": "No external changes were made because the approval request was denied."
+                },
             )
         self.store.append_event(
             workspace_id,

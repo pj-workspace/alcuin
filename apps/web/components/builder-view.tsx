@@ -1,6 +1,6 @@
 "use client";
 
-import type { Agent, Extension, KnowledgeSource } from "@alcuin/contracts";
+import type { Agent, KnowledgeSource, ToolCatalogEntry } from "@alcuin/contracts";
 import {
   Blocks,
   Bot,
@@ -42,7 +42,7 @@ export function AgentBuilderView({
   agent,
   agents,
   knowledgeSources,
-  extensions,
+  tools,
   onChanged,
   onCreateAgent,
   onSelectAgent,
@@ -50,7 +50,7 @@ export function AgentBuilderView({
   agent?: Agent;
   agents: Agent[];
   knowledgeSources: KnowledgeSource[];
-  extensions: Extension[];
+  tools: ToolCatalogEntry[];
   onChanged: () => Promise<void>;
   onCreateAgent: () => void;
   onSelectAgent: (agentId: string) => void;
@@ -110,7 +110,7 @@ export function AgentBuilderView({
     <div className="builder-body">
       <aside className="builder-nav">
         <p>{t("Definition")}</p>
-        {sections.map((section) => <button key={section.id} onClick={() => setActive(section.id)} className={clsx(active === section.id && "active")}><section.icon size={15} /><span>{t(section.label)}</span>{section.id === "capabilities" && <small>{definition.tools.length}</small>}</button>)}
+        {sections.map((section) => <button key={section.id} aria-label={t(section.label)} onClick={() => setActive(section.id)} className={clsx(active === section.id && "active")}><section.icon size={15} /><span>{t(section.label)}</span>{section.id === "capabilities" && <small>{definition.tools.length}</small>}</button>)}
         <div className="definition-score"><div><span>{t("Definition health")}</span><strong>{completeness}%</strong></div><div className="score-track"><i style={{ width: `${completeness}%` }} /></div><p>{t("Ready to publish")}</p></div>
       </aside>
       <section className="definition-editor">
@@ -151,7 +151,7 @@ export function AgentBuilderView({
             <small>{t("Paste the real key into .env; definitions store only this Secret Reference.")}</small>
           </label>
         </div>}
-        {active === "capabilities" && <Capabilities definition={definition} extensions={extensions} onChange={setDefinition} />}
+        {active === "capabilities" && <Capabilities definition={definition} tools={tools} onChange={setDefinition} />}
         {active === "knowledge" && (
           <KnowledgeEditor
             sources={knowledgeSources}
@@ -343,58 +343,89 @@ function KnowledgeEditor({
   );
 }
 
-function extensionToolName(manifestId: string, toolName: string) {
-  return `extension.${manifestId}.${toolName}`;
-}
-
 function Capabilities({
   definition,
-  extensions,
+  tools,
   onChange,
 }: {
   definition: Agent["definition"];
-  extensions: Extension[];
+  tools: ToolCatalogEntry[];
   onChange: (definition: Agent["definition"]) => void;
 }) {
   const { t } = useI18n();
-  const available = extensions.flatMap((extension) => {
-    const executable = extension.manifest.entrypoints.some((entrypoint) => entrypoint.type === "mcp" || entrypoint.type === "openapi");
-    if (!executable || extension.status !== "enabled" || !["healthy", "degraded"].includes(extension.health)) return [];
-    return extension.manifest.contributions.tools.flatMap((tool) => {
-      const rawName = String(tool.name ?? "").trim();
-      if (!rawName) return [];
-      return [{
-        id: extensionToolName(extension.manifest.id, rawName),
-        rawName,
-        manifestId: extension.manifest.id,
-        extensionName: extension.name,
-        description: String(tool.description ?? t("Extension tool")),
-        mutating: Boolean(tool.mutating),
-      }];
-    });
-  });
-  const dynamicIds = new Set(available.map((tool) => tool.id));
-  const existing = definition.tools.filter((tool) => !dynamicIds.has(tool));
+  const builtins = tools.filter((tool) => tool.source === "builtin");
+  const extensionTools = tools.filter((tool) => tool.source === "extension");
+  const catalogIds = new Set(tools.map((tool) => tool.id));
+  const unavailableReferences = definition.tools.filter((tool) => !catalogIds.has(tool));
 
-  function toggle(tool: (typeof available)[number]) {
+  function toggle(tool: ToolCatalogEntry) {
     const bound = definition.tools.includes(tool.id);
-    const tools = bound
+    if (!tool.available && !bound) return;
+    const nextTools = bound
       ? definition.tools.filter((item) => item !== tool.id)
       : [...definition.tools, tool.id];
-    const stillUsesExtension = available.some((candidate) =>
-      candidate.manifestId === tool.manifestId && tools.includes(candidate.id));
-    const nextExtensions = bound && !stillUsesExtension
-      ? definition.extensions.filter((item) => item !== tool.manifestId)
-      : Array.from(new Set([...definition.extensions, tool.manifestId]));
-    onChange({ ...definition, tools, extensions: nextExtensions });
+    const manifestId = tool.extension_manifest_id;
+    const stillUsesExtension = manifestId
+      ? extensionTools.some((candidate) =>
+        candidate.extension_manifest_id === manifestId && nextTools.includes(candidate.id))
+      : false;
+    const nextExtensions = !manifestId
+      ? definition.extensions
+      : bound && !stillUsesExtension
+        ? definition.extensions.filter((item) => item !== manifestId)
+        : Array.from(new Set([...definition.extensions, manifestId]));
+    onChange({ ...definition, tools: nextTools, extensions: nextExtensions });
   }
 
-  return <div className="capability-list"><div className="capability-toolbar"><div><strong>{t("Bound tools")}</strong><p>{t("Capabilities are resolved from enabled, healthy Workspace extensions.")}</p></div><span className="capability-count">{t("{count} bound", { count: definition.tools.length })}</span></div>
-    {existing.length > 0 && <><div className="capability-group-label">{t("Current definition")}</div>{existing.map((tool) => <div className="capability-row" key={tool}><span className="capability-icon"><Wrench size={15} /></span><div><strong>{tool}</strong><p>{t("Built-in or previously bound capability")}</p></div><span className="permission-dot" /><Check size={15} className="success" /></div>)}</>}
+  function removeUnavailable(toolId: string) {
+    onChange({ ...definition, tools: definition.tools.filter((item) => item !== toolId) });
+  }
+
+  function toolRow(tool: ToolCatalogEntry) {
+    const bound = definition.tools.includes(tool.id);
+    const knowledgeManaged = tool.id === "knowledge.search";
+    const status = knowledgeManaged
+      ? t("Managed in Knowledge")
+      : tool.available
+        ? tool.description
+        : t("Unavailable · {status}", { status: toolStatusLabel(tool.status, t) });
+    return <button
+      type="button"
+      className={clsx("capability-row capability-option", bound && "bound", !tool.available && "unavailable")}
+      key={tool.id}
+      onClick={() => !knowledgeManaged && toggle(tool)}
+      aria-pressed={bound}
+      disabled={knowledgeManaged}
+    >
+      <span className="capability-icon">{tool.source === "builtin" ? <Wrench size={15} /> : <Blocks size={15} />}</span>
+      <div><strong>{tool.name}</strong><p>{tool.extension_name ? `${tool.extension_name} · ${status}` : status}</p></div>
+      <span className={clsx("permission-dot", tool.mutating && "high", !tool.available && "unavailable")} />
+      <span className={clsx("capability-binding", bound && "active")}>
+        {knowledgeManaged
+          ? bound ? <><Check size={12} />{t("Bound")}</> : t("Bind a source")
+          : bound ? <><Check size={12} />{t("Bound")}</> : t("Bind")}
+      </span>
+    </button>;
+  }
+
+  return <div className="capability-list"><div className="capability-toolbar"><div><strong>{t("Bound tools")}</strong><p>{t("Capabilities are resolved from the authoritative Workspace Tool Catalog.")}</p></div><span className="capability-count">{t("{count} bound", { count: definition.tools.length })}</span></div>
+    <div className="capability-group-label">{t("Built-in tools")}</div>
+    {builtins.length ? builtins.map(toolRow) : <div className="empty-editor compact"><Wrench size={22} /><h3>{t("No built-in tools configured")}</h3><p>{t("Configure retrieval services to make their tools available.")}</p></div>}
     <div className="capability-group-label">{t("Installed extension tools")}</div>
-    {available.length ? available.map((tool) => { const bound = definition.tools.includes(tool.id); return <button type="button" className={clsx("capability-row capability-option", bound && "bound")} key={tool.id} onClick={() => toggle(tool)} aria-pressed={bound}><span className="capability-icon"><Blocks size={15} /></span><div><strong>{tool.rawName}</strong><p>{tool.extensionName} · {tool.description}</p></div><span className={clsx("permission-dot", tool.mutating && "high")} /><span className={clsx("capability-binding", bound && "active")}>{bound ? <><Check size={12} />{t("Bound")}</> : t("Bind")}</span></button>; }) : <div className="empty-editor compact"><Blocks size={22} /><h3>{t("No executable extension tools")}</h3><p>{t("Enable and health-check an MCP or OpenAPI extension first.")}</p></div>}
+    {extensionTools.length ? extensionTools.map(toolRow) : <div className="empty-editor compact"><Blocks size={22} /><h3>{t("No executable extension tools")}</h3><p>{t("Install an MCP, OpenAPI, or built-in extension first.")}</p></div>}
+    {unavailableReferences.length > 0 && <><div className="capability-group-label">{t("Unavailable references")}</div>{unavailableReferences.map((tool) => <button type="button" className="capability-row capability-option unavailable" key={tool} onClick={() => removeUnavailable(tool)}><span className="capability-icon"><Wrench size={15} /></span><div><strong>{tool}</strong><p>{t("This tool is not registered in the current Workspace runtime.")}</p></div><span className="permission-dot unavailable" /><span className="capability-binding">{t("Unbind")}</span></button>)}</>}
     <div className="editor-tip"><ShieldCheck size={15} /><span>{t("Read-only tools run within the Agent allow-list. Mutating tools follow the Agent approval policy before execution.")}</span></div>
   </div>;
+}
+
+function toolStatusLabel(status: ToolCatalogEntry["status"], t: ReturnType<typeof useI18n>["t"]) {
+  return t(({
+    available: "Available",
+    disabled: "Disabled",
+    unchecked: "Health check required",
+    unhealthy: "Unhealthy",
+    adapter_missing: "Adapter missing",
+  } satisfies Record<ToolCatalogEntry["status"], MessageKey>)[status]);
 }
 
 function sectionDescription(section: string): MessageKey {

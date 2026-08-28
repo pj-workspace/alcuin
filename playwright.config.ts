@@ -20,15 +20,18 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: "uv run --project apps/api uvicorn alcuin_api.main:app --port 8100",
+      command: "uv run --project apps/api uvicorn --app-dir apps/api/tests/fixtures e2e_app:app --port 8100",
       url: `${E2E_API_URL}/health`,
       reuseExistingServer: false,
       timeout: 120_000,
       env: {
         ALCUIN_DATABASE_PATH: ":memory:",
         ALCUIN_CORS_ORIGINS: E2E_WEB_URL,
-        ALCUIN_DEEPSEEK_API_KEY: "",
+        ALCUIN_DEEPSEEK_API_KEY: "e2e-provider-key",
+        ALCUIN_DEEPSEEK_BASE_URL: "http://127.0.0.1:9412/v1",
+        ALCUIN_DEEPSEEK_PROTOCOL: "chat_completions",
         ALCUIN_EXTENSION_ALLOW_PRIVATE_NETWORKS: "true",
+        ALCUIN_SEARXNG_URL: "http://127.0.0.1:9412",
         ALCUIN_OPENAI_API_KEY: "",
       },
     },
@@ -44,9 +47,9 @@ export default defineConfig({
       },
     },
     {
-      command: "uv run --project apps/api uvicorn examples.records_api.app:app --port 9411",
-      url: "http://127.0.0.1:9411/health",
-      reuseExistingServer: !process.env.CI,
+      command: "uv run --project apps/api uvicorn examples.records_api.app:app --port 9412",
+      url: "http://127.0.0.1:9412/health",
+      reuseExistingServer: false,
       timeout: 120_000,
     },
   ],
