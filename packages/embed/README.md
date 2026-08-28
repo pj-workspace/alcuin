@@ -30,4 +30,5 @@ The component emits `alcuin:run-start`, `alcuin:event`, `alcuin:artifact`,
 `alcuin:approval`, and `alcuin:error`. Its built-in approval card calls the
 governed decision endpoint and resumes the same Run from its last SSE sequence.
 Hosts can also call `decideApproval(runId, approvalId, decision, note?)` from
-their own approval UI.
+their own approval UI. Transient stream failures reconnect with the standard
+`Last-Event-ID` header; events already handled by the component are not replayed.

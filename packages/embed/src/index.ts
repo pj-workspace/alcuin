@@ -1,3 +1,5 @@
+import { streamJsonSse } from "@alcuin/sse-client";
+
 type AlcuinContext = Record<string, unknown>;
 
 function escapeHtml(value: string) {
@@ -148,41 +150,33 @@ export class AlcuinAgentElement extends HTMLElement {
   }
 
   private async streamRun(runId: string, output: HTMLElement, after = 0) {
-    const response = await fetch(`${this.apiUrl}/v1/runs/${runId}/events?after=${after}`, {
+    await streamJsonSse({
+      url: `${this.apiUrl}/v1/runs/${runId}/events`,
       headers: { Authorization: `Bearer ${this.token}` },
-    });
-    if (!response.ok || !response.body) throw new Error("Unable to stream run");
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const frames = buffer.split("\n\n");
-      buffer = frames.pop() ?? "";
-      for (const frame of frames) {
-        const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
-        if (!dataLine) continue;
-        const data = dataLine.slice(5).trimStart();
-        if (!data || data === "[DONE]") continue;
-        const event = JSON.parse(data);
+      lastEventId: after,
+      onEvent: (value) => {
+        const event = value as {
+          sequence?: number;
+          type?: string;
+          payload?: Record<string, unknown>;
+        };
+        const payload = event.payload ?? {};
         if (typeof event.sequence === "number") {
           this.lastSequence.set(runId, event.sequence);
         }
         this.dispatchEvent(new CustomEvent("alcuin:event", { detail: event }));
-        if (event.type === "message.delta") output.textContent += event.payload.delta;
-        if (event.type === "tool.requested") this.appendMessage("event", `Using ${event.payload.tool}`);
-        if (event.type === "artifact.updated") this.dispatchEvent(new CustomEvent("alcuin:artifact", { detail: event.payload.artifact }));
+        if (event.type === "message.delta") output.textContent += String(payload.delta ?? "");
+        if (event.type === "tool.requested") this.appendMessage("event", `Using ${String(payload.tool ?? "tool")}`);
+        if (event.type === "artifact.updated") this.dispatchEvent(new CustomEvent("alcuin:artifact", { detail: payload.artifact }));
         if (event.type === "approval.required") {
-          this.appendApproval(runId, event.payload);
+          this.appendApproval(runId, payload);
           this.dispatchEvent(new CustomEvent("alcuin:approval", {
-            detail: { runId, approvalId: event.payload.approval_id, request: event.payload },
+            detail: { runId, approvalId: payload.approval_id, request: payload },
           }));
         }
-        if (event.type === "run.failed") throw new Error(event.payload.message ?? "Agent run failed");
-      }
-    }
+        if (event.type === "run.failed") throw new Error(String(payload.message ?? "Agent run failed"));
+      },
+    });
   }
 
   private appendApproval(runId: string, payload: Record<string, unknown>) {

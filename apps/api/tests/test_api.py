@@ -96,8 +96,33 @@ def test_run_emits_ordered_terminal_events() -> None:
             headers=headers,
         ).text
         assert "id: 1\n" not in resumed
+        assert "id: 2\n" not in resumed
         assert "event: run.completed" in resumed
         assert "data: [DONE]" in resumed
+
+        resumed_by_header = client.get(
+            f"/v1/runs/{run['id']}/events?after=1",
+            headers={**headers, "Last-Event-ID": "2"},
+        ).text
+        resumed_ids = [
+            int(line[4:])
+            for line in resumed_by_header.splitlines()
+            if line.startswith("id: ")
+        ]
+        assert "id: 1\n" not in resumed_by_header
+        assert "id: 2\n" not in resumed_by_header
+        assert [1, 2, *resumed_ids] == sequences
+        assert len(set(resumed_ids)) == len(resumed_ids)
+        assert "event: run.completed" in resumed_by_header
+
+        invalid_cursor = client.get(
+            f"/v1/runs/{run['id']}/events",
+            headers={**headers, "Last-Event-ID": "not-a-sequence"},
+        )
+        assert invalid_cursor.status_code == 400
+        assert invalid_cursor.json()["detail"] == (
+            "Last-Event-ID must be a non-negative event sequence"
+        )
 
         tcm_stream = client.get(
             f"/v1/runs/{run['id']}/events?protocol=tcm",
@@ -108,7 +133,14 @@ def test_run_emits_ordered_terminal_events() -> None:
             for line in tcm_stream.splitlines()
             if line.startswith("data: {")
         ]
+        tcm_ids = [
+            int(line[4:])
+            for line in tcm_stream.splitlines()
+            if line.startswith("id: ")
+        ]
         tcm_types = [frame["type"] for frame in tcm_frames]
+        assert tcm_ids == [frame["sequence"] for frame in tcm_frames]
+        assert tcm_ids == sorted(set(tcm_ids))
         assert tcm_types[0] == "meta"
         assert tcm_types[-1] == "done"
         assert tcm_types.index("tool-call") < tcm_types.index("tool-result")

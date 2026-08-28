@@ -10,8 +10,7 @@ import type {
   Run,
   Thread,
 } from "@alcuin/contracts";
-
-import { parseSseBuffer } from "@/lib/sse";
+import { streamJsonSse } from "@alcuin/sse-client";
 
 const API_URL = process.env.NEXT_PUBLIC_ALCUIN_API_URL ?? "http://localhost:8000";
 const WORKSPACE_ID = process.env.NEXT_PUBLIC_ALCUIN_WORKSPACE_ID ?? "ws_demo";
@@ -179,30 +178,18 @@ export const alcuinApi = {
     onEvent: (event: ExecutionEvent) => void,
     after = 0,
   ) => {
-    const response = await fetch(`${API_URL}/v1/runs/${runId}/events?after=${after}&protocol=tcm`, { headers });
-    if (!response.ok || !response.body) throw new Error("Unable to stream run events");
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let streamDone = false;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parsed = parseSseBuffer(buffer);
-      buffer = parsed.remainder;
-      for (const frame of parsed.frames) {
-        if (frame.kind === "done") {
-          streamDone = true;
-          break;
-        }
-        if (frame.kind === "event") {
-          const event = executionEventFromTcmFrame(frame.value);
-          if (event) onEvent(event);
-        }
-      }
-      if (streamDone) break;
-    }
+    await streamJsonSse({
+      url: `${API_URL}/v1/runs/${runId}/events?protocol=tcm`,
+      headers,
+      lastEventId: after,
+      onEvent(value) {
+        const event = executionEventFromTcmFrame(value);
+        if (event) onEvent(event);
+      },
+      isTerminal(value) {
+        return Boolean(value && typeof value === "object" && (value as Record<string, unknown>).type === "done");
+      },
+    });
   },
 };
 

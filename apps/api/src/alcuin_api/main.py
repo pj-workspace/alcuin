@@ -16,6 +16,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -74,9 +75,23 @@ from .store import Store
 from .tcm_sse import project_execution_event
 from .tools import ToolExecutor, ToolRegistry
 from .web_search import WebSearchService, is_public_http_url
+from alcuin_extensions.operations_toolkit import operations_demo_adapter
 
 
 ScopeDependency = Annotated[RequestScope, Depends(resolve_scope)]
+
+
+def resolve_event_cursor(after: int, last_event_id: str | None) -> int:
+    """Resolve the persisted event sequence used for an SSE resume."""
+    if last_event_id is None:
+        return after
+    normalized = last_event_id.strip()
+    if not normalized or not normalized.isascii() or not normalized.isdecimal():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Last-Event-ID must be a non-negative event sequence",
+        )
+    return max(after, int(normalized))
 
 
 def create_app(
@@ -584,7 +599,7 @@ def create_app(
         request: Request,
         scope: ScopeDependency,
         last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
-        after: int = 0,
+        after: Annotated[int, Query(ge=0)] = 0,
         protocol: Literal["execution", "tcm"] = "execution",
     ) -> StreamingResponse:
         scope.require("run:read")
@@ -592,7 +607,7 @@ def create_app(
         if not run:
             raise missing("Run")
         require_run_agent(scope, run)
-        cursor = max(after, int(last_event_id or 0))
+        cursor = resolve_event_cursor(after, last_event_id)
 
         async def event_stream():
             nonlocal cursor
@@ -607,7 +622,10 @@ def create_app(
                         cursor = event["sequence"]
                         if protocol == "tcm":
                             for payload in project_execution_event(event):
-                                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                                yield (
+                                    f"id: {event['sequence']}\n"
+                                    f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                                )
                         else:
                             yield (
                                 f"id: {event['sequence']}\n"
@@ -955,9 +973,5 @@ def create_app(
         }
 
     return app
-
-
-from alcuin_extensions.operations_toolkit import operations_demo_adapter
-
 
 app = create_app(builtin_adapters={"operations-demo": operations_demo_adapter})
