@@ -53,13 +53,14 @@ export function Workbench({ surface }: { surface: Surface }) {
   const [commandOpen, setCommandOpen] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">("light");
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (preferredRunId?: string) => {
     try {
       const bootstrap = await alcuinApi.bootstrap();
       setData(bootstrap);
       setError(null);
-      if (bootstrap.runs[0]) {
-        const run = await alcuinApi.getRun(bootstrap.runs[0].id);
+      const selectedRunId = preferredRunId ?? bootstrap.runs[0]?.id;
+      if (selectedRunId) {
+        const run = await alcuinApi.getRun(selectedRunId);
         setEvents(run.events);
       }
     } catch (reason) {

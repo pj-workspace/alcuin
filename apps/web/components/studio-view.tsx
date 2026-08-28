@@ -33,6 +33,7 @@ import { usePinnedTurnScroll } from "@/components/use-pinned-turn-scroll";
 import { resolveExtensionUIBlocks, type ResolvedExtensionUIBlock } from "@/lib/extension-ui";
 
 type CanvasTab = "artifact" | "trace" | "extensions" | "context";
+type MobileSurface = "conversation" | "canvas";
 
 export function StudioView({
   workspace,
@@ -45,10 +46,11 @@ export function StudioView({
   agent?: Agent;
   extensions: Extension[];
   initialEvents: ExecutionEvent[];
-  onRunCreated: () => Promise<void>;
+  onRunCreated: (runId: string) => Promise<void>;
 }) {
   const [events, setEvents] = useState(initialEvents);
   const [canvasTab, setCanvasTab] = useState<CanvasTab>("artifact");
+  const [mobileSurface, setMobileSurface] = useState<MobileSurface>("conversation");
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
   const [lastAttachments, setLastAttachments] = useState<ImageAttachment[]>([]);
@@ -117,7 +119,7 @@ export function StudioView({
       const run = await alcuinApi.createRun(thread.id, value, selectedAttachments);
       setRunId(run.id);
       await alcuinApi.streamRun(run.id, (event) => setEvents((current) => [...current, event]));
-      await onRunCreated();
+      await onRunCreated(run.id);
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Run failed");
     } finally {
@@ -131,6 +133,7 @@ export function StudioView({
     arguments_: Record<string, unknown>,
   ) {
     if (!agent || running) return;
+    setMobileSurface("conversation");
     setLastPrompt(`${resolved.extensionName} · ${resolved.block.title}`);
     setLastAttachments([]);
     setEvents([]);
@@ -147,7 +150,7 @@ export function StudioView({
       );
       setRunId(run.id);
       await alcuinApi.streamRun(run.id, (event) => setEvents((current) => [...current, event]));
-      await onRunCreated();
+      await onRunCreated(run.id);
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Extension action failed");
     } finally {
@@ -177,7 +180,7 @@ export function StudioView({
       const run = await alcuinApi.getRun(runId);
       setEvents(run.events);
       showToast(decision === "approved" ? "Operation approved and completed" : "Operation denied — no changes made");
-      await onRunCreated();
+      await onRunCreated(runId);
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Approval failed");
     } finally {
@@ -189,7 +192,35 @@ export function StudioView({
 
   return (
     <div className="studio-layout">
-      <section className="conversation-pane">
+      <div className="mobile-studio-switch" role="tablist" aria-label="Studio panel">
+        <button
+          id="mobile-conversation-tab"
+          role="tab"
+          aria-controls="studio-conversation-panel"
+          aria-selected={mobileSurface === "conversation"}
+          className={clsx(mobileSurface === "conversation" && "active")}
+          onClick={() => setMobileSurface("conversation")}
+        >
+          Chat
+        </button>
+        <button
+          id="mobile-canvas-tab"
+          role="tab"
+          aria-controls="studio-canvas-panel"
+          aria-selected={mobileSurface === "canvas"}
+          className={clsx(mobileSurface === "canvas" && "active")}
+          onClick={() => setMobileSurface("canvas")}
+        >
+          Canvas
+          <span>{events.length + extensionBlocks.length}</span>
+        </button>
+      </div>
+      <section
+        id="studio-conversation-panel"
+        role="tabpanel"
+        aria-labelledby="mobile-conversation-tab"
+        className={clsx("conversation-pane", mobileSurface !== "conversation" && "mobile-surface-hidden")}
+      >
         <header className="surface-header conversation-header">
           <div>
             <div className="eyebrow"><span className="live-dot" />Published agent · v{agent.version}</div>
@@ -256,7 +287,12 @@ export function StudioView({
         </div>
       </section>
 
-      <aside className="context-canvas">
+      <aside
+        id="studio-canvas-panel"
+        role="tabpanel"
+        aria-labelledby="mobile-canvas-tab"
+        className={clsx("context-canvas", mobileSurface !== "canvas" && "mobile-surface-hidden")}
+      >
         <header className="canvas-header">
           <div className="canvas-tabs">
             <button className={clsx(canvasTab === "artifact" && "active")} onClick={() => setCanvasTab("artifact")}>Artifact</button>
