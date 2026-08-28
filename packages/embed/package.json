@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm,iife --dts --global-name AlcuinEmbed --clean",
     "lint": "tsc --noEmit",
-    "test": "tsc --noEmit"
+    "test": "node --experimental-strip-types src/i18n.test.mjs && tsc --noEmit"
   },
   "dependencies": {
     "@alcuin/sse-client": "workspace:*"

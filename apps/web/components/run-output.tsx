@@ -8,6 +8,7 @@ import { ThinkingOrb, type OrbState, type OrbTheme } from "thinking-orbs";
 
 import { MarkdownContent } from "@/components/markdown-content";
 import { ThinkingMarkdown } from "@/components/thinking-markdown";
+import { useI18n } from "@/lib/i18n";
 
 type ReasoningTrace = {
   kind: "reasoning";
@@ -42,6 +43,7 @@ export function RunOutput({
   assistantText: string;
   onCopy: () => void;
 }) {
+  const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
   const [elapsed, setElapsed] = useState(0);
   const steps = useMemo(() => collectTraceSteps(events), [events]);
@@ -74,7 +76,7 @@ export function RunOutput({
   const errorMessage = [...events]
     .reverse()
     .find((event) => event.type === "run.failed")?.payload.message;
-  const presence = derivePresence(events, steps, running, assistantText, failed, duration);
+  const presence = derivePresence(events, steps, running, assistantText, failed, duration, t);
   const runningTool = tools.find((tool) => tool.status === "running");
   const lastStep = steps.at(-1);
 
@@ -85,7 +87,7 @@ export function RunOutput({
           className="brainstorm-toggle"
           onClick={() => setCollapsed((value) => !value)}
           aria-expanded={!collapsed}
-          aria-label={collapsed ? "Show run trace" : "Hide run trace"}
+          aria-label={t(collapsed ? "Show run trace" : "Hide run trace")}
         >
           <PresenceOrb state={presence.state} active={running} />
           <span className="brainstorm-label-shell">
@@ -114,19 +116,19 @@ export function RunOutput({
                   <span className={clsx("brainstorm-node", "tool", step.status)}>
                     <ToolNodeIcon step={step} />
                   </span>
-                  <span className="tool-step-label">{toolStepLabel(step)}</span>
+                  <span className="tool-step-label">{toolStepLabel(step, t)}</span>
                 </div>
               ))}
               {completed && steps.length > 0 && (
                 <div className="brainstorm-step completion-step">
                   <span className="brainstorm-node success"><Check size={11} /></span>
-                  <span>Complete</span>
+                  <span>{t("Complete")}</span>
                 </div>
               )}
               {failed && (
                 <div className="brainstorm-step completion-step failed">
                   <span className="brainstorm-node error"><CircleAlert size={11} /></span>
-                  <span>Interrupted</span>
+                  <span>{t("Interrupted")}</span>
                 </div>
               )}
             </div>
@@ -137,7 +139,7 @@ export function RunOutput({
     {assistantText && (
       <div className="assistant-output">
         <MarkdownContent content={assistantText} />
-        {!running && <div className="assistant-actions"><button onClick={onCopy} aria-label="Copy response"><Copy size={13} />Copy</button></div>}
+        {!running && <div className="assistant-actions"><button onClick={onCopy} aria-label={t("Copy response")}><Copy size={13} />{t("Copy")}</button></div>}
       </div>
     )}
     {!assistantText && errorMessage && <div className="run-error"><CircleAlert size={14} /><span>{String(errorMessage)}</span></div>}
@@ -196,26 +198,27 @@ function derivePresence(
   assistantText: string,
   failed: boolean,
   duration: number,
+  t: ReturnType<typeof useI18n>["t"],
 ): Presence {
   if (!running) {
     return {
-      label: failed ? "Thought process interrupted" : `Thought process · ${formatDuration(duration)}`,
+      label: failed ? t("Thought process interrupted") : t("Thought process · {duration}", { duration: formatDuration(duration) }),
       state: "breathing",
     };
   }
 
   const runningTool = steps.find((step): step is ToolTrace => step.kind === "tool" && step.status === "running");
-  if (runningTool) return { label: toolStepLabel(runningTool), state: toolOrbState(runningTool.name) };
-  if (assistantText) return { label: "Composing response", state: "composing" };
+  if (runningTool) return { label: toolStepLabel(runningTool, t), state: toolOrbState(runningTool.name) };
+  if (assistantText) return { label: t("Composing response"), state: "composing" };
 
   const hasReasoning = events.some((event) => event.type === "reasoning.delta");
   const hasFinishedTool = steps.some((step) => step.kind === "tool" && step.status !== "running");
   if (hasReasoning) {
     return hasFinishedTool
-      ? { label: "Weaving evidence", state: "weaving" }
-      : { label: "Thinking", state: "breathing" };
+      ? { label: t("Weaving evidence"), state: "weaving" }
+      : { label: t("Thinking"), state: "breathing" };
   }
-  return { label: "Connecting", state: "connecting" };
+  return { label: t("Connecting"), state: "connecting" };
 }
 
 function collectTraceSteps(events: ExecutionEvent[]): TraceStep[] {
@@ -259,11 +262,12 @@ function ToolNodeIcon({ step }: { step: ToolTrace }) {
   return <Wrench size={10} />;
 }
 
-function toolStepLabel(step: ToolTrace): string {
+function toolStepLabel(step: ToolTrace, t: ReturnType<typeof useI18n>["t"]): string {
   const query = step.query?.trim();
-  const prefix = isKnowledgeTool(step.name) ? "Retrieve" : isSearchTool(step.name) ? "Search" : formatToolName(step.name);
-  if (step.status === "error") return `${prefix} interrupted${query ? ` · ${query}` : ""}`;
-  return `${prefix}${query ? ` · ${query}` : step.summary ? ` · ${step.summary}` : ""}`;
+  const prefix = isKnowledgeTool(step.name) ? t("Retrieve") : isSearchTool(step.name) ? t("Search") : formatToolName(step.name);
+  if (step.status === "error") return `${t("{prefix} interrupted", { prefix })}${query ? ` · ${query}` : ""}`;
+  const summary = step.summary === "Tool requested" ? t("Tool requested") : step.summary;
+  return `${prefix}${query ? ` · ${query}` : summary ? ` · ${summary}` : ""}`;
 }
 
 function extractToolQuery(argumentsValue: unknown): string | undefined {

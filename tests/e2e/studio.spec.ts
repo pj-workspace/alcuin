@@ -60,3 +60,38 @@ test("keeps the mobile workspace single-panel and supports dark theme", async ({
   await page.getByRole("button", { name: "Toggle theme" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 });
+
+test("switches the full workspace between English and Chinese and persists the locale", async ({ page }) => {
+  await page.goto("/studio");
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+
+  await page.getByRole("button", { name: "Switch to Chinese" }).click();
+  await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+  await expect(page.getByPlaceholder("给 Operations Copilot 发消息…")).toBeVisible();
+  await expect(page.getByRole("button", { name: "仅批准本次" })).toHaveCount(0);
+
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+  await expect(page.getByPlaceholder("给 Operations Copilot 发消息…")).toBeVisible();
+
+  await page.goto("/agents");
+  await expect(page.getByRole("heading", { name: "智能体构建器", exact: true })).toBeVisible();
+  await page.goto("/runs");
+  await expect(page.getByRole("heading", { name: "运行记录", exact: true })).toBeVisible();
+  await page.goto("/embed");
+  await expect(page.getByRole("heading", { name: "嵌入式演练场", exact: true })).toBeVisible();
+  await page.locator(".header-actions").getByRole("button", { name: "创建会话" }).click();
+  const embeddedAgent = page.locator("alcuin-agent");
+  await expect(embeddedAgent).toHaveAttribute("lang", "zh-CN");
+  await expect.poll(() => embeddedAgent.evaluate((element) => element.shadowRoot?.textContent ?? ""))
+    .toContain("有什么可以帮你？");
+  await expect.poll(() => embeddedAgent.evaluate((element) => element.shadowRoot?.textContent ?? ""))
+    .toContain("已连接");
+  await page.goto("/extensions");
+  await expect(page.getByRole("heading", { name: "扩展", exact: true })).toBeVisible();
+  await expect(page.getByText("能力注册中心", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "切换到英文" }).click();
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  await expect(page.getByRole("heading", { name: "Extensions", exact: true })).toBeVisible();
+});

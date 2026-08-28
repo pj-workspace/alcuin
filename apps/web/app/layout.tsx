@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Instrument_Serif } from "next/font/google";
 
+import { LocaleProvider } from "@/lib/i18n";
+
 import "./globals.css";
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-geist" });
@@ -19,7 +21,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${geist.variable} ${instrumentSerif.variable}`}>{children}</body>
+      <body className={`${geist.variable} ${instrumentSerif.variable}`}><LocaleProvider>{children}</LocaleProvider></body>
     </html>
   );
 }

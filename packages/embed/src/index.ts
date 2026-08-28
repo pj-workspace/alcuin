@@ -1,5 +1,7 @@
 import { streamJsonSse } from "@alcuin/sse-client";
 
+import { getEmbedMessages } from "./i18n";
+
 type AlcuinContext = Record<string, unknown>;
 
 function escapeHtml(value: string) {
@@ -45,7 +47,7 @@ const styles = `
 `;
 
 export class AlcuinAgentElement extends HTMLElement {
-  static observedAttributes = ["session-token", "api-url", "theme", "agent-name"];
+  static observedAttributes = ["session-token", "api-url", "theme", "agent-name", "lang"];
   private root: ShadowRoot;
   private threadId?: string;
   private context: AlcuinContext = {};
@@ -86,15 +88,17 @@ export class AlcuinAgentElement extends HTMLElement {
 
   private get token() { return this.getAttribute("session-token") ?? ""; }
   private get apiUrl() { return (this.getAttribute("api-url") ?? "http://localhost:8000").replace(/\/$/, ""); }
+  private get copy() { return getEmbedMessages(this.getAttribute("lang")); }
 
   private render() {
-    const name = escapeHtml(this.getAttribute("agent-name") ?? "Alcuin Agent");
+    const copy = this.copy;
+    const name = escapeHtml(this.getAttribute("agent-name") ?? copy.agentName);
     this.root.innerHTML = `
       <style>${styles}</style>
       <section class="shell" aria-label="${name}">
-        <header class="head"><div class="identity"><span class="mark">A</span>${name}</div><span class="status"><i class="dot"></i>Connected</span></header>
-        <main class="body"><div class="intro"><h2>How can I help?</h2><p>This agent uses the published Alcuin definition and your current page context.</p></div></main>
-        <form><textarea aria-label="Message" placeholder="Ask the agent…"></textarea><button aria-label="Send" type="submit">↑</button></form>
+        <header class="head"><div class="identity"><span class="mark">A</span>${name}</div><span class="status"><i class="dot"></i>${copy.connected}</span></header>
+        <main class="body"><div class="intro"><h2>${copy.introTitle}</h2><p>${copy.introBody}</p></div></main>
+        <form><textarea aria-label="${copy.message}" placeholder="${copy.promptPlaceholder}"></textarea><button aria-label="${copy.send}" type="submit">↑</button></form>
       </section>`;
     this.root.querySelector("form")?.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -130,7 +134,7 @@ export class AlcuinAgentElement extends HTMLElement {
         const claims = JSON.parse(atob(encoded + "=".repeat((4 - encoded.length % 4) % 4)));
         const thread = await this.request("/v1/threads", {
           method: "POST",
-          body: JSON.stringify({ agent_id: claims.agent_id, title: "Embedded session", context: this.context }),
+          body: JSON.stringify({ agent_id: claims.agent_id, title: this.copy.embeddedSession, context: this.context }),
         });
         this.threadId = thread.id;
       }
@@ -142,7 +146,7 @@ export class AlcuinAgentElement extends HTMLElement {
       this.outputs.set(run.id, output);
       await this.streamRun(run.id, output);
     } catch (error) {
-      output.textContent = error instanceof Error ? error.message : "Agent run failed";
+      output.textContent = error instanceof Error ? error.message : this.copy.runFailed;
       this.dispatchEvent(new CustomEvent("alcuin:error", { detail: error }));
     } finally {
       this.running = false;
@@ -166,7 +170,7 @@ export class AlcuinAgentElement extends HTMLElement {
         }
         this.dispatchEvent(new CustomEvent("alcuin:event", { detail: event }));
         if (event.type === "message.delta") output.textContent += String(payload.delta ?? "");
-        if (event.type === "tool.requested") this.appendMessage("event", `Using ${String(payload.tool ?? "tool")}`);
+        if (event.type === "tool.requested") this.appendMessage("event", this.copy.usingTool(String(payload.tool ?? "tool")));
         if (event.type === "artifact.updated") this.dispatchEvent(new CustomEvent("alcuin:artifact", { detail: payload.artifact }));
         if (event.type === "approval.required") {
           this.appendApproval(runId, payload);
@@ -174,34 +178,35 @@ export class AlcuinAgentElement extends HTMLElement {
             detail: { runId, approvalId: payload.approval_id, request: payload },
           }));
         }
-        if (event.type === "run.failed") throw new Error(String(payload.message ?? "Agent run failed"));
+        if (event.type === "run.failed") throw new Error(String(payload.message ?? this.copy.runFailed));
       },
     });
   }
 
   private appendApproval(runId: string, payload: Record<string, unknown>) {
+    const copy = this.copy;
     const body = this.root.querySelector(".body");
     const card = document.createElement("div");
     card.className = "approval";
     const title = document.createElement("strong");
-    title.textContent = String(payload.title ?? "Approval required");
+    title.textContent = String(payload.title ?? copy.approvalRequired);
     const description = document.createElement("span");
-    description.textContent = String(payload.description ?? "Review this external operation.");
+    description.textContent = String(payload.description ?? copy.reviewOperation);
     const argumentsNode = document.createElement("code");
     argumentsNode.textContent = JSON.stringify(payload.arguments ?? {}, null, 2);
     const actions = document.createElement("div");
     actions.className = "approval-actions";
     const deny = document.createElement("button");
     deny.className = "deny";
-    deny.textContent = "Deny";
+    deny.textContent = copy.deny;
     const approve = document.createElement("button");
-    approve.textContent = "Approve once";
+    approve.textContent = copy.approveOnce;
     const decide = async (decision: "approved" | "denied") => {
       deny.disabled = true;
       approve.disabled = true;
       try {
         await this.decideApproval(runId, String(payload.approval_id), decision);
-        card.replaceChildren(document.createTextNode(decision === "approved" ? "Approved and executed" : "Denied"));
+        card.replaceChildren(document.createTextNode(decision === "approved" ? copy.approvedAndExecuted : copy.denied));
       } catch (error) {
         deny.disabled = false;
         approve.disabled = false;
@@ -220,7 +225,7 @@ export class AlcuinAgentElement extends HTMLElement {
       ...init,
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}`, ...init.headers },
     });
-    if (!response.ok) throw new Error((await response.json()).detail ?? "Alcuin request failed");
+    if (!response.ok) throw new Error((await response.json()).detail ?? this.copy.requestFailed);
     return response.json();
   }
 }
