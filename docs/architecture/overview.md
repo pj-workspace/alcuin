@@ -46,15 +46,30 @@ Agents, knowledge bases, MCP servers, secrets, conversations, and runs belong to
 
 Streaming output should distinguish assistant content, reasoning summaries, tool calls, tool results, citations, human interrupts, usage, errors, and terminal run state.
 
-## Open Decisions
+## Implemented Pre-alpha Boundary
 
-- Monorepo package layout
-- Runtime event schema and persistence granularity
-- Agent definition versioning model
-- Extension packaging and trust policy
+The current repository is organized as a small monorepo:
+
+```text
+apps/api          FastAPI control plane, runtime orchestration, SSE, MCP gateway
+apps/web          Next.js Studio, Builder, Extensions, Runs, Embed Playground
+packages/contracts Shared TypeScript contract vocabulary
+packages/embed     Framework-neutral Web Component
+extensions         Example domain-neutral extension packages
+```
+
+The HTTP API never exposes LangGraph state. Runtime adapters receive a normalized text-and-attachment request and emit ordered `ExecutionEvent` records. Provider events, MCP results, approval interrupts, and artifacts are translated at this boundary. DeepSeek vision uses native Chat Completions streaming and maps provider reasoning into `reasoning.delta` separately from visible `message.delta` output. Studio enables thinking by default, while headless clients can disable it per run.
+
+Persisted `ExecutionEvent` records remain the canonical protocol. The run-events endpoint also provides a lightweight TCM-compatible projection with `?protocol=tcm`, mapping reasoning, text, tools, approvals, artifacts, citations, errors, and completion into data-only SSE frames. Studio consumes that projection and renders a collapsed reasoning/tool timeline followed by the Markdown answer. Completion is a terminal stream event, not an Agent tool call; domain-specific TCM workflow states are not part of Alcuin Core.
+
+MCP processes and remote transports terminate in the API service. Browser clients only communicate with the Alcuin gateway. Embed tokens bind a workspace, published Agent Version, allowed origin, actions, and expiry.
+
+See [ADR-0001](adr-0001-runtime-extension-contracts.md) for the contract decisions implemented by the prototype.
+
+## Remaining Decisions
+
 - Checkpoint storage and resume semantics
-- Multi-tenant deployment boundary
+- Production PostgreSQL, Redis, Qdrant, and object-storage adapters
+- Team membership and RBAC beyond workspace ownership
+- Signed extension packaging and distribution trust
 - Evaluation and observability integration
-
-These decisions will be resolved through architecture records during the foundation milestone.
-

@@ -67,9 +67,46 @@ See [Architecture Overview](docs/architecture/overview.md) and [Project Vision](
 
 ## Project Status
 
-Alcuin is in **pre-alpha foundation design**. The first milestone is a domain-neutral extraction of a proven FastAPI, LangGraph, RAG, MCP, and Next.js application architecture.
+Alcuin is a working **pre-alpha prototype**. It currently includes:
 
-The public API and storage schema are not stable yet.
+- A Next.js Agent Studio with a conversation timeline, Artifact canvas, run trace, approvals, light/dark themes, and responsive navigation
+- Versioned declarative Agent Definitions behind a workspace-scoped FastAPI control plane
+- A replaceable runtime boundary with a LangGraph ReAct demo adapter and an optional OpenAI-compatible streaming adapter
+- Persisted normalized execution events with resumable SSE delivery and a lightweight TCM-compatible stream projection
+- Extension inspection, disabled-first installation, permission review, health state, and enable/disable lifecycle
+- MCP discovery and invocation over stdio, SSE, and Streamable HTTP
+- OpenAPI JSON/YAML import from request bodies or URLs and read-only execution, with mutating operations routed to approval-gated runs
+- Origin-bound Embed Session tokens and a framework-neutral `<alcuin-agent>` Web Component
+- An Operations Copilot demo proving that one published agent can run in Studio and an embedded host
+
+The contracts are versioned but not yet stable. SQLite is the local prototype store; PostgreSQL, Redis, and Qdrant containers are provided under the `platform-infra` Compose profile while their production adapters remain roadmap work.
+
+## Quick Start
+
+Requirements: Node.js 22+, pnpm 11+, Python 3.11+, and `uv`.
+
+```bash
+cp .env.example .env
+pnpm install
+uv sync --project apps/api
+pnpm dev
+```
+
+Open [http://localhost:3000/studio](http://localhost:3000/studio). The API and interactive OpenAPI reference run at [http://localhost:8000/docs](http://localhost:8000/docs).
+
+No model credential is required for the deterministic Operations Copilot fallback. DeepSeek is the first configured provider preset: put the key in the ignored local `.env` as `ALCUIN_DEEPSEEK_API_KEY`; the default endpoint is `https://api.deepseek.com`, model is the experimental `deepseek-v4-flash-vision-exp`, and protocol is Chat Completions. Studio enables thinking and renders its native stream in a compact, collapsible trace before the final Markdown output; API clients can disable thinking per run. Studio accepts up to four PNG, JPEG, WebP, or GIF attachments of 5 MiB each and sends only the active run's image data to the configured provider. DeepSeek V4 Flash text remains selectable, while generic OpenAI-compatible endpoints remain available through the `ALCUIN_OPENAI_*` variables.
+
+Run the complete verification suite with:
+
+```bash
+pnpm -r test
+pnpm -r lint
+pnpm -r build
+uv run --project apps/api pytest
+pnpm test:e2e
+```
+
+Docker users can start the prototype with `docker compose up --build`. The reserved infrastructure stack is available through `docker compose --profile platform-infra up --build`.
 
 ## Development Workflow
 
@@ -100,7 +137,7 @@ The initial implementation is expected to use:
 - **Protocols:** MCP, SSE, OpenAPI
 - **Operations:** Docker Compose, Alembic, OpenTelemetry-compatible traces
 
-Technology choices remain subject to architecture review during the foundation milestone.
+The pre-alpha uses SQLite for zero-configuration local state. Infrastructure adapters remain replaceable behind repository and capability boundaries.
 
 ## Security
 
@@ -109,4 +146,3 @@ Please do not open public issues for security vulnerabilities. Follow the privat
 ## License
 
 A license will be selected before the first public release. Until then, all rights are reserved.
-
