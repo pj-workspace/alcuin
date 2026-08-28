@@ -49,6 +49,19 @@ class RecordingOpenAPIGateway:
         return {"status_code": 200, "result": {"id": arguments["id"]}}
 
 
+async def recording_builtin_adapter(
+    _context: ToolContext,
+    tool_name: str,
+    arguments: dict[str, Any],
+):
+    from alcuin_api.tools import ToolResult
+
+    return ToolResult(
+        data={"tool": tool_name, "value": arguments["value"]},
+        summary="Built-in adapter completed",
+    )
+
+
 def install_enabled(store: Store, manifest: ExtensionManifest, refs: dict[str, str] | None = None) -> dict:
     extension = store.install_extension("ws_demo", manifest, refs or {})
     store.update_extension("ws_demo", extension["id"], status="enabled", health="healthy")
@@ -77,6 +90,54 @@ def test_runtime_redacts_resolved_secret_values(monkeypatch: pytest.MonkeyPatch)
     assert orchestrator.redact_payload(
         {"ordinary_field": "prefix runtime-secret-value suffix"}
     ) == {"ordinary_field": "prefix [REDACTED] suffix"}
+
+
+@pytest.mark.asyncio
+async def test_builtin_extension_uses_explicit_registered_adapter() -> None:
+    store = Store(":memory:")
+    service = ExtensionToolService(
+        store,
+        RecordingMCPGateway(),
+        RecordingOpenAPIGateway(),
+        {"verification-adapter": recording_builtin_adapter},
+    )
+    manifest = ExtensionManifest.model_validate(
+        {
+            "id": "verification.builtin",
+            "name": "Built-in Verification",
+            "version": "0.1.0",
+            "contributions": {
+                "tools": [
+                    {
+                        "name": "verification.echo",
+                        "description": "Echo through a trusted adapter",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"value": {"type": "string"}},
+                            "required": ["value"],
+                        },
+                    }
+                ]
+            },
+            "entrypoints": [
+                {"type": "builtin", "adapter": "verification-adapter"}
+            ],
+        }
+    )
+    install_enabled(store, manifest)
+    executor = ToolExecutor(dynamic_resolver=service.definitions)
+
+    execution = await executor.execute(
+        "verification.echo",
+        {"value": "registered"},
+        allowed_names=["verification.echo"],
+        context=ToolContext("ws_demo", "run_builtin", {}),
+    )
+
+    assert execution.result.data == {
+        "tool": "verification.echo",
+        "value": "registered",
+    }
 
 
 @pytest.mark.asyncio

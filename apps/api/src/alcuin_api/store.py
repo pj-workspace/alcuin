@@ -235,7 +235,15 @@ class Store:
                         {
                             "name": "ops.update_ticket",
                             "description": "Update an incident ticket",
-                            "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}},
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {
+                                    "ticket_id": {"type": "string"},
+                                    "status": {"type": "string"},
+                                },
+                                "required": ["ticket_id", "status"],
+                                "additionalProperties": False,
+                            },
                             "mutating": True,
                         },
                     ],
