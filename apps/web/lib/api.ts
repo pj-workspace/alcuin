@@ -54,6 +54,11 @@ export const alcuinApi = {
       method: "POST",
       body: JSON.stringify({ input, attachments, thinking }),
     }),
+  createAgent: (slug: string, definition: Agent["definition"]) =>
+    request<Agent>("/v1/agents", {
+      method: "POST",
+      body: JSON.stringify({ slug, definition }),
+    }),
   createToolRun: (
     threadId: string,
     input: string,

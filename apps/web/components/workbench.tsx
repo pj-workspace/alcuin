@@ -1,6 +1,6 @@
 "use client";
 
-import type { BootstrapPayload, ExecutionEvent } from "@alcuin/contracts";
+import type { AgentDefinition, BootstrapPayload, ExecutionEvent } from "@alcuin/contracts";
 import {
   Blocks,
   Bot,
@@ -44,6 +44,36 @@ const nav = [
   { id: "embed", label: "Embed", icon: Braces },
 ] satisfies Array<{ id: Surface; label: MessageKey; icon: typeof Bot }>;
 
+const DEFAULT_AGENT_INSTRUCTIONS = "You are a helpful, domain-neutral agent. Use only explicitly bound capabilities and follow the configured approval policies." satisfies MessageKey;
+
+function slugFromName(name: string) {
+  const normalized = name.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const slug = normalized.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+  if (!slug) return "new-agent";
+  return /^[a-z]/.test(slug) ? slug : `agent-${slug}`.slice(0, 64);
+}
+
+function newAgentDefinition(name: string, description: string, instructions: string): AgentDefinition {
+  return {
+    schema_version: "2026-08-28",
+    identity: { name, description, icon: "spark" },
+    instructions,
+    model: {
+      provider: "deepseek",
+      model: "deepseek-v4-flash-vision-exp",
+      credential_ref: "secret://workspace/deepseek-primary",
+    },
+    extensions: [],
+    tools: [],
+    knowledge: [],
+    runtime: { adapter: "langgraph-react", max_steps: 8 },
+    policies: { mutating_tools: "ask", external_side_effects: "ask" },
+    context_policy: { accepted: ["page", "record", "selection"], max_bytes: 16_384 },
+    output_schema: { type: "artifact", format: "markdown" },
+    starter_prompts: [],
+  };
+}
+
 export function Workbench({ surface }: { surface: Surface }) {
   const { locale, t, toggleLocale } = useI18n();
   const pathname = usePathname();
@@ -55,11 +85,32 @@ export function Workbench({ surface }: { surface: Surface }) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [commandOpen, setCommandOpen] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [createAgentOpen, setCreateAgentOpen] = useState(false);
+  const [creatingAgent, setCreatingAgent] = useState(false);
+  const [createAgentError, setCreateAgentError] = useState<string | null>(null);
+  const [slugTouched, setSlugTouched] = useState(false);
+  const [agentForm, setAgentForm] = useState({
+    name: "",
+    slug: "",
+    description: "",
+    instructions: DEFAULT_AGENT_INSTRUCTIONS as string,
+  });
 
   const refresh = useCallback(async (preferredRunId?: string) => {
     try {
       const bootstrap = await alcuinApi.bootstrap();
       setData(bootstrap);
+      setSelectedAgentId((current) => {
+        const saved = window.localStorage.getItem("alcuin-agent-id");
+        const candidate = current ?? saved;
+        const next = bootstrap.agents.some((agent) => agent.id === candidate)
+          ? candidate
+          : bootstrap.agents[0]?.id ?? null;
+        if (next) window.localStorage.setItem("alcuin-agent-id", next);
+        else window.localStorage.removeItem("alcuin-agent-id");
+        return next;
+      });
       setError(null);
       const selectedRunId = preferredRunId ?? bootstrap.runs[0]?.id;
       if (selectedRunId) {
@@ -95,13 +146,16 @@ export function Workbench({ surface }: { surface: Surface }) {
         event.preventDefault();
         setCommandOpen((open) => !open);
       }
-      if (event.key === "Escape") setCommandOpen(false);
+      if (event.key === "Escape") {
+        setCommandOpen(false);
+        setCreateAgentOpen(false);
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  const activeAgent = data?.agents[0];
+  const activeAgent = data?.agents.find((agent) => agent.id === selectedAgentId) ?? data?.agents[0];
   const switchTheme = () => {
     const next = theme === "light" ? "dark" : "light";
     setTheme(next);
@@ -112,15 +166,57 @@ export function Workbench({ surface }: { surface: Surface }) {
     setCommandOpen(false);
     router.push(`/${target}`);
   };
+  const selectAgent = useCallback((agentId: string) => {
+    setSelectedAgentId(agentId);
+    window.localStorage.setItem("alcuin-agent-id", agentId);
+    router.push("/agents");
+  }, [router]);
+  const openCreateAgent = useCallback(() => {
+    setAgentForm({ name: "", slug: "", description: "", instructions: t(DEFAULT_AGENT_INSTRUCTIONS) });
+    setSlugTouched(false);
+    setCreateAgentError(null);
+    setCreateAgentOpen(true);
+  }, [t]);
+  const createAgentValid = agentForm.name.trim().length >= 2
+    && /^[a-z][a-z0-9-]{2,63}$/.test(agentForm.slug)
+    && agentForm.instructions.trim().length >= 8;
+  const createAgent = async () => {
+    if (!createAgentValid) return;
+    setCreatingAgent(true);
+    setCreateAgentError(null);
+    try {
+      const created = await alcuinApi.createAgent(
+        agentForm.slug,
+        newAgentDefinition(
+          agentForm.name.trim(),
+          agentForm.description.trim(),
+          agentForm.instructions.trim(),
+        ),
+      );
+      setSelectedAgentId(created.id);
+      window.localStorage.setItem("alcuin-agent-id", created.id);
+      setCreateAgentOpen(false);
+      await refresh();
+      router.push("/agents");
+    } catch (reason) {
+      setCreateAgentError(reason instanceof Error ? reason.message : t("Unable to create agent"));
+    } finally {
+      setCreatingAgent(false);
+    }
+  };
   const view = useMemo(() => {
     if (!data) return null;
     switch (surface) {
       case "agents": return (
         <AgentBuilderView
+          key={activeAgent?.current_version_id}
           agent={activeAgent}
+          agents={data.agents}
           knowledgeSources={data.knowledge_sources}
           extensions={data.extensions}
           onChanged={refresh}
+          onCreateAgent={openCreateAgent}
+          onSelectAgent={selectAgent}
         />
       );
       case "extensions": return <ExtensionsView extensions={data.extensions} onChanged={refresh} />;
@@ -136,7 +232,7 @@ export function Workbench({ surface }: { surface: Surface }) {
         />
       );
     }
-  }, [activeAgent, data, events, refresh, surface]);
+  }, [activeAgent, data, events, openCreateAgent, refresh, selectAgent, surface]);
 
   return (
     <main className="app-frame">
@@ -168,9 +264,9 @@ export function Workbench({ surface }: { surface: Surface }) {
             ))}
           </nav>
           <div className="sidebar-section">
-            <div className="sidebar-heading"><span>{t("Agents")}</span><button aria-label={t("New agent")}><Plus size={14} /></button></div>
+            <div className="sidebar-heading"><span>{t("Agents")}</span><button aria-label={t("New agent")} onClick={openCreateAgent}><Plus size={14} /></button></div>
             {data?.agents.map((agent) => (
-              <Link href="/agents" className="resource-row active-resource" key={agent.id}>
+              <Link href="/agents" className={clsx("resource-row", agent.id === activeAgent?.id && "active-resource")} key={agent.id} onClick={() => selectAgent(agent.id)}>
                 <span className="agent-glyph"><Command size={13} /></span>
                 <span><strong>{agent.name}</strong><small>v{agent.version} · {statusLabel(agent.status, locale)}</small></span>
               </Link>
@@ -191,6 +287,23 @@ export function Workbench({ surface }: { surface: Surface }) {
           {!loading && !error && view}
         </section>
       </div>
+
+      {createAgentOpen && (
+        <div className="sheet-backdrop" onMouseDown={() => !creatingAgent && setCreateAgentOpen(false)}>
+          <aside className="inspect-sheet agent-create-sheet" role="dialog" aria-modal="true" aria-labelledby="create-agent-title" onMouseDown={(event) => event.stopPropagation()}>
+            <header><div><AlcuinMark size={32} /><div><small>{t("Versioned definition")}</small><h2 id="create-agent-title">{t("Create agent")}</h2></div></div><button className="icon-button quiet" aria-label={t("Close create agent")} onClick={() => setCreateAgentOpen(false)} disabled={creatingAgent}><X size={16} /></button></header>
+            <div className="wizard-body agent-create-body">
+              <p className="agent-create-intro">{t("Start with a small, domain-neutral definition. Bind tools and knowledge explicitly in the Builder.")}</p>
+              <label className="field"><span>{t("Agent name")}</span><input autoFocus value={agentForm.name} onChange={(event) => { const name = event.target.value; setAgentForm((current) => ({ ...current, name, slug: slugTouched ? current.slug : slugFromName(name) })); }} placeholder={t("Research Copilot")} /></label>
+              <label className="field"><span>{t("Agent slug")}</span><input value={agentForm.slug} onChange={(event) => { setSlugTouched(true); setAgentForm({ ...agentForm, slug: event.target.value.toLowerCase() }); }} placeholder="research-copilot" /><small>{t("Lowercase letters, numbers, and hyphens. This identifier is stable after creation.")}</small></label>
+              <label className="field"><span>{t("Description")}</span><textarea rows={3} value={agentForm.description} onChange={(event) => setAgentForm({ ...agentForm, description: event.target.value })} placeholder={t("What this agent is responsible for.")} /></label>
+              <label className="field"><span>{t("System instructions")}</span><textarea rows={7} value={agentForm.instructions} onChange={(event) => setAgentForm({ ...agentForm, instructions: event.target.value })} /></label>
+              {createAgentError && <div className="wizard-error">{createAgentError}</div>}
+            </div>
+            <footer><button className="button secondary" onClick={() => setCreateAgentOpen(false)} disabled={creatingAgent}>{t("Cancel")}</button><button className="button dark" onClick={() => void createAgent()} disabled={creatingAgent || !createAgentValid}>{creatingAgent ? <span className="micro-loader" /> : <Plus size={14} />}{t(creatingAgent ? "Creating agent…" : "Create draft")}</button></footer>
+          </aside>
+        </div>
+      )}
 
       {commandOpen && (
         <div className="command-backdrop" onMouseDown={() => setCommandOpen(false)}>

@@ -40,14 +40,20 @@ const sections = [
 
 export function AgentBuilderView({
   agent,
+  agents,
   knowledgeSources,
   extensions,
   onChanged,
+  onCreateAgent,
+  onSelectAgent,
 }: {
   agent?: Agent;
+  agents: Agent[];
   knowledgeSources: KnowledgeSource[];
   extensions: Extension[];
   onChanged: () => Promise<void>;
+  onCreateAgent: () => void;
+  onSelectAgent: (agentId: string) => void;
 }) {
   const { t } = useI18n();
   const [active, setActive] = useState("identity");
@@ -98,8 +104,8 @@ export function AgentBuilderView({
 
   return <div className="builder-surface">
     <header className="wide-header">
-      <div><div className="breadcrumbs"><span>{t("Agents")}</span><ChevronRight size={12} /><span>{agent.name}</span></div><div className="title-row"><h1>{t("Agent Builder")}</h1><StatusPill status={agent.status} /><span className="version-badge">v{agent.version}</span></div><p>{t("Compose behavior from stable, versioned capabilities.")}</p></div>
-      <div className="header-actions"><button className="button secondary"><Eye size={14} />{t("Preview")}</button><button className="button secondary" disabled={saving} onClick={() => void save()}><Save size={14} />{t("Save draft")}</button><button className="button dark" disabled={saving} onClick={() => void save(true)}><Play size={13} fill="currentColor" />{t("Publish version")}</button></div>
+      <div><div className="breadcrumbs"><span>{t("Agents")}</span><ChevronRight size={12} /><label className="builder-agent-switch"><select aria-label={t("Select agent")} value={agent.id} onChange={(event) => onSelectAgent(event.target.value)}>{agents.map((item) => <option key={item.id} value={item.id}>{item.name} · v{item.version}</option>)}</select><ChevronRight size={11} /></label></div><div className="title-row"><h1>{t("Agent Builder")}</h1><StatusPill status={agent.status} /><span className="version-badge">v{agent.version}</span></div><p>{t("Compose behavior from stable, versioned capabilities.")}</p></div>
+      <div className="header-actions"><button className="button secondary" onClick={onCreateAgent}><Plus size={14} />{t("New agent")}</button><button className="button secondary"><Eye size={14} />{t("Preview")}</button><button className="button secondary" disabled={saving} onClick={() => void save()}><Save size={14} />{t("Save draft")}</button><button className="button dark" disabled={saving} onClick={() => void save(true)}><Play size={13} fill="currentColor" />{t("Publish version")}</button></div>
     </header>
     <div className="builder-body">
       <aside className="builder-nav">
