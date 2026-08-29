@@ -91,6 +91,56 @@ def test_context_assembler_applies_traceable_compaction_without_mutating_sources
     assert [item.id for item in raw] == ["msg_1", "msg_2", "msg_3"]
 
 
+def test_compaction_is_rendered_before_untrusted_host_context() -> None:
+    raw = (
+        message(1, "user", "First question"),
+        message(2, "assistant", "First answer"),
+        message(3, "user", "Current question"),
+    )
+    sources = raw[:2]
+    compaction = CompactionRecord(
+        id="cmp_order",
+        through_sequence=2,
+        summary="The first completed turn.",
+        source_message_ids=tuple(item.id for item in sources),
+        source_digest=compaction_source_digest(sources),
+        strategy="test-summary-v1",
+    )
+
+    assembled = ContextAssembler().assemble(
+        ContextAssemblyRequest(
+            sections=(
+                ContextSection(
+                    "agent",
+                    ContextLayer.AGENT_INSTRUCTIONS,
+                    "Answer precisely.",
+                ),
+                ContextSection(
+                    "host",
+                    ContextLayer.HOST_CONTEXT,
+                    '{"record":"REC-1"}',
+                ),
+            ),
+            messages=raw,
+            budget=TokenBudget(context_window_tokens=2_000, reserved_output_tokens=200),
+            current_message_id="msg_3",
+            compaction=compaction,
+        )
+    )
+
+    assert assembled.system_prompt.index('layer="agent_instructions"') < assembled.system_prompt.index(
+        'layer="compacted_conversation"'
+    )
+    assert assembled.system_prompt.index('layer="compacted_conversation"') < assembled.system_prompt.index(
+        'layer="host_context"'
+    )
+    assert [entry.layer for entry in assembled.trace[:3]] == [
+        "agent_instructions",
+        "compacted_conversation",
+        "host_context",
+    ]
+
+
 def test_context_assembler_rejects_tampered_or_current_covering_compaction() -> None:
     raw = (
         message(1, "user", "First question"),

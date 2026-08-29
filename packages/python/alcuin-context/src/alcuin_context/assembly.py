@@ -367,10 +367,20 @@ class ContextAssembler:
     estimator: TokenEstimator = field(default_factory=HeuristicTokenEstimator)
 
     def assemble(self, request: ContextAssemblyRequest) -> ContextAssembly:
-        ordered_sections = sorted(
-            enumerate(request.sections),
-            key=lambda item: (_LAYER_ORDER[item[1].layer], item[0]),
-        )
+        ordered_sections: list[tuple[int, int, str, ContextSection | CompactionRecord]] = [
+            (_LAYER_ORDER[section.layer], index, "section", section)
+            for index, section in enumerate(request.sections)
+        ]
+        if request.compaction:
+            ordered_sections.append(
+                (
+                    _LAYER_ORDER[ContextLayer.COMPACTED_CONVERSATION],
+                    -1,
+                    "compaction",
+                    request.compaction,
+                )
+            )
+        ordered_sections.sort(key=lambda item: (item[0], item[1]))
         messages = tuple(sorted(request.messages, key=lambda message: message.sequence))
         if len({message.sequence for message in messages}) != len(messages):
             raise ValueError("context message sequences must be unique")
@@ -402,7 +412,33 @@ class ContextAssembler:
         rendered_sections: list[str] = []
         trace: list[ContextTraceEntry] = []
         total_tokens = 0
-        for _, section in ordered_sections:
+        for _, _, kind, item in ordered_sections:
+            if kind == "compaction":
+                active_compaction = item
+                assert isinstance(active_compaction, CompactionRecord)
+                rendered = (
+                    "<alcuin_context layer=\"compacted_conversation\" title=\"Conversation Summary\">\n"
+                    f"{active_compaction.summary.strip()}\n"
+                    "</alcuin_context>"
+                )
+                rendered_sections.append(rendered)
+                tokens = self.estimator.estimate_text(rendered)
+                total_tokens += tokens
+                trace.append(
+                    ContextTraceEntry(
+                        kind="compaction",
+                        id=active_compaction.id,
+                        layer=ContextLayer.COMPACTED_CONVERSATION.value,
+                        estimated_tokens=tokens,
+                        digest=_digest(active_compaction.summary),
+                        source_id=active_compaction.source_digest,
+                        sequence=active_compaction.through_sequence,
+                    )
+                )
+                continue
+
+            section = item
+            assert isinstance(section, ContextSection)
             title = section.title or section.layer.value.replace("_", " ").title()
             rendered = f"<alcuin_context layer=\"{section.layer.value}\" title=\"{title}\">\n{section.content.strip()}\n</alcuin_context>"
             rendered_sections.append(rendered)
@@ -417,27 +453,6 @@ class ContextAssembler:
                     digest=_digest(section.content),
                     source_id=section.source_id,
                     source_version=section.source_version,
-                )
-            )
-
-        if compaction:
-            rendered = (
-                "<alcuin_context layer=\"compacted_conversation\" title=\"Conversation Summary\">\n"
-                f"{compaction.summary.strip()}\n"
-                "</alcuin_context>"
-            )
-            rendered_sections.append(rendered)
-            tokens = self.estimator.estimate_text(rendered)
-            total_tokens += tokens
-            trace.append(
-                ContextTraceEntry(
-                    kind="compaction",
-                    id=compaction.id,
-                    layer=ContextLayer.COMPACTED_CONVERSATION.value,
-                    estimated_tokens=tokens,
-                    digest=_digest(compaction.summary),
-                    source_id=compaction.source_digest,
-                    sequence=compaction.through_sequence,
                 )
             )
 
