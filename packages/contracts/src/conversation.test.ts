@@ -34,6 +34,7 @@ const detail = {
     id: "thr_test",
     workspace_id: "ws_test",
     agent_id: "agt_test",
+    agent_version_id: "agv_test",
     title: "Contract test",
     context: {},
     context_revision: 1,

@@ -231,6 +231,18 @@ class ControlPlaneRepository(RuntimeRepository, ExtensionRepository, KnowledgeRe
 
     def get_agent(self, workspace_id: str, agent_id: str) -> Record | None: ...
 
+    def get_agent_version(
+        self,
+        workspace_id: str,
+        version_id: str,
+    ) -> Record | None: ...
+
+    def list_agent_versions(
+        self,
+        workspace_id: str,
+        agent_id: str,
+    ) -> list[Record]: ...
+
     def create_agent(self, workspace_id: str, payload: AgentCreate) -> Record: ...
 
     def create_agent_version(
@@ -242,12 +254,21 @@ class ControlPlaneRepository(RuntimeRepository, ExtensionRepository, KnowledgeRe
 
     def publish_agent(self, workspace_id: str, agent_id: str) -> Record | None: ...
 
+    def publish_agent_version(
+        self,
+        workspace_id: str,
+        agent_id: str,
+        version_id: str,
+    ) -> Record | None: ...
+
     def create_thread(
         self,
         workspace_id: str,
         agent_id: str,
         title: str,
         context: Record,
+        *,
+        agent_version_id: str | None = None,
     ) -> Record: ...
 
     def list_threads(self, workspace_id: str) -> list[Record]: ...

@@ -93,6 +93,7 @@ class AgentVersionCreate(StrictModel):
 
 class ThreadCreate(StrictModel):
     agent_id: str
+    agent_version_id: str | None = None
     title: str | None = Field(default=None, max_length=120)
     context: dict[str, Any] = Field(default_factory=dict)
 

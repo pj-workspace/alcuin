@@ -219,17 +219,33 @@ def create_app(
         if not scope.agent_id:
             return
         thread = repository.get_thread(scope.workspace_id, run["thread_id"])
-        if not thread or thread["agent_id"] != scope.agent_id:
+        if (
+            not thread
+            or thread["agent_id"] != scope.agent_id
+            or (
+                scope.agent_version_id is not None
+                and (
+                    thread["agent_version_id"] != scope.agent_version_id
+                    or run["agent_version_id"] != scope.agent_version_id
+                )
+            )
+        ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Embed session is bound to another agent",
+                detail="Embed session is bound to another Agent version",
             )
 
     def require_thread_agent(scope: RequestScope, thread: dict) -> None:
-        if scope.agent_id and thread["agent_id"] != scope.agent_id:
+        if scope.agent_id and (
+            thread["agent_id"] != scope.agent_id
+            or (
+                scope.agent_version_id is not None
+                and thread["agent_version_id"] != scope.agent_version_id
+            )
+        ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Embed session is bound to another agent",
+                detail="Embed session is bound to another Agent version",
             )
 
     def validate_knowledge_references(
@@ -360,6 +376,51 @@ def create_app(
                     status_code=409,
                     detail="Agent tools are not runnable: " + ", ".join(unrunnable_tools),
                 )
+
+    def validate_publishable_definition(
+        workspace_id: str,
+        definition: AgentDefinition,
+    ) -> None:
+        validate_knowledge_references(workspace_id, definition)
+        validate_agent_extension_references(
+            workspace_id,
+            definition,
+            require_runnable=True,
+        )
+        if "knowledge.search" in definition.tools and not definition.knowledge:
+            raise HTTPException(
+                status_code=409,
+                detail="Attach at least one knowledge source before publishing knowledge.search",
+            )
+        if "knowledge.search" in definition.tools:
+            require_knowledge_service()
+        if "web.search" in definition.tools and not web_search_service:
+            raise HTTPException(
+                status_code=409,
+                detail="Configure web search before publishing web.search",
+            )
+
+    def publish_exact_agent_version(
+        workspace_id: str,
+        agent_id: str,
+        version_id: str,
+    ) -> dict:
+        version = repository.get_agent_version(workspace_id, version_id)
+        if not version or version["agent_id"] != agent_id:
+            raise missing("Agent version")
+        definition = AgentDefinition.model_validate(version["definition"])
+        validate_publishable_definition(workspace_id, definition)
+        try:
+            agent = repository.publish_agent_version(
+                workspace_id,
+                agent_id,
+                version_id,
+            )
+        except RepositoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not agent:
+            raise missing("Agent")
+        return agent
 
     def tool_catalog(workspace_id: str) -> list[dict]:
         return sorted(
@@ -637,35 +698,55 @@ def create_app(
             raise missing("Agent")
         return agent
 
+    @app.get("/v1/agents/{agent_id}/versions")
+    async def list_agent_versions(
+        agent_id: str,
+        scope: ScopeDependency,
+    ) -> list[dict]:
+        require_workspace_operator(scope)
+        if not repository.get_agent(scope.workspace_id, agent_id):
+            raise missing("Agent")
+        return repository.list_agent_versions(scope.workspace_id, agent_id)
+
+    @app.get("/v1/agents/{agent_id}/versions/{version_id}")
+    async def get_agent_version(
+        agent_id: str,
+        version_id: str,
+        scope: ScopeDependency,
+    ) -> dict:
+        require_workspace_operator(scope)
+        version = repository.get_agent_version(scope.workspace_id, version_id)
+        if not version or version["agent_id"] != agent_id:
+            raise missing("Agent version")
+        return version
+
+    @app.post("/v1/agents/{agent_id}/versions/{version_id}/publish")
+    async def publish_agent_version(
+        agent_id: str,
+        version_id: str,
+        scope: ScopeDependency,
+    ) -> dict:
+        require_workspace_operator(scope)
+        return publish_exact_agent_version(
+            scope.workspace_id,
+            agent_id,
+            version_id,
+        )
+
     @app.post("/v1/agents/{agent_id}/publish")
     async def publish_agent(agent_id: str, scope: ScopeDependency) -> dict:
         require_workspace_operator(scope)
         current = repository.get_agent(scope.workspace_id, agent_id)
         if not current:
             raise missing("Agent")
-        definition = AgentDefinition.model_validate(current["definition"])
-        validate_knowledge_references(scope.workspace_id, definition)
-        validate_agent_extension_references(
+        version_id = current.get("current_version_id")
+        if not version_id:
+            raise HTTPException(status_code=409, detail="Agent has no version to publish")
+        return publish_exact_agent_version(
             scope.workspace_id,
-            definition,
-            require_runnable=True,
+            agent_id,
+            str(version_id),
         )
-        if "knowledge.search" in definition.tools and not definition.knowledge:
-            raise HTTPException(
-                status_code=409,
-                detail="Attach at least one knowledge source before publishing knowledge.search",
-            )
-        if "knowledge.search" in definition.tools:
-            require_knowledge_service()
-        if "web.search" in definition.tools and not web_search_service:
-            raise HTTPException(
-                status_code=409,
-                detail="Configure web search before publishing web.search",
-            )
-        agent = repository.publish_agent(scope.workspace_id, agent_id)
-        if not agent:
-            raise missing("Agent")
-        return agent
 
     @app.get("/v1/threads")
     async def list_threads(scope: ScopeDependency) -> list[dict]:
@@ -682,16 +763,51 @@ def create_app(
         agent = repository.get_agent(scope.workspace_id, payload.agent_id)
         if not agent:
             raise missing("Agent")
-        if scope.embed and agent["status"] != "published":
-            raise HTTPException(
-                status_code=409, detail="Embedded agents must be published"
+        if scope.embed:
+            if not scope.agent_version_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Embed session is not bound to an Agent version",
+                )
+            if (
+                payload.agent_version_id is not None
+                and payload.agent_version_id != scope.agent_version_id
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Embed session is bound to another Agent version",
+                )
+            selected_version_id = scope.agent_version_id
+        else:
+            selected_version_id = (
+                payload.agent_version_id or agent.get("current_version_id")
             )
-        return repository.create_thread(
+        if not selected_version_id:
+            raise HTTPException(status_code=409, detail="Agent has no runnable version")
+        version = repository.get_agent_version(
             scope.workspace_id,
-            payload.agent_id,
-            payload.title or "New agent thread",
-            payload.context,
+            str(selected_version_id),
         )
+        if not version or version["agent_id"] != payload.agent_id:
+            raise HTTPException(
+                status_code=422,
+                detail="Agent version does not belong to this Agent and Workspace",
+            )
+        if scope.embed and not version.get("published_at"):
+            raise HTTPException(
+                status_code=409,
+                detail="Embedded Agent version must be published",
+            )
+        try:
+            return repository.create_thread(
+                scope.workspace_id,
+                payload.agent_id,
+                payload.title or "New agent thread",
+                payload.context,
+                agent_version_id=str(selected_version_id),
+            )
+        except RepositoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/v1/threads/{thread_id}")
     async def get_thread(thread_id: str, scope: ScopeDependency) -> dict:
@@ -754,18 +870,17 @@ def create_app(
         thread = repository.get_thread(scope.workspace_id, thread_id)
         if not thread:
             raise missing("Thread")
-        if scope.agent_id and scope.agent_id != thread["agent_id"]:
-            raise HTTPException(
-                status_code=403, detail="Embed session is bound to another agent"
-            )
-        agent = repository.get_agent(scope.workspace_id, thread["agent_id"])
-        if not agent or not agent.get("current_version_id"):
-            raise HTTPException(status_code=409, detail="Agent has no runnable version")
-        version_id = scope.agent_version_id or agent["current_version_id"]
+        require_thread_agent(scope, thread)
+        version_id = thread["agent_version_id"]
         version = repository.get_agent_version(scope.workspace_id, version_id)
         if not version or version["agent_id"] != thread["agent_id"]:
             raise HTTPException(
-                status_code=403, detail="Agent version is outside the embed scope"
+                status_code=409, detail="Thread Agent version is unavailable"
+            )
+        if scope.embed and not version.get("published_at"):
+            raise HTTPException(
+                status_code=409,
+                detail="Embedded Agent version must be published",
             )
         definition = AgentDefinition.model_validate(version["definition"])
         if payload.requested_tool:
@@ -1237,11 +1352,30 @@ def create_app(
             raise HTTPException(
                 status_code=409, detail="Publish the agent before embedding"
             )
+        published_version_id = agent.get("published_version_id")
+        if not published_version_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Agent has no published version to embed",
+            )
+        published_version = repository.get_agent_version(
+            scope.workspace_id,
+            str(published_version_id),
+        )
+        if (
+            not published_version
+            or published_version["agent_id"] != payload.agent_id
+            or not published_version.get("published_at")
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Agent published version is unavailable",
+            )
         now = int(time.time())
         claims = EmbedClaims(
             workspace_id=scope.workspace_id,
             agent_id=payload.agent_id,
-            agent_version_id=agent["current_version_id"],
+            agent_version_id=str(published_version_id),
             origin=payload.origin,
             allowed_actions=payload.allowed_actions,
             issued_at=now,

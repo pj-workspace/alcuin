@@ -98,6 +98,100 @@ test("client reads Workspace-scoped thread messages and context traces", async (
   ]);
 });
 
+test("client exposes immutable Agent versions and exact-version publishing", async () => {
+  const seen: Array<{ url: string; method: string; body: unknown }> = [];
+  const fetchMock: typeof fetch = async (input, init) => {
+    seen.push({
+      url: String(input),
+      method: init?.method ?? "GET",
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+    });
+    return Response.json({});
+  };
+  const client = createAlcuinClient({
+    baseUrl: "https://agents.example.test",
+    workspaceId: "ws_test",
+    fetch: fetchMock,
+  });
+  const definition: Parameters<typeof client.createAgentVersion>[1] = {
+    schema_version: "2026-08-28",
+    identity: { name: "Versioned Agent", description: "", icon: "spark" },
+    instructions: "Keep every Thread pinned to an immutable Agent version.",
+    model: { provider: "test", model: "test-model" },
+    extensions: [],
+    tools: [],
+    knowledge: [],
+    runtime: { adapter: "test", max_steps: 4 },
+    policies: { mutating_tools: "ask", external_side_effects: "ask" },
+    context_policy: {},
+    output_schema: {},
+    starter_prompts: [],
+  };
+
+  await client.listAgentVersions("agt/test");
+  await client.getAgentVersion("agt/test", "agv/v2");
+  await client.createAgentVersion("agt/test", definition);
+  await client.publishAgentVersion("agt/test", "agv/v2");
+  await client.publishAgent("agt/test");
+
+  assert.deepEqual(seen, [
+    {
+      url: "https://agents.example.test/v1/agents/agt%2Ftest/versions",
+      method: "GET",
+      body: undefined,
+    },
+    {
+      url: "https://agents.example.test/v1/agents/agt%2Ftest/versions/agv%2Fv2",
+      method: "GET",
+      body: undefined,
+    },
+    {
+      url: "https://agents.example.test/v1/agents/agt%2Ftest/versions",
+      method: "POST",
+      body: { definition },
+    },
+    {
+      url: "https://agents.example.test/v1/agents/agt%2Ftest/versions/agv%2Fv2/publish",
+      method: "POST",
+      body: undefined,
+    },
+    {
+      url: "https://agents.example.test/v1/agents/agt%2Ftest/publish",
+      method: "POST",
+      body: undefined,
+    },
+  ]);
+});
+
+test("client can pin a new Thread to an explicit Agent version", async () => {
+  const bodies: unknown[] = [];
+  const client = createAlcuinClient({
+    baseUrl: "https://agents.example.test",
+    workspaceId: "ws_test",
+    fetch: async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({});
+    },
+  });
+
+  await client.createThread("agt_test", { record_id: "rec_1" }, "agv_test_v1");
+  await client.createThread("agt_test");
+
+  assert.deepEqual(bodies, [
+    {
+      agent_id: "agt_test",
+      title: "Working session",
+      context: { record_id: "rec_1" },
+      agent_version_id: "agv_test_v1",
+    },
+    {
+      agent_id: "agt_test",
+      title: "Working session",
+      context: {},
+    },
+  ]);
+});
+
 test("canonical run stream preserves forward-compatible event names", async () => {
   const seen: Array<{ url: string; cursor: string | null }> = [];
   const fetchMock: typeof fetch = async (input, init) => {

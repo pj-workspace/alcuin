@@ -1,5 +1,6 @@
 """Install the explicit Operations demo records into a compatible Store."""
 
+import hashlib
 from typing import Any
 
 from .extension import operations_demo_definition, operations_demo_manifest
@@ -10,6 +11,8 @@ def seed_operations_demo(store: Any) -> None:
     definition = operations_demo_definition()
     manifest = operations_demo_manifest()
     created_at = "2026-08-28T00:00:00+00:00"
+    definition_json = definition.model_dump_json()
+    definition_sha256 = hashlib.sha256(definition_json.encode("utf-8")).hexdigest()
     with store.lock, store.connection:
         store.connection.execute(
             """INSERT INTO workspaces(id, name, created_at) VALUES (?, ?, ?)
@@ -18,8 +21,9 @@ def seed_operations_demo(store: Any) -> None:
         )
         store.connection.execute(
             """INSERT INTO agents
-            (id, workspace_id, slug, name, description, status, current_version_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, workspace_id, slug, name, description, status, current_version_id,
+             published_version_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT DO NOTHING""",
             (
                 "agt_operations",
@@ -29,20 +33,25 @@ def seed_operations_demo(store: Any) -> None:
                 definition.identity.description,
                 "published",
                 "av_operations_1",
+                "av_operations_1",
+                created_at,
                 created_at,
             ),
         )
         store.connection.execute(
             """INSERT INTO agent_versions
-            (id, workspace_id, agent_id, version, definition_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (id, workspace_id, agent_id, version, definition_json, definition_sha256,
+             created_at, published_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT DO NOTHING""",
             (
                 "av_operations_1",
                 "ws_demo",
                 "agt_operations",
                 1,
-                definition.model_dump_json(),
+                definition_json,
+                definition_sha256,
+                created_at,
                 created_at,
             ),
         )

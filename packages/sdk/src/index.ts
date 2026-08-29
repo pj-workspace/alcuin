@@ -1,5 +1,6 @@
 import type {
   Agent,
+  AgentVersion,
   BootstrapPayload,
   ContextAssembly,
   ExecutionEvent,
@@ -80,10 +81,19 @@ export function createAlcuinClient(options: AlcuinClientOptions) {
   ) => request<ThreadMessage[]>(threadMessagesPath(threadId, options)),
   getRunContext: (runId: string) =>
     request<ContextAssembly>(`/v1/runs/${resourceId(runId)}/context`),
-  createThread: (agentId: string, context: Record<string, unknown> = {}) =>
+  createThread: (
+    agentId: string,
+    context: Record<string, unknown> = {},
+    agentVersionId?: string,
+  ) =>
     request<Thread>("/v1/threads", {
       method: "POST",
-      body: JSON.stringify({ agent_id: agentId, title: "Working session", context }),
+      body: JSON.stringify({
+        agent_id: agentId,
+        title: "Working session",
+        context,
+        ...(agentVersionId === undefined ? {} : { agent_version_id: agentVersionId }),
+      }),
     }),
   createRun: (
     threadId: string,
@@ -126,12 +136,31 @@ export function createAlcuinClient(options: AlcuinClientOptions) {
       method: "POST",
       body: JSON.stringify({ decision }),
     }),
-  saveAgent: (agentId: string, definition: Agent["definition"]) =>
-    request<Agent>(`/v1/agents/${agentId}/versions`, {
+  createAgentVersion: (agentId: string, definition: Agent["definition"]) =>
+    request<Agent>(`/v1/agents/${resourceId(agentId)}/versions`, {
       method: "POST",
       body: JSON.stringify({ definition }),
     }),
-  publishAgent: (agentId: string) => request<Agent>(`/v1/agents/${agentId}/publish`, { method: "POST" }),
+  /** Compatibility alias for createAgentVersion. */
+  saveAgent: (agentId: string, definition: Agent["definition"]) =>
+    request<Agent>(`/v1/agents/${resourceId(agentId)}/versions`, {
+      method: "POST",
+      body: JSON.stringify({ definition }),
+    }),
+  listAgentVersions: (agentId: string) =>
+    request<AgentVersion[]>(`/v1/agents/${resourceId(agentId)}/versions`),
+  getAgentVersion: (agentId: string, versionId: string) =>
+    request<AgentVersion>(
+      `/v1/agents/${resourceId(agentId)}/versions/${resourceId(versionId)}`,
+    ),
+  publishAgentVersion: (agentId: string, versionId: string) =>
+    request<Agent>(
+      `/v1/agents/${resourceId(agentId)}/versions/${resourceId(versionId)}/publish`,
+      { method: "POST" },
+    ),
+  /** Compatibility endpoint that publishes the Agent's current builder version. */
+  publishAgent: (agentId: string) =>
+    request<Agent>(`/v1/agents/${resourceId(agentId)}/publish`, { method: "POST" }),
   createKnowledgeSource: (name: string, description: string) =>
     request<KnowledgeSource>("/v1/knowledge/sources", {
       method: "POST",

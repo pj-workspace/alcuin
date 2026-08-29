@@ -64,6 +64,17 @@ export interface AgentDefinition {
   starter_prompts: string[];
 }
 
+export interface AgentVersion {
+  id: string;
+  workspace_id: string;
+  agent_id: string;
+  version: number;
+  definition: AgentDefinition;
+  definition_sha256: string;
+  created_at: string;
+  published_at: string | null;
+}
+
 export interface Agent {
   id: string;
   workspace_id: string;
@@ -72,9 +83,20 @@ export interface Agent {
   description: string;
   status: "draft" | "published";
   current_version_id: string;
+  published_version_id: string | null;
   version: number;
   definition: AgentDefinition;
   created_at: string;
+  updated_at: string;
+}
+
+export interface CreateAgentPayload {
+  slug: string;
+  definition: AgentDefinition;
+}
+
+export interface CreateAgentVersionPayload {
+  definition: AgentDefinition;
 }
 
 export type JsonSchema = Record<string, unknown>;
@@ -258,6 +280,8 @@ export interface Thread {
   id: string;
   workspace_id: string;
   agent_id: string;
+  /** Immutable Agent version selected when the Thread is created. */
+  agent_version_id: string;
   title: string;
   context: Record<string, unknown>;
   /** Optional while pre-kernel Threads are migrated. */
@@ -267,6 +291,14 @@ export interface Thread {
   active_compaction_id?: string | null;
   created_at: string;
   updated_at?: string;
+}
+
+export interface CreateThreadPayload {
+  agent_id: string;
+  /** Defaults to the Agent's published version (or current draft for operators). */
+  agent_version_id?: string;
+  title?: string | null;
+  context?: Record<string, unknown>;
 }
 
 export interface Run {

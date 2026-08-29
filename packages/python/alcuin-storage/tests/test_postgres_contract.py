@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import os
 from typing import Any
 from urllib.parse import urlsplit
@@ -172,6 +173,155 @@ def test_postgres_normalizes_scoped_uniqueness_conflicts(
             "ws_demo",
             AgentCreate(slug="duplicate-agent", definition=definition("Second")),
         )
+
+
+def test_agent_versions_are_immutable_hashes_and_publish_exactly(
+    store: PostgresStore,
+) -> None:
+    first_definition = definition("Version integrity")
+    agent = store.create_agent(
+        "ws_demo",
+        AgentCreate(slug="version-integrity", definition=first_definition),
+    )
+    first_version_id = agent["current_version_id"]
+    first_version = store.get_agent_version("ws_demo", first_version_id)
+
+    assert agent["status"] == "draft"
+    assert agent["published_version_id"] is None
+    assert first_version is not None
+    assert first_version["published_at"] is None
+    assert first_version["definition_sha256"] == hashlib.sha256(
+        first_definition.model_dump_json().encode("utf-8")
+    ).hexdigest()
+
+    published_first = store.publish_agent_version(
+        "ws_demo",
+        agent["id"],
+        first_version_id,
+    )
+    assert published_first is not None
+    assert published_first["published_version_id"] == first_version_id
+    published_version = store.get_agent_version("ws_demo", first_version_id)
+    assert published_version is not None
+    assert published_version["published_at"]
+
+    second_definition = first_definition.model_copy(
+        update={"instructions": "Use the second immutable instruction set only."}
+    )
+    current = store.create_agent_version(
+        "ws_demo",
+        agent["id"],
+        second_definition,
+    )
+    assert current is not None
+    second_version_id = current["current_version_id"]
+    assert second_version_id != first_version_id
+    assert current["status"] == "published"
+    assert current["published_version_id"] == first_version_id
+    assert [
+        item["version"]
+        for item in store.list_agent_versions("ws_demo", agent["id"])
+    ] == [2, 1]
+
+    persisted_first = store.get_agent_version("ws_demo", first_version_id)
+    assert persisted_first is not None
+    assert persisted_first["definition"] == first_definition.model_dump(mode="json")
+    assert persisted_first["definition_sha256"] == first_version["definition_sha256"]
+
+    published_second = store.publish_agent_version(
+        "ws_demo",
+        agent["id"],
+        second_version_id,
+    )
+    assert published_second is not None
+    assert published_second["published_version_id"] == second_version_id
+    assert published_second["current_version_id"] == second_version_id
+
+
+def test_thread_version_pin_is_workspace_scoped_and_controls_every_run(
+    store: PostgresStore,
+) -> None:
+    agent = store.create_agent(
+        "ws_demo",
+        AgentCreate(slug="thread-pin", definition=definition("Thread pin")),
+    )
+    first_version_id = agent["current_version_id"]
+    thread = store.create_thread(
+        "ws_demo",
+        agent["id"],
+        "Pinned Thread",
+        {},
+        agent_version_id=first_version_id,
+    )
+    current = store.create_agent_version(
+        "ws_demo",
+        agent["id"],
+        definition("Thread pin v2"),
+    )
+    assert current is not None
+    second_version_id = current["current_version_id"]
+
+    assert thread["agent_version_id"] == first_version_id
+    persisted_thread = store.get_thread("ws_demo", thread["id"])
+    assert persisted_thread is not None
+    assert persisted_thread["agent_version_id"] == first_version_id
+    with pytest.raises(RepositoryConflict, match="immutable Thread version"):
+        store.create_run(
+            "ws_demo",
+            thread["id"],
+            second_version_id,
+            "Must not drift to v2",
+        )
+    run = store.create_run(
+        "ws_demo",
+        thread["id"],
+        first_version_id,
+        "Remain on v1",
+    )
+    assert run["agent_version_id"] == first_version_id
+
+    add_workspace(store, "ws_other")
+    other = store.create_agent(
+        "ws_other",
+        AgentCreate(slug="other-thread-pin", definition=definition("Other pin")),
+    )
+    with pytest.raises(RepositoryConflict, match="does not belong"):
+        store.create_thread(
+            "ws_demo",
+            agent["id"],
+            "Cross-workspace pin",
+            {},
+            agent_version_id=other["current_version_id"],
+        )
+
+
+def test_agent_version_numbers_are_serialized_across_store_instances(
+    store: PostgresStore,
+) -> None:
+    assert DATABASE_URL is not None
+    agent = store.create_agent(
+        "ws_demo",
+        AgentCreate(slug="concurrent-version", definition=definition("Version one")),
+    )
+    second = PostgresStore(DATABASE_URL, pool_max_size=2)
+
+    def create(index: int) -> dict[str, Any] | None:
+        repository = store if index == 0 else second
+        return repository.create_agent_version(
+            "ws_demo",
+            agent["id"],
+            definition(f"Concurrent version {index + 2}"),
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(create, range(2)))
+        assert sorted(
+            item["version"]
+            for item in store.list_agent_versions("ws_demo", agent["id"])
+        ) == [1, 2, 3]
+    finally:
+        second.close()
 
 
 def test_postgres_event_sequence_is_atomic_across_store_instances(

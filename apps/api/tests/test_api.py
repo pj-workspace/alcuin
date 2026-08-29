@@ -172,7 +172,9 @@ def test_agent_creation_is_versioned_and_rejects_duplicate_workspace_slug() -> N
         )
         assert created.status_code == 201
         assert created.json()["status"] == "draft"
+        assert created.json()["published_version_id"] is None
         assert created.json()["version"] == 1
+        assert created.json()["updated_at"]
         assert created.json()["definition"]["identity"]["name"] == "Release Copilot"
 
         duplicate = client.post(
@@ -194,6 +196,109 @@ def test_agent_creation_is_versioned_and_rejects_duplicate_workspace_slug() -> N
             )
             == 1
         )
+
+
+def test_exact_agent_version_publication_pins_threads_and_runs() -> None:
+    headers = {"X-Alcuin-Workspace": "ws_demo"}
+    with make_client() as client:
+        original = client.get("/v1/agents/agt_starter", headers=headers).json()
+        first_version_id = original["current_version_id"]
+        assert original["published_version_id"] == first_version_id
+
+        definition = json.loads(json.dumps(original["definition"]))
+        definition["instructions"] = "Use the exact second immutable version."
+        created = client.post(
+            "/v1/agents/agt_starter/versions",
+            headers=headers,
+            json={"definition": definition},
+        )
+        assert created.status_code == 201
+        second_version_id = created.json()["current_version_id"]
+        assert created.json()["status"] == "published"
+        assert created.json()["published_version_id"] == first_version_id
+
+        versions = client.get(
+            "/v1/agents/agt_starter/versions",
+            headers=headers,
+        )
+        assert versions.status_code == 200
+        assert [version["version"] for version in versions.json()] == [2, 1]
+        second_version = client.get(
+            f"/v1/agents/agt_starter/versions/{second_version_id}",
+            headers=headers,
+        )
+        assert second_version.status_code == 200
+        assert second_version.json()["published_at"] is None
+        assert len(second_version.json()["definition_sha256"]) == 64
+
+        old_thread = client.post(
+            "/v1/threads",
+            headers=headers,
+            json={
+                "agent_id": "agt_starter",
+                "agent_version_id": first_version_id,
+                "title": "Pinned to v1",
+                "context": {},
+            },
+        )
+        assert old_thread.status_code == 201
+        assert old_thread.json()["agent_version_id"] == first_version_id
+
+        published = client.post(
+            f"/v1/agents/agt_starter/versions/{second_version_id}/publish",
+            headers=headers,
+        )
+        assert published.status_code == 200
+        assert published.json()["published_version_id"] == second_version_id
+        assert published.json()["current_version_id"] == second_version_id
+
+        run = client.post(
+            f"/v1/threads/{old_thread.json()['id']}/runs",
+            headers=headers,
+            json={"input": "Which immutable version is this Thread using?"},
+        )
+        assert run.status_code == 202
+        assert run.json()["agent_version_id"] == first_version_id
+
+        new_thread = client.post(
+            "/v1/threads",
+            headers=headers,
+            json={"agent_id": "agt_starter", "context": {}},
+        )
+        assert new_thread.status_code == 201
+        assert new_thread.json()["agent_version_id"] == second_version_id
+
+        definition["instructions"] = "Use the compatibility publication proxy safely."
+        third = client.post(
+            "/v1/agents/agt_starter/versions",
+            headers=headers,
+            json={"definition": definition},
+        ).json()
+        third_version_id = third["current_version_id"]
+        compatible = client.post(
+            "/v1/agents/agt_starter/publish",
+            headers=headers,
+        )
+        assert compatible.status_code == 200
+        assert compatible.json()["published_version_id"] == third_version_id
+
+        wrong_agent = client.post(
+            "/v1/threads",
+            headers=headers,
+            json={
+                "agent_id": "agt_starter",
+                "agent_version_id": "av_operations_1",
+                "context": {},
+            },
+        )
+        assert wrong_agent.status_code == 422
+        assert "does not belong" in wrong_agent.json()["detail"]
+
+        hidden_version = client.get(
+            f"/v1/agents/agt_operations/versions/{first_version_id}",
+            headers=headers,
+        )
+        assert hidden_version.status_code == 404
 
 
 def test_web_search_tool_is_registered_only_when_searxng_is_configured() -> None:
@@ -645,20 +750,53 @@ def test_embed_session_remains_pinned_to_published_agent_version() -> None:
         agent = client.get("/v1/agents/agt_operations", headers=operator).json()
         definition = agent["definition"]
         definition["instructions"] = "A newer published instruction set."
-        assert (
-            client.post(
-                "/v1/agents/agt_operations/versions",
-                headers=operator,
-                json={"definition": definition},
-            ).status_code
-            == 201
+        draft = client.post(
+            "/v1/agents/agt_operations/versions",
+            headers=operator,
+            json={"definition": definition},
         )
+        assert draft.status_code == 201
+        draft_version = draft.json()["current_version_id"]
+        assert draft.json()["published_version_id"] == original_version
+
+        before_publish = client.post(
+            "/v1/embed/sessions",
+            headers=operator,
+            json={"agent_id": "agt_operations", "origin": "http://localhost:3000"},
+        )
+        assert before_publish.status_code == 201
+        assert before_publish.json()["agent_version_id"] == original_version
+
+        before_publish_embed = {
+            "Authorization": f"Bearer {before_publish.json()['token']}",
+            "Origin": "http://localhost:3000",
+        }
+        mismatch = client.post(
+            "/v1/threads",
+            headers=before_publish_embed,
+            json={
+                "agent_id": "agt_operations",
+                "agent_version_id": draft_version,
+                "context": {},
+            },
+        )
+        assert mismatch.status_code == 403
+
         assert (
             client.post(
-                "/v1/agents/agt_operations/publish", headers=operator
+                f"/v1/agents/agt_operations/versions/{draft_version}/publish",
+                headers=operator,
             ).status_code
             == 200
         )
+
+        after_publish = client.post(
+            "/v1/embed/sessions",
+            headers=operator,
+            json={"agent_id": "agt_operations", "origin": "http://localhost:3000"},
+        )
+        assert after_publish.status_code == 201
+        assert after_publish.json()["agent_version_id"] == draft_version
 
         embed = {
             "Authorization": f"Bearer {session['token']}",
@@ -669,6 +807,7 @@ def test_embed_session_remains_pinned_to_published_agent_version() -> None:
             headers=embed,
             json={"agent_id": "agt_operations", "context": {}},
         ).json()
+        assert thread["agent_version_id"] == original_version
         run = client.post(
             f"/v1/threads/{thread['id']}/runs",
             headers=embed,

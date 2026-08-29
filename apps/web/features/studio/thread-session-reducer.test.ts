@@ -15,6 +15,7 @@ const detail: ThreadDetail = {
     id: "thr_1",
     workspace_id: "ws_1",
     agent_id: "agt_1",
+    agent_version_id: "av_1",
     title: "Persistent thread",
     context: {},
     created_at: "2026-08-29T00:00:00Z",

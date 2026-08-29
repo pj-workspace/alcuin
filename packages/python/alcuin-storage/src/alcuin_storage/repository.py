@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from collections.abc import Mapping
@@ -107,6 +108,12 @@ class SqlRepository:
         return dict(row)
 
     @staticmethod
+    def _definition_snapshot(definition: AgentDefinition) -> tuple[str, str]:
+        serialized = definition.model_dump_json()
+        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        return serialized, digest
+
+    @staticmethod
     def _agent(
         row: Mapping[str, Any], definition: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -151,6 +158,7 @@ class SqlRepository:
             }
         )
         created_at = utc_now()
+        definition_json, definition_sha256 = self._definition_snapshot(definition)
         with self.lock, self.connection:
             self.connection.execute(
                 """INSERT INTO workspaces(id, name, created_at) VALUES (?, ?, ?)
@@ -159,8 +167,9 @@ class SqlRepository:
             )
             self.connection.execute(
                 """INSERT INTO agents
-                (id, workspace_id, slug, name, description, status, current_version_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, workspace_id, slug, name, description, status, current_version_id,
+                 published_version_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT DO NOTHING""",
                 (
                     "agt_starter",
@@ -170,20 +179,25 @@ class SqlRepository:
                     definition.identity.description,
                     "published",
                     "av_starter_1",
+                    "av_starter_1",
+                    created_at,
                     created_at,
                 ),
             )
             self.connection.execute(
                 """INSERT INTO agent_versions
-                (id, workspace_id, agent_id, version, definition_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (id, workspace_id, agent_id, version, definition_json, definition_sha256,
+                 created_at, published_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT DO NOTHING""",
                 (
                     "av_starter_1",
                     "ws_demo",
                     "agt_starter",
                     1,
-                    definition.model_dump_json(),
+                    definition_json,
+                    definition_sha256,
+                    created_at,
                     created_at,
                 ),
             )
@@ -233,14 +247,37 @@ class SqlRepository:
         result["definition"] = json.loads(result.pop("definition_json"))
         return result
 
+    def list_agent_versions(
+        self,
+        workspace_id: str,
+        agent_id: str,
+    ) -> list[dict[str, Any]]:
+        rows = self._all(
+            """SELECT * FROM agent_versions
+            WHERE workspace_id = ? AND agent_id = ? ORDER BY version DESC""",
+            (workspace_id, agent_id),
+        )
+        versions: list[dict[str, Any]] = []
+        for row in rows:
+            materialized = dict(row)
+            materialized["definition"] = json.loads(
+                materialized.pop("definition_json")
+            )
+            versions.append(materialized)
+        return versions
+
     def create_agent(self, workspace_id: str, payload: AgentCreate) -> dict[str, Any]:
         agent_id, version_id, created_at = new_id("agt"), new_id("av"), utc_now()
+        definition_json, definition_sha256 = self._definition_snapshot(
+            payload.definition
+        )
         try:
             with self.lock, self.connection:
                 self.connection.execute(
                     """INSERT INTO agents
-                    (id, workspace_id, slug, name, description, status, current_version_id, created_at)
-                    VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)""",
+                    (id, workspace_id, slug, name, description, status, current_version_id,
+                     published_version_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 'draft', ?, NULL, ?, ?)""",
                     (
                         agent_id,
                         workspace_id,
@@ -249,17 +286,20 @@ class SqlRepository:
                         payload.definition.identity.description,
                         version_id,
                         created_at,
+                        created_at,
                     ),
                 )
                 self.connection.execute(
                     """INSERT INTO agent_versions
-                    (id, workspace_id, agent_id, version, definition_json, created_at)
-                    VALUES (?, ?, ?, 1, ?, ?)""",
+                    (id, workspace_id, agent_id, version, definition_json, definition_sha256,
+                     created_at, published_at)
+                    VALUES (?, ?, ?, 1, ?, ?, ?, NULL)""",
                     (
                         version_id,
                         workspace_id,
                         agent_id,
-                        payload.definition.model_dump_json(),
+                        definition_json,
+                        definition_sha256,
                         created_at,
                     ),
                 )
@@ -277,36 +317,47 @@ class SqlRepository:
     def create_agent_version(
         self, workspace_id: str, agent_id: str, definition: AgentDefinition
     ) -> dict[str, Any] | None:
-        agent = self.get_agent(workspace_id, agent_id)
-        if not agent:
-            return None
-        row = self._one(
-            "SELECT COALESCE(MAX(version), 0) AS value FROM agent_versions WHERE agent_id = ?",
-            (agent_id,),
-        )
-        version = int(row["value"]) + 1
         version_id = new_id("av")
+        created_at = utc_now()
+        definition_json, definition_sha256 = self._definition_snapshot(definition)
         with self.lock, self.connection:
+            agent = self._one(
+                """SELECT id FROM agents
+                WHERE workspace_id = ? AND id = ? FOR UPDATE""",
+                (workspace_id, agent_id),
+            )
+            if agent is None:
+                return None
+            row = self._one(
+                """SELECT COALESCE(MAX(version), 0) AS value FROM agent_versions
+                WHERE workspace_id = ? AND agent_id = ?""",
+                (workspace_id, agent_id),
+            )
+            version = int(row["value"]) + 1 if row else 1
             self.connection.execute(
                 """INSERT INTO agent_versions
-                (id, workspace_id, agent_id, version, definition_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)""",
+                (id, workspace_id, agent_id, version, definition_json, definition_sha256,
+                 created_at, published_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)""",
                 (
                     version_id,
                     workspace_id,
                     agent_id,
                     version,
-                    definition.model_dump_json(),
-                    utc_now(),
+                    definition_json,
+                    definition_sha256,
+                    created_at,
                 ),
             )
             self.connection.execute(
-                """UPDATE agents SET current_version_id = ?, status = 'draft', name = ?, description = ?
+                """UPDATE agents
+                SET current_version_id = ?, name = ?, description = ?, updated_at = ?
                 WHERE id = ? AND workspace_id = ?""",
                 (
                     version_id,
                     definition.identity.name,
                     definition.identity.description,
+                    created_at,
                     agent_id,
                     workspace_id,
                 ),
@@ -314,27 +365,113 @@ class SqlRepository:
         return self.get_agent(workspace_id, agent_id)
 
     def publish_agent(self, workspace_id: str, agent_id: str) -> dict[str, Any] | None:
+        """Compatibility publish that snapshots the locked current version exactly once."""
         with self.lock, self.connection:
-            cursor = self.connection.execute(
-                "UPDATE agents SET status = 'published' WHERE id = ? AND workspace_id = ?",
-                (agent_id, workspace_id),
+            agent = self._one(
+                """SELECT current_version_id FROM agents
+                WHERE workspace_id = ? AND id = ? FOR UPDATE""",
+                (workspace_id, agent_id),
             )
-        return self.get_agent(workspace_id, agent_id) if cursor.rowcount else None
+            if agent is None or not agent.get("current_version_id"):
+                return None
+            self._publish_agent_version_locked(
+                workspace_id,
+                agent_id,
+                str(agent["current_version_id"]),
+                utc_now(),
+            )
+        return self.get_agent(workspace_id, agent_id)
+
+    def _publish_agent_version_locked(
+        self,
+        workspace_id: str,
+        agent_id: str,
+        version_id: str,
+        published_at: str,
+    ) -> None:
+        version = self._one(
+            """SELECT id FROM agent_versions
+            WHERE workspace_id = ? AND agent_id = ? AND id = ?""",
+            (workspace_id, agent_id, version_id),
+        )
+        if version is None:
+            raise RepositoryConflict(
+                "Agent version does not belong to this Agent and Workspace"
+            )
+        self.connection.execute(
+            """UPDATE agent_versions SET published_at = COALESCE(published_at, ?)
+            WHERE workspace_id = ? AND agent_id = ? AND id = ?""",
+            (published_at, workspace_id, agent_id, version_id),
+        )
+        self.connection.execute(
+            """UPDATE agents
+            SET status = 'published', published_version_id = ?, updated_at = ?
+            WHERE workspace_id = ? AND id = ?""",
+            (version_id, published_at, workspace_id, agent_id),
+        )
+
+    def publish_agent_version(
+        self,
+        workspace_id: str,
+        agent_id: str,
+        version_id: str,
+    ) -> dict[str, Any] | None:
+        published_at = utc_now()
+        with self.lock, self.connection:
+            agent = self._one(
+                """SELECT id FROM agents
+                WHERE workspace_id = ? AND id = ? FOR UPDATE""",
+                (workspace_id, agent_id),
+            )
+            if agent is None:
+                return None
+            self._publish_agent_version_locked(
+                workspace_id,
+                agent_id,
+                version_id,
+                published_at,
+            )
+        return self.get_agent(workspace_id, agent_id)
 
     def create_thread(
-        self, workspace_id: str, agent_id: str, title: str, context: dict[str, Any]
+        self,
+        workspace_id: str,
+        agent_id: str,
+        title: str,
+        context: dict[str, Any],
+        *,
+        agent_version_id: str | None = None,
     ) -> dict[str, Any]:
         thread_id = new_id("thr")
         created_at = utc_now()
         with self.lock, self.connection:
+            agent = self._one(
+                """SELECT current_version_id FROM agents
+                WHERE workspace_id = ? AND id = ? FOR UPDATE""",
+                (workspace_id, agent_id),
+            )
+            if agent is None:
+                raise RepositoryConflict("Agent does not exist in this Workspace")
+            selected_version_id = agent_version_id or agent["current_version_id"]
+            version = self._one(
+                """SELECT id FROM agent_versions
+                WHERE workspace_id = ? AND agent_id = ? AND id = ?""",
+                (workspace_id, agent_id, selected_version_id),
+            )
+            if version is None:
+                raise RepositoryConflict(
+                    "Agent version does not belong to this Agent and Workspace"
+                )
             self.connection.execute(
                 """INSERT INTO threads
-                (id, workspace_id, agent_id, title, context_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (id, workspace_id, agent_id, agent_version_id, title, context_json,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     thread_id,
                     workspace_id,
                     agent_id,
+                    selected_version_id,
                     title,
                     self._json(context),
                     created_at,
@@ -387,20 +524,15 @@ class SqlRepository:
             raise ValueError("estimated_tokens cannot be negative")
         with self.lock, self.connection:
             thread = self._one(
-                """SELECT id, agent_id FROM threads
+                """SELECT id, agent_id, agent_version_id FROM threads
                 WHERE workspace_id = ? AND id = ? FOR UPDATE""",
                 (workspace_id, thread_id),
             )
             if thread is None:
                 raise RepositoryConflict("Thread does not exist in this Workspace")
-            version = self._one(
-                """SELECT id FROM agent_versions
-                WHERE workspace_id = ? AND id = ? AND agent_id = ?""",
-                (workspace_id, agent_version_id, thread["agent_id"]),
-            )
-            if version is None:
+            if agent_version_id != thread["agent_version_id"]:
                 raise RepositoryConflict(
-                    "Agent version does not belong to this Thread and Workspace"
+                    "Run Agent version must match the immutable Thread version"
                 )
             active = self._one(
                 """SELECT id FROM runs WHERE workspace_id = ? AND thread_id = ?
