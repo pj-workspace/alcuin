@@ -40,6 +40,72 @@ class SqlRepository:
     def _json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
+    @classmethod
+    def _validate_persisted_parts(cls, parts: list[dict[str, Any]]) -> None:
+        """Persist only resource references; inline data URLs belong to the active request."""
+        if not isinstance(parts, list) or not all(isinstance(part, dict) for part in parts):
+            raise ValueError("message parts must be a list of objects")
+        if not parts:
+            raise ValueError("a persisted conversation message requires at least one part")
+
+        def contains_inline_data(value: Any) -> bool:
+            if isinstance(value, Mapping):
+                return any(
+                    str(key).casefold() == "data_url" or contains_inline_data(item)
+                    for key, item in value.items()
+                )
+            if isinstance(value, (list, tuple)):
+                return any(contains_inline_data(item) for item in value)
+            return isinstance(value, str) and value.lstrip().casefold().startswith("data:")
+
+        if contains_inline_data(parts):
+            raise ValueError("inline data URLs cannot be persisted in conversation messages")
+
+    @staticmethod
+    def _decoded_json(value: Any) -> Any:
+        return json.loads(value) if isinstance(value, str) else value
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Store a conservative tokenizer-independent estimate for pagination and budgets."""
+        if not text:
+            return 0
+        return max(1, (len(text.encode("utf-8")) + 2) // 3)
+
+    @classmethod
+    def _message(cls, row: Mapping[str, Any]) -> dict[str, Any]:
+        result = dict(row)
+        result["parts"] = cls._decoded_json(result.pop("parts_json"))
+        return result
+
+    @classmethod
+    def _compaction(cls, row: Mapping[str, Any]) -> dict[str, Any]:
+        result = dict(row)
+        result["source_message_ids"] = cls._decoded_json(
+            result.pop("source_message_ids_json")
+        )
+        return result
+
+    @classmethod
+    def _context_assembly(cls, row: Mapping[str, Any]) -> dict[str, Any]:
+        result = dict(row)
+        result["entries"] = cls._decoded_json(result.pop("entries_json"))
+        result["normalized_input"] = cls._decoded_json(
+            result.pop("normalized_input_json")
+        )
+        return result
+
+    @classmethod
+    def _thread(cls, row: Mapping[str, Any]) -> dict[str, Any]:
+        result = dict(row)
+        result["context"] = cls._decoded_json(result.pop("context_json"))
+        result["last_message_sequence"] = int(result["next_message_sequence"])
+        return result
+
+    @staticmethod
+    def _run(row: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(row)
+
     @staticmethod
     def _agent(
         row: Mapping[str, Any], definition: dict[str, Any] | None = None
@@ -259,74 +325,785 @@ class SqlRepository:
         self, workspace_id: str, agent_id: str, title: str, context: dict[str, Any]
     ) -> dict[str, Any]:
         thread_id = new_id("thr")
+        created_at = utc_now()
         with self.lock, self.connection:
             self.connection.execute(
-                """INSERT INTO threads(id, workspace_id, agent_id, title, context_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO threads
+                (id, workspace_id, agent_id, title, context_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
                     thread_id,
                     workspace_id,
                     agent_id,
                     title,
                     self._json(context),
-                    utc_now(),
+                    created_at,
+                    created_at,
                 ),
             )
         return self.get_thread(workspace_id, thread_id) or {}
 
     def get_thread(self, workspace_id: str, thread_id: str) -> dict[str, Any] | None:
         row = self._one(
-            "SELECT * FROM threads WHERE workspace_id = ? AND id = ?",
+            """SELECT t.*,
+            (SELECT c.id FROM thread_compactions c
+             WHERE c.workspace_id = t.workspace_id AND c.thread_id = t.id
+             ORDER BY c.through_sequence DESC LIMIT 1) AS active_compaction_id
+            FROM threads t WHERE t.workspace_id = ? AND t.id = ?""",
             (workspace_id, thread_id),
         )
-        if not row:
-            return None
-        result = dict(row)
-        result["context"] = json.loads(result.pop("context_json"))
-        return result
+        return self._thread(row) if row else None
 
     def list_threads(self, workspace_id: str) -> list[dict[str, Any]]:
         rows = self._all(
-            "SELECT * FROM threads WHERE workspace_id = ? ORDER BY created_at DESC",
+            """SELECT t.*,
+            (SELECT c.id FROM thread_compactions c
+             WHERE c.workspace_id = t.workspace_id AND c.thread_id = t.id
+             ORDER BY c.through_sequence DESC LIMIT 1) AS active_compaction_id
+            FROM threads t WHERE t.workspace_id = ? ORDER BY t.updated_at DESC""",
             (workspace_id,),
         )
-        result = []
-        for row in rows:
-            item = dict(row)
-            item["context"] = json.loads(item.pop("context_json"))
-            result.append(item)
-        return result
+        return [self._thread(row) for row in rows]
 
     def create_run(
-        self, workspace_id: str, thread_id: str, agent_version_id: str, prompt: str
+        self,
+        workspace_id: str,
+        thread_id: str,
+        agent_version_id: str,
+        prompt: str,
+        *,
+        message_parts: list[dict[str, Any]] | None = None,
+        estimated_tokens: int | None = None,
     ) -> dict[str, Any]:
-        run_id = new_id("run")
+        run_id, message_id, created_at = new_id("run"), new_id("msg"), utc_now()
+        parts = message_parts or ([{"type": "text", "text": prompt}] if prompt else [])
+        self._validate_persisted_parts(parts)
+        estimate = (
+            self._estimate_tokens(prompt)
+            if estimated_tokens is None
+            else estimated_tokens
+        )
+        if estimate < 0:
+            raise ValueError("estimated_tokens cannot be negative")
         with self.lock, self.connection:
+            thread = self._one(
+                """SELECT id, agent_id FROM threads
+                WHERE workspace_id = ? AND id = ? FOR UPDATE""",
+                (workspace_id, thread_id),
+            )
+            if thread is None:
+                raise RepositoryConflict("Thread does not exist in this Workspace")
+            version = self._one(
+                """SELECT id FROM agent_versions
+                WHERE workspace_id = ? AND id = ? AND agent_id = ?""",
+                (workspace_id, agent_version_id, thread["agent_id"]),
+            )
+            if version is None:
+                raise RepositoryConflict(
+                    "Agent version does not belong to this Thread and Workspace"
+                )
+            active = self._one(
+                """SELECT id FROM runs WHERE workspace_id = ? AND thread_id = ?
+                AND status IN ('queued', 'running', 'waiting_for_approval') LIMIT 1""",
+                (workspace_id, thread_id),
+            )
+            if active is not None:
+                raise RepositoryConflict("Thread already has an active Run")
+            sequence_row = self._one(
+                """UPDATE threads
+                SET next_message_sequence = next_message_sequence + 1, updated_at = ?
+                WHERE workspace_id = ? AND id = ?
+                RETURNING next_message_sequence AS value""",
+                (created_at, workspace_id, thread_id),
+            )
+            if sequence_row is None:
+                raise RepositoryConflict("Thread does not exist in this Workspace")
             self.connection.execute(
                 """INSERT INTO runs
                 (id, workspace_id, thread_id, agent_version_id, status, input, created_at)
                 VALUES (?, ?, ?, ?, 'queued', ?, ?)""",
-                (run_id, workspace_id, thread_id, agent_version_id, prompt, utc_now()),
+                (run_id, workspace_id, thread_id, agent_version_id, prompt, created_at),
+            )
+            self.connection.execute(
+                """INSERT INTO messages
+                (id, workspace_id, thread_id, run_id, agent_version_id, sequence, role,
+                 status, parts_json, estimated_tokens, created_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'user', 'completed', ?, ?, ?, ?)""",
+                (
+                    message_id,
+                    workspace_id,
+                    thread_id,
+                    run_id,
+                    agent_version_id,
+                    int(sequence_row["value"]),
+                    self._json(parts),
+                    estimate,
+                    created_at,
+                    created_at,
+                ),
             )
         return self.get_run(workspace_id, run_id) or {}
 
-    def get_run(self, workspace_id: str, run_id: str) -> dict[str, Any] | None:
+    def create_run_with_messages(
+        self,
+        workspace_id: str,
+        thread_id: str,
+        agent_version_id: str,
+        prompt: str,
+        parts: list[dict[str, Any]],
+        estimated_tokens: int,
+    ) -> dict[str, Any]:
+        """Explicit conversation-kernel entrypoint used by API composition."""
+        return self.create_run(
+            workspace_id,
+            thread_id,
+            agent_version_id,
+            prompt,
+            message_parts=parts,
+            estimated_tokens=estimated_tokens,
+        )
+
+    def list_messages(
+        self,
+        workspace_id: str,
+        thread_id: str,
+        *,
+        after: int = 0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        bounded_limit = min(max(limit, 1), 500)
+        rows = self._all(
+            """SELECT * FROM messages
+            WHERE workspace_id = ? AND thread_id = ? AND sequence > ?
+            ORDER BY sequence LIMIT ?""",
+            (workspace_id, thread_id, after, bounded_limit),
+        )
+        return [self._message(row) for row in rows]
+
+    def get_message(
+        self,
+        workspace_id: str,
+        message_id: str,
+    ) -> dict[str, Any] | None:
         row = self._one(
-            "SELECT * FROM runs WHERE workspace_id = ? AND id = ?",
+            "SELECT * FROM messages WHERE workspace_id = ? AND id = ?",
+            (workspace_id, message_id),
+        )
+        return self._message(row) if row else None
+
+    def complete_run_with_assistant_message(
+        self,
+        workspace_id: str,
+        run_id: str,
+        parts: list[dict[str, Any]],
+        *,
+        estimated_tokens: int,
+    ) -> dict[str, Any]:
+        return self.finalize_run_with_assistant_message(
+            workspace_id,
+            run_id,
+            "completed",
+            parts,
+            estimated_tokens=estimated_tokens,
+        )
+
+    def finalize_run_with_assistant_message(
+        self,
+        workspace_id: str,
+        run_id: str,
+        status: str,
+        parts: list[dict[str, Any]],
+        *,
+        estimated_tokens: int,
+    ) -> dict[str, Any]:
+        """Persist a completed response or safe failed partial exactly once."""
+        if status not in {"completed", "failed"}:
+            raise ValueError("Assistant message status must be completed or failed")
+        if estimated_tokens < 0:
+            raise ValueError("estimated_tokens cannot be negative")
+        self._validate_persisted_parts(parts)
+        completed_at = utc_now()
+        with self.lock, self.connection:
+            run = self._one(
+                """SELECT * FROM runs
+                WHERE workspace_id = ? AND id = ? FOR UPDATE""",
+                (workspace_id, run_id),
+            )
+            if run is None:
+                raise RepositoryConflict("Run does not exist in this Workspace")
+            existing = self._one(
+                """SELECT * FROM messages
+                WHERE workspace_id = ? AND run_id = ? AND role = 'assistant'""",
+                (workspace_id, run_id),
+            )
+            if existing is not None:
+                materialized = self._message(existing)
+                if materialized["status"] != status or materialized["parts"] != parts:
+                    raise RepositoryConflict(
+                        "Run already has a different immutable assistant message"
+                    )
+                return materialized
+            if run["status"] in {"completed", "failed", "cancelled"} and run[
+                "status"
+            ] != status:
+                raise RepositoryConflict(
+                    f"Cannot finalize a Run in terminal status {run['status']} as {status}"
+                )
+            sequence_row = self._one(
+                """UPDATE threads
+                SET next_message_sequence = next_message_sequence + 1, updated_at = ?
+                WHERE workspace_id = ? AND id = ?
+                RETURNING next_message_sequence AS value""",
+                (completed_at, workspace_id, run["thread_id"]),
+            )
+            if sequence_row is None:
+                raise RepositoryConflict("Run Thread does not exist in this Workspace")
+            message_id = new_id("msg")
+            self.connection.execute(
+                """INSERT INTO messages
+                (id, workspace_id, thread_id, run_id, agent_version_id, sequence, role,
+                 status, parts_json, estimated_tokens, created_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'assistant', ?, ?, ?, ?, ?)""",
+                (
+                    message_id,
+                    workspace_id,
+                    run["thread_id"],
+                    run_id,
+                    run["agent_version_id"],
+                    int(sequence_row["value"]),
+                    status,
+                    self._json(parts),
+                    estimated_tokens,
+                    completed_at,
+                    completed_at,
+                ),
+            )
+            self.connection.execute(
+                """UPDATE runs SET status = ?, completed_at = ?
+                WHERE workspace_id = ? AND id = ?""",
+                (status, completed_at, workspace_id, run_id),
+            )
+            inserted = self._one(
+                "SELECT * FROM messages WHERE workspace_id = ? AND id = ?",
+                (workspace_id, message_id),
+            )
+        return self._message(inserted) if inserted else {}
+
+    def finalize_assistant_message(
+        self,
+        workspace_id: str,
+        run_id: str,
+        status: str,
+        content: str,
+        estimated_tokens: int,
+    ) -> dict[str, Any]:
+        """Finalize visible content without exposing provider-specific message parts."""
+        return self.finalize_run_with_assistant_message(
+            workspace_id,
+            run_id,
+            status,
+            [{"type": "text", "text": content}],
+            estimated_tokens=estimated_tokens,
+        )
+
+    def create_thread_compaction(
+        self,
+        workspace_id: str,
+        thread_id: str,
+        *,
+        through_sequence: int,
+        summary: str,
+        source_message_ids: list[str],
+        source_digest: str,
+        estimated_source_tokens: int,
+        estimated_summary_tokens: int,
+        strategy: str,
+        created_by_run_id: str | None = None,
+        parent_id: str | None = None,
+    ) -> dict[str, Any]:
+        if through_sequence < 1 or not source_message_ids or not summary.strip():
+            raise ValueError("Compaction requires a source prefix and non-empty summary")
+        if estimated_source_tokens < 0 or estimated_summary_tokens < 0:
+            raise ValueError("Compaction token counts cannot be negative")
+        compaction_id, created_at = new_id("cmp"), utc_now()
+        try:
+            with self.lock, self.connection:
+                thread = self._one(
+                    """SELECT next_message_sequence FROM threads
+                    WHERE workspace_id = ? AND id = ? FOR UPDATE""",
+                    (workspace_id, thread_id),
+                )
+                if thread is None:
+                    raise RepositoryConflict("Thread does not exist in this Workspace")
+                if through_sequence > int(thread["next_message_sequence"]):
+                    raise RepositoryConflict("Compaction exceeds the Thread message surface")
+                rows = self._all(
+                    """SELECT id, sequence FROM messages
+                    WHERE workspace_id = ? AND thread_id = ? AND sequence <= ?
+                    ORDER BY sequence""",
+                    (workspace_id, thread_id, through_sequence),
+                )
+                actual_ids = [str(row["id"]) for row in rows]
+                if actual_ids != source_message_ids:
+                    raise RepositoryConflict(
+                        "Compaction sources must be the exact immutable Thread prefix"
+                    )
+                if parent_id:
+                    parent = self._one(
+                        """SELECT id FROM thread_compactions
+                        WHERE workspace_id = ? AND thread_id = ? AND id = ?""",
+                        (workspace_id, thread_id, parent_id),
+                    )
+                    if parent is None:
+                        raise RepositoryConflict(
+                            "Parent compaction does not belong to this Thread"
+                        )
+                if created_by_run_id:
+                    source_run = self._one(
+                        """SELECT id FROM runs
+                        WHERE workspace_id = ? AND thread_id = ? AND id = ?""",
+                        (workspace_id, thread_id, created_by_run_id),
+                    )
+                    if source_run is None:
+                        raise RepositoryConflict(
+                            "Compaction Run does not belong to this Thread"
+                        )
+                self.connection.execute(
+                    """INSERT INTO thread_compactions
+                    (id, workspace_id, thread_id, parent_id, through_sequence, summary,
+                     source_digest, source_message_ids_json, estimated_source_tokens,
+                     estimated_summary_tokens, strategy, created_by_run_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        compaction_id,
+                        workspace_id,
+                        thread_id,
+                        parent_id,
+                        through_sequence,
+                        summary.strip(),
+                        source_digest,
+                        self._json(source_message_ids),
+                        estimated_source_tokens,
+                        estimated_summary_tokens,
+                        strategy,
+                        created_by_run_id,
+                        created_at,
+                    ),
+                )
+        except RepositoryConflict:
+            raise
+        except Exception as exc:
+            if self._is_unique_violation(
+                exc,
+                postgres_constraint="thread_compactions_thread_sequence_key",
+            ):
+                existing = self._one(
+                    """SELECT * FROM thread_compactions
+                    WHERE workspace_id = ? AND thread_id = ? AND through_sequence = ?""",
+                    (workspace_id, thread_id, through_sequence),
+                )
+                if existing is not None:
+                    materialized = self._compaction(existing)
+                    expected = {
+                        "parent_id": parent_id,
+                        "summary": summary.strip(),
+                        "source_digest": source_digest,
+                        "source_message_ids": source_message_ids,
+                        "estimated_source_tokens": estimated_source_tokens,
+                        "estimated_summary_tokens": estimated_summary_tokens,
+                        "strategy": strategy,
+                        "created_by_run_id": created_by_run_id,
+                    }
+                    if any(materialized[key] != value for key, value in expected.items()):
+                        raise RepositoryConflict(
+                            "Thread prefix already has a different immutable compaction"
+                        ) from exc
+                    return materialized
+            raise
+        created = self._one(
+            "SELECT * FROM thread_compactions WHERE workspace_id = ? AND id = ?",
+            (workspace_id, compaction_id),
+        )
+        return self._compaction(created) if created else {}
+
+    def latest_thread_compaction(
+        self,
+        workspace_id: str,
+        thread_id: str,
+    ) -> dict[str, Any] | None:
+        row = self._one(
+            """SELECT * FROM thread_compactions
+            WHERE workspace_id = ? AND thread_id = ?
+            ORDER BY through_sequence DESC LIMIT 1""",
+            (workspace_id, thread_id),
+        )
+        return self._compaction(row) if row else None
+
+    def get_active_compaction(
+        self,
+        workspace_id: str,
+        thread_id: str,
+    ) -> dict[str, Any] | None:
+        return self.latest_thread_compaction(workspace_id, thread_id)
+
+    def create_compaction(
+        self,
+        workspace_id: str,
+        thread_id: str,
+        **payload: Any,
+    ) -> dict[str, Any]:
+        return self.create_thread_compaction(workspace_id, thread_id, **payload)
+
+    def save_run_context_assembly(
+        self,
+        workspace_id: str,
+        run_id: str,
+        *,
+        entries: list[dict[str, Any]],
+        normalized_input: dict[str, Any],
+        estimated_input_tokens: int,
+        effective_budget_tokens: int,
+        compaction_trigger_tokens: int,
+        message_sequence_through: int,
+        estimator_revision: str,
+        active_compaction_id: str | None = None,
+    ) -> dict[str, Any]:
+        if (
+            estimated_input_tokens < 0
+            or effective_budget_tokens < 1
+            or compaction_trigger_tokens < 1
+            or message_sequence_through < 1
+        ):
+            raise ValueError("Context assembly token and sequence values are invalid")
+        self._validate_persisted_parts([{"type": "context", "value": normalized_input}])
+        with self.lock, self.connection:
+            run = self._one(
+                """SELECT * FROM runs
+                WHERE workspace_id = ? AND id = ? FOR UPDATE""",
+                (workspace_id, run_id),
+            )
+            if run is None:
+                raise RepositoryConflict("Run does not exist in this Workspace")
+            input_message = self._one(
+                """SELECT sequence FROM messages
+                WHERE workspace_id = ? AND run_id = ? AND role = 'user'""",
+                (workspace_id, run_id),
+            )
+            if (
+                input_message is None
+                or int(input_message["sequence"]) != message_sequence_through
+            ):
+                raise RepositoryConflict(
+                    "Context assembly must end at this Run's immutable user message"
+                )
+            existing = self._one(
+                """SELECT * FROM run_context_assemblies
+                WHERE workspace_id = ? AND run_id = ?""",
+                (workspace_id, run_id),
+            )
+            if existing is not None:
+                materialized = self._context_assembly(existing)
+                expected = {
+                    "entries": entries,
+                    "normalized_input": normalized_input,
+                    "estimated_input_tokens": estimated_input_tokens,
+                    "effective_budget_tokens": effective_budget_tokens,
+                    "compaction_trigger_tokens": compaction_trigger_tokens,
+                    "message_sequence_through": message_sequence_through,
+                    "active_compaction_id": active_compaction_id,
+                    "estimator_revision": estimator_revision,
+                }
+                if any(materialized[key] != value for key, value in expected.items()):
+                    raise RepositoryConflict(
+                        "Run already has a different immutable context assembly"
+                    )
+                return materialized
+            if active_compaction_id:
+                compaction = self._one(
+                    """SELECT id FROM thread_compactions
+                    WHERE workspace_id = ? AND thread_id = ? AND id = ?""",
+                    (workspace_id, run["thread_id"], active_compaction_id),
+                )
+                if compaction is None:
+                    raise RepositoryConflict(
+                        "Active compaction does not belong to this Run Thread"
+                    )
+                compaction_surface = self._one(
+                    """SELECT through_sequence FROM thread_compactions
+                    WHERE workspace_id = ? AND thread_id = ? AND id = ?""",
+                    (workspace_id, run["thread_id"], active_compaction_id),
+                )
+                if compaction_surface and int(
+                    compaction_surface["through_sequence"]
+                ) >= message_sequence_through:
+                    raise RepositoryConflict(
+                        "Active compaction cannot cover the current Run message"
+                    )
+            assembly_id, created_at = new_id("ctx"), utc_now()
+            self.connection.execute(
+                """INSERT INTO run_context_assemblies
+                (id, workspace_id, thread_id, run_id, agent_version_id, entries_json,
+                 normalized_input_json, estimated_input_tokens, effective_budget_tokens,
+                 compaction_trigger_tokens, message_sequence_through, active_compaction_id,
+                 estimator_revision, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    assembly_id,
+                    workspace_id,
+                    run["thread_id"],
+                    run_id,
+                    run["agent_version_id"],
+                    self._json(entries),
+                    self._json(normalized_input),
+                    estimated_input_tokens,
+                    effective_budget_tokens,
+                    compaction_trigger_tokens,
+                    message_sequence_through,
+                    active_compaction_id,
+                    estimator_revision,
+                    created_at,
+                ),
+            )
+            inserted = self._one(
+                """SELECT * FROM run_context_assemblies
+                WHERE workspace_id = ? AND id = ?""",
+                (workspace_id, assembly_id),
+            )
+        return self._context_assembly(inserted) if inserted else {}
+
+    def get_run_context_assembly(
+        self,
+        workspace_id: str,
+        run_id: str,
+    ) -> dict[str, Any] | None:
+        row = self._one(
+            """SELECT * FROM run_context_assemblies
+            WHERE workspace_id = ? AND run_id = ?""",
             (workspace_id, run_id),
         )
-        return dict(row) if row else None
+        return self._context_assembly(row) if row else None
+
+    def create_context_assembly(
+        self,
+        workspace_id: str,
+        run_id: str,
+        **payload: Any,
+    ) -> dict[str, Any]:
+        return self.save_run_context_assembly(workspace_id, run_id, **payload)
+
+    def get_context_assembly(
+        self,
+        workspace_id: str,
+        run_id: str,
+    ) -> dict[str, Any] | None:
+        return self.get_run_context_assembly(workspace_id, run_id)
+
+    def get_run(self, workspace_id: str, run_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            """SELECT r.*,
+            (SELECT m.id FROM messages m
+             WHERE m.workspace_id = r.workspace_id AND m.run_id = r.id AND m.role = 'user'
+             LIMIT 1) AS input_message_id,
+            (SELECT m.id FROM messages m
+             WHERE m.workspace_id = r.workspace_id AND m.run_id = r.id AND m.role = 'assistant'
+             LIMIT 1) AS output_message_id,
+            (SELECT c.id FROM run_context_assemblies c
+             WHERE c.workspace_id = r.workspace_id AND c.run_id = r.id
+             LIMIT 1) AS context_assembly_id
+            FROM runs r WHERE r.workspace_id = ? AND r.id = ?""",
+            (workspace_id, run_id),
+        )
+        return self._run(row) if row else None
 
     def list_runs(self, workspace_id: str, limit: int = 30) -> list[dict[str, Any]]:
         rows = self._all(
-            """SELECT r.*, t.title, a.name AS agent_name
+            """SELECT r.*, t.title, a.name AS agent_name,
+            (SELECT m.id FROM messages m
+             WHERE m.workspace_id = r.workspace_id AND m.run_id = r.id AND m.role = 'user'
+             LIMIT 1) AS input_message_id,
+            (SELECT m.id FROM messages m
+             WHERE m.workspace_id = r.workspace_id AND m.run_id = r.id AND m.role = 'assistant'
+             LIMIT 1) AS output_message_id,
+            (SELECT c.id FROM run_context_assemblies c
+             WHERE c.workspace_id = r.workspace_id AND c.run_id = r.id
+             LIMIT 1) AS context_assembly_id
             FROM runs r JOIN threads t ON t.id = r.thread_id
             JOIN agent_versions v ON v.id = r.agent_version_id
             JOIN agents a ON a.id = v.agent_id
             WHERE r.workspace_id = ? ORDER BY r.created_at DESC LIMIT ?""",
             (workspace_id, limit),
         )
-        return [dict(row) for row in rows]
+        return [self._run(row) for row in rows]
+
+    def list_thread_runs(
+        self,
+        workspace_id: str,
+        thread_id: str,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        rows = self._all(
+            """SELECT r.*, t.title, a.name AS agent_name,
+            (SELECT m.id FROM messages m
+             WHERE m.workspace_id = r.workspace_id AND m.run_id = r.id AND m.role = 'user'
+             LIMIT 1) AS input_message_id,
+            (SELECT m.id FROM messages m
+             WHERE m.workspace_id = r.workspace_id AND m.run_id = r.id AND m.role = 'assistant'
+             LIMIT 1) AS output_message_id,
+            (SELECT c.id FROM run_context_assemblies c
+             WHERE c.workspace_id = r.workspace_id AND c.run_id = r.id
+             LIMIT 1) AS context_assembly_id
+            FROM runs r JOIN threads t
+              ON t.workspace_id = r.workspace_id AND t.id = r.thread_id
+            JOIN agent_versions v
+              ON v.workspace_id = r.workspace_id AND v.id = r.agent_version_id
+            JOIN agents a
+              ON a.workspace_id = r.workspace_id AND a.id = v.agent_id
+            WHERE r.workspace_id = ? AND r.thread_id = ?
+            ORDER BY r.created_at DESC LIMIT ?""",
+            (workspace_id, thread_id, limit),
+        )
+        return [self._run(row) for row in rows]
+
+    def recover_interrupted_runs(self) -> list[dict[str, Any]]:
+        """Fail Runs whose in-memory worker disappeared during an API restart.
+
+        Recovery is intentionally single-instance and does not retry provider or tool work. The
+        complete recovery set is committed in one transaction so a Run cannot expose a failed
+        status without its optional visible assistant message and terminal event.
+        """
+        recovered_at = utc_now()
+        recovered: list[dict[str, Any]] = []
+        failure_message = (
+            "The API restarted before this Run finished. It was not retried automatically. "
+            "Any external tool result from the interrupted Run may require verification."
+        )
+        with self.lock, self.connection:
+            interrupted = self._all(
+                """SELECT * FROM runs
+                WHERE status IN ('queued', 'running')
+                ORDER BY created_at, id FOR UPDATE"""
+            )
+            for run in interrupted:
+                workspace_id = str(run["workspace_id"])
+                run_id = str(run["id"])
+                thread_id = str(run["thread_id"])
+                delta_rows = self._all(
+                    """SELECT payload_json FROM events
+                    WHERE workspace_id = ? AND run_id = ? AND type = 'message.delta'
+                    ORDER BY sequence""",
+                    (workspace_id, run_id),
+                )
+                visible_fragments: list[str] = []
+                for delta_row in delta_rows:
+                    payload = self._decoded_json(delta_row["payload_json"])
+                    delta = payload.get("delta") if isinstance(payload, Mapping) else None
+                    if isinstance(delta, str):
+                        visible_fragments.append(delta)
+                visible_content = "".join(visible_fragments)
+
+                output_message_id: str | None = None
+                if visible_content.strip():
+                    parts = [{"type": "text", "text": visible_content}]
+                    self._validate_persisted_parts(parts)
+                    sequence_row = self._one(
+                        """UPDATE threads
+                        SET next_message_sequence = next_message_sequence + 1, updated_at = ?
+                        WHERE workspace_id = ? AND id = ?
+                        RETURNING next_message_sequence AS value""",
+                        (recovered_at, workspace_id, thread_id),
+                    )
+                    if sequence_row is None:
+                        raise RepositoryConflict(
+                            "Interrupted Run Thread does not exist in its Workspace"
+                        )
+                    output_message_id = new_id("msg")
+                    self.connection.execute(
+                        """INSERT INTO messages
+                        (id, workspace_id, thread_id, run_id, agent_version_id, sequence, role,
+                         status, parts_json, estimated_tokens, created_at, completed_at)
+                        VALUES (?, ?, ?, ?, ?, ?, 'assistant', 'failed', ?, ?, ?, ?)""",
+                        (
+                            output_message_id,
+                            workspace_id,
+                            thread_id,
+                            run_id,
+                            run["agent_version_id"],
+                            int(sequence_row["value"]),
+                            self._json(parts),
+                            self._estimate_tokens(visible_content),
+                            recovered_at,
+                            recovered_at,
+                        ),
+                    )
+
+                existing_failure = self._one(
+                    """SELECT id FROM events
+                    WHERE workspace_id = ? AND run_id = ? AND type = 'run.failed'
+                    ORDER BY sequence LIMIT 1""",
+                    (workspace_id, run_id),
+                )
+                terminal_event_id: str
+                if existing_failure is None:
+                    sequence_row = self._one(
+                        """UPDATE runs
+                        SET status = 'failed', completed_at = ?,
+                            next_event_sequence = next_event_sequence + 1
+                        WHERE workspace_id = ? AND id = ?
+                        RETURNING next_event_sequence AS value""",
+                        (recovered_at, workspace_id, run_id),
+                    )
+                    if sequence_row is None:
+                        raise RepositoryConflict(
+                            "Interrupted Run disappeared during startup recovery"
+                        )
+                    terminal_event_id = new_id("evt")
+                    context = self._one(
+                        """SELECT id FROM run_context_assemblies
+                        WHERE workspace_id = ? AND run_id = ?""",
+                        (workspace_id, run_id),
+                    )
+                    payload = {
+                        "code": "runtime_interrupted",
+                        "message": failure_message,
+                        "automatic_retry": False,
+                        "external_tool_results": "verification_required",
+                        "output_message_id": output_message_id,
+                        "context_assembly_id": context["id"] if context else None,
+                    }
+                    self.connection.execute(
+                        """INSERT INTO events
+                        (id, workspace_id, run_id, sequence, type, payload_json, created_at)
+                        VALUES (?, ?, ?, ?, 'run.failed', ?, ?)""",
+                        (
+                            terminal_event_id,
+                            workspace_id,
+                            run_id,
+                            int(sequence_row["value"]),
+                            self._json(payload),
+                            recovered_at,
+                        ),
+                    )
+                else:
+                    terminal_event_id = str(existing_failure["id"])
+                    self.connection.execute(
+                        """UPDATE runs SET status = 'failed', completed_at = ?
+                        WHERE workspace_id = ? AND id = ?""",
+                        (recovered_at, workspace_id, run_id),
+                    )
+
+                recovered.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "thread_id": thread_id,
+                        "run_id": run_id,
+                        "status": "failed",
+                        "output_message_id": output_message_id,
+                        "terminal_event_id": terminal_event_id,
+                    }
+                )
+        return recovered
 
     def set_run_status(self, workspace_id: str, run_id: str, status: str) -> None:
         terminal = status in {"completed", "failed", "cancelled"}

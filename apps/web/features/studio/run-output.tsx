@@ -30,7 +30,7 @@ type ToolTrace = {
 type TraceStep = ReasoningTrace | ToolTrace;
 type Presence = { label: string; state: OrbState };
 
-const ORB_FADE_MS = 500;
+const ORB_FADE_MS = 180;
 
 export function RunOutput({
   events,
@@ -150,6 +150,7 @@ function PresenceOrb({ state, active }: { state: OrbState; active: boolean }) {
   const [shown, setShown] = useState(state);
   const [leaving, setLeaving] = useState<OrbState | null>(null);
   const [theme, setTheme] = useState<OrbTheme>("light");
+  const [reducedMotion, setReducedMotion] = useState(false);
   const shownRef = useRef(state);
 
   useEffect(() => {
@@ -162,10 +163,18 @@ function PresenceOrb({ state, active }: { state: OrbState; active: boolean }) {
   }, []);
 
   useEffect(() => {
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const sync = () => setReducedMotion(query.matches);
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
     if (state === shownRef.current) return;
     const previous = shownRef.current;
     shownRef.current = state;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    if (reducedMotion) {
       setLeaving(null);
       setShown(state);
       return;
@@ -174,9 +183,12 @@ function PresenceOrb({ state, active }: { state: OrbState; active: boolean }) {
     setShown(state);
     const timer = window.setTimeout(() => setLeaving(null), ORB_FADE_MS);
     return () => window.clearTimeout(timer);
-  }, [state]);
+  }, [reducedMotion, state]);
 
   const speed = active ? orbSpeed(state) : 0.72;
+  if (reducedMotion) {
+    return <span className={clsx("presence-orb", "presence-orb-static", `state-${state}`)} aria-hidden />;
+  }
   return (
     <span className="presence-orb" aria-hidden>
       {leaving && (

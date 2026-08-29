@@ -2,6 +2,10 @@ export const AGENT_SCHEMA_VERSION = "2026-08-28" as const;
 
 export const EXECUTION_EVENT_TYPES = [
   "run.started",
+  "context.compaction.started",
+  "context.compaction.completed",
+  "context.compaction.failed",
+  "context.assembled",
   "reasoning.delta",
   "message.delta",
   "tool.requested",

@@ -2,7 +2,7 @@
 
 > Intelligence, composed.
 
-Alcuin is an extensible foundation for building, operating, and evolving AI agents. It brings models, knowledge, tools, policies, and workflows into one coherent system without locking applications to a single provider or domain.
+Alcuin is an extensible Agent Foundation for building, operating, and evolving domain-neutral AI agents. Its current product center is Studio: a persistent multi-turn workspace backed by versioned Agent definitions, a provider-neutral Context Kernel, governed knowledge and tools, approvals, and auditable execution events.
 
 The project is named after Alcuin of York, a scholar and organizer of knowledge whose work helped shape the Carolingian Renaissance.
 
@@ -10,7 +10,7 @@ The project is named after Alcuin of York, a scholar and organizer of knowledge 
 
 Most agent applications begin as a prompt connected to a few tools. As they grow, model routing, retrieval, credentials, human approval, execution state, observability, and permissions become scattered across the codebase.
 
-Alcuin treats those concerns as first-class platform capabilities:
+Alcuin aims to treat those concerns as first-class platform capabilities:
 
 - **Composable** — assemble an agent from a model, instructions, tools, knowledge, memory, and runtime policy.
 - **Extensible** — add capabilities through built-in extensions, MCP servers, and pluggable runtimes.
@@ -19,40 +19,34 @@ Alcuin treats those concerns as first-class platform capabilities:
 - **Human-guided** — support approvals, structured questions, secure credential collection, and resumable runs.
 - **Observable** — preserve streaming events, tool traces, citations, usage, failures, and execution history.
 
-## Product Surface
+## Agent Foundation
 
-Alcuin is planned as a full-stack agent workspace rather than a thin framework:
+The current pre-alpha product path is a full-stack, Studio-centered Agent workspace rather than a thin framework:
 
 ```text
-Experience
-  Chat · Agent Studio · Knowledge · Tools & MCP · Runs
+Studio Experience
+  Persistent conversations · Context inspection · Run trace · Agent Builder
 
-Control Plane
-  Agent definitions · Versions · Access · Policies · Secrets
+Agent Foundation
+  Agent definitions · Versions · Threads · Messages · Context assembly · Run events
 
-Runtime
-  ReAct · Workflows · Multi-agent orchestration · Streaming · Checkpoints
+Governed Capabilities
+  Model adapters · Tools · MCP/OpenAPI · Knowledge · Web search · Approvals
 
-Integrations
-  Model providers · Built-in tools · MCP servers · RAG · External APIs
-
-Infrastructure
-  PostgreSQL · Redis · Qdrant · Object storage
+Implemented Infrastructure
+  PostgreSQL · Qdrant · SearXNG
 ```
 
-## Planned Capabilities
+The existing `@alcuin/embed` Web Component and Embed Session API remain in the repository as a frozen compatibility layer. Third-party quick embedding is not the current product route and does not drive new foundation contracts.
 
-- Versioned agent definitions and lifecycle management
-- Per-agent model, prompt, tool, knowledge, and runtime configuration
-- Python extension manifests and dynamic tool discovery
-- MCP over Streamable HTTP, SSE, and local stdio
-- Multi-provider chat and embedding model registry
-- Knowledge ingestion, vector retrieval, reranking, and citations
-- Streaming runs with tool-call and reasoning events
-- Human-in-the-loop questions, forms, approvals, and resumable execution
-- Workspace isolation, role-based access, and scoped credentials
-- Run history, token usage, cost accounting, and observability hooks
-- ReAct as the default runtime, with workflow and multi-agent runtimes as extensions
+## Roadmap, Not Current Capability
+
+- Active Skill installation, resolution, and context injection. Skill-shaped manifest fields and Context Kernel layers are extension points, not an implemented Skills system.
+- First-class durable Artifacts with independent storage, versioning, editing, and lifecycle. Studio currently renders an `artifact.updated` event projection only.
+- Platform Task resources, queues, assignment, and autonomous task orchestration.
+- Workflow and multi-agent runtimes beyond the current replaceable runtime boundary.
+- Team membership and RBAC, production secrets infrastructure, cost accounting, evaluation, and full observability integration.
+- Redis, object storage, and production checkpoint/resume infrastructure.
 
 ## Architecture Principles
 
@@ -69,24 +63,26 @@ See [Architecture Overview](docs/architecture/overview.md), [Extension Authoring
 
 Alcuin is a working **pre-alpha prototype**. It currently includes:
 
-- A Next.js Agent Studio with a conversation timeline, Artifact canvas, run trace, approvals, light/dark themes, and responsive navigation
+- A Next.js Agent Studio with durable multi-turn Threads and Messages, refresh restoration, run trace, approval handling, context inspection, light/dark themes, and responsive navigation
+- A provider-neutral Context Kernel with deterministic layer ordering, bounded input budgets, immutable per-Run context snapshots, traceable complete-turn compaction, and Workspace-scoped conversation persistence
+- A read-only Studio Artifact panel projected from `artifact.updated` execution events; Artifacts are not yet independent durable resources
 - Workspace-scoped Agent creation and selection with versioned declarative definitions behind a FastAPI control plane
 - An authoritative Workspace Tool Catalog that exposes configured built-ins and installed Extension tools with runtime availability, mutation metadata, and contributing Extension ownership
 - A replaceable runtime boundary with a LangGraph ReAct demo adapter and an optional OpenAI-compatible streaming adapter
 - A bounded OpenAI-compatible tool loop with Agent allow-lists, JSON Schema validation, workspace context, per-tool deadlines, call budgets, and structured results
 - An independently packaged `web.search` capability for self-hosted SearXNG with quick/deep modes, tracking-aware URL deduplication, bounded page extraction, SSRF guards, explicit stale/partial degradation, and citation events
 - A built-in `knowledge.search` adapter with Builder-based document import, deterministic chunking, Qwen dense+sparse hybrid retrieval, Agent-version source binding, and `knowledge://` citations
-- A persisted English/Chinese interface switch across Studio, Builder, Extensions, Runs, and Embed, while keeping Agent and extension-owned content unchanged
+- A persisted English/Chinese interface switch across Studio, Builder, Extensions, Runs, and the frozen Embed compatibility UI, while keeping Agent and extension-owned content unchanged
 - Persisted normalized execution events with resumable SSE delivery and Alcuin's compact chat stream projection
 - Extension inspection, disabled-first installation, permission review, live health state, and enable/disable lifecycle
 - A typed `@alcuin/extension-sdk` with offline conformance validation, stable tool-id helpers, and a runnable stdio MCP scaffold
 - Workspace-scoped MCP/OpenAPI tool resolution from enabled extensions into Agent Definitions and model tool loops, with runtime state rechecks and bounded results
 - MCP discovery and invocation over stdio, SSE, and Streamable HTTP
 - OpenAPI JSON/YAML import from request bodies or URLs and read-only execution, with mutating operations routed to approval-gated runs
-- Origin-bound Embed Session tokens and a framework-neutral `<alcuin-agent>` Web Component with `lang="en|zh-CN"` localization
-- Standard `Last-Event-ID` recovery shared by Studio and Embed, with bounded reconnects and replay suppression
+- A frozen Embed compatibility layer consisting of origin-bound Embed Session tokens and a framework-neutral `<alcuin-agent>` Web Component; it is retained for compatibility, not active product development
+- Standard `Last-Event-ID` recovery in Studio and the frozen Embed layer, with bounded reconnects and replay suppression
 - Declarative extension card/table/form blocks with scoped data binding and approval-gated Tool Runs
-- An explicit Operations Copilot example proving that a domain Extension can run in Studio and an embedded host without entering Alcuin Core
+- An explicit Operations Copilot example proving that a domain Extension can run without entering Alcuin Core
 - Framework-neutral Python `alcuin-core`, independently packaged `alcuin-knowledge`, configurable `@alcuin/sdk`, enforced web feature boundaries, and an independently packaged Operations example
 - PostgreSQL-only control-plane persistence with Workspace-scoped Repository ports, pooled connections, Alembic migrations, and atomic Run event sequencing
 
@@ -144,17 +140,17 @@ main
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before making changes.
 
-## Technology Direction
+## Technology Boundary
 
-The initial implementation is expected to use:
+The current pre-alpha uses:
 
 - **Backend:** Python, FastAPI, LangGraph, LangChain, SQLAlchemy
 - **Frontend:** Next.js, React, TypeScript, Tailwind CSS
-- **Data:** PostgreSQL, Redis, Qdrant
+- **Data and retrieval:** PostgreSQL, Qdrant, SearXNG
 - **Protocols:** MCP, SSE, OpenAPI
-- **Operations:** Docker Compose, Alembic, OpenTelemetry-compatible traces
+- **Operations:** Docker Compose and Alembic
 
-The pre-alpha uses PostgreSQL 17 through Docker Compose and Alembic. Repository ports keep runtime and service code independent of connection and transaction details, but PostgreSQL is the single implemented control-plane database.
+Repository ports keep runtime and service code independent of connection and transaction details, but PostgreSQL 17 is the single implemented control-plane database. Redis, object storage, and OpenTelemetry integration remain roadmap items.
 
 ## Security
 

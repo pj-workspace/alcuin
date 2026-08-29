@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Control plane and runtime gateway for Alcuin"
 requires-python = ">=3.11"
 dependencies = [
+  "alcuin-context",
   "alcuin-core",
   "alcuin-knowledge",
   "alcuin-storage",
@@ -35,6 +36,7 @@ build-backend = "hatchling.build"
 packages = ["src/alcuin_api"]
 
 [tool.uv.sources]
+alcuin-context = { path = "../../packages/python/alcuin-context", editable = true }
 alcuin-core = { path = "../../packages/python/alcuin-core", editable = true }
 alcuin-knowledge = { path = "../../packages/python/alcuin-knowledge", editable = true }
 alcuin-storage = { path = "../../packages/python/alcuin-storage", editable = true }
@@ -46,6 +48,7 @@ addopts = "-q"
 pythonpath = ["src", "tests"]
 testpaths = [
   "tests",
+  "../../packages/python/alcuin-context/tests",
   "../../packages/python/alcuin-core/tests",
   "../../packages/python/alcuin-knowledge/tests",
   "../../packages/python/alcuin-storage/tests",

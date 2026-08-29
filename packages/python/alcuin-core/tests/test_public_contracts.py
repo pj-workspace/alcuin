@@ -21,6 +21,8 @@ def test_core_contracts_are_importable_without_the_api_application() -> None:
     assert definition.identity.name == "Portable Agent"
     assert manifest.id == "example.tools"
     assert EventType.RUN_STARTED == "run.started"
+    assert EventType.CONTEXT_ASSEMBLED == "context.assembled"
+    assert EventType.CONTEXT_COMPACTION_COMPLETED == "context.compaction.completed"
 
 
 def test_tool_envelopes_are_framework_neutral() -> None:

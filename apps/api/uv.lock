@@ -17,6 +17,7 @@ name = "alcuin-api"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "alcuin-context" },
     { name = "alcuin-core" },
     { name = "alcuin-knowledge" },
     { name = "alcuin-storage" },
@@ -49,6 +50,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "alcuin-context", editable = "../../packages/python/alcuin-context" },
     { name = "alcuin-core", editable = "../../packages/python/alcuin-core" },
     { name = "alcuin-knowledge", editable = "../../packages/python/alcuin-knowledge" },
     { name = "alcuin-operations-copilot", marker = "extra == 'dev'", editable = "../../extensions/operations-copilot" },
@@ -72,6 +74,23 @@ provides-extras = ["dev"]
 [package.metadata.requires-dev]
 dev = [
     { name = "alcuin-operations-copilot", editable = "../../extensions/operations-copilot" },
+    { name = "pytest", specifier = ">=8.3.0,<9.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24.0,<1.0" },
+]
+
+[[package]]
+name = "alcuin-context"
+version = "0.1.0"
+source = { editable = "../../packages/python/alcuin-context" }
+dependencies = [
+    { name = "alcuin-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "alcuin-core", editable = "../../packages/python/alcuin-core" }]
+
+[package.metadata.requires-dev]
+dev = [
     { name = "pytest", specifier = ">=8.3.0,<9.0" },
     { name = "pytest-asyncio", specifier = ">=0.24.0,<1.0" },
 ]

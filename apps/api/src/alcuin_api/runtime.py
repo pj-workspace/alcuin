@@ -8,11 +8,17 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol, TypedDict
 
 import httpx
+from alcuin_context import ContextAssembly, HeuristicTokenEstimator
 from alcuin_storage import RuntimeRepository
 from langgraph.graph import END, START, StateGraph
 
 from .config import ProviderConfig, Settings
 from alcuin_core.contracts import AgentDefinition, EventType, ImageAttachment
+from .context_composition import (
+    ContextCompactionFailure,
+    RunContextComposer,
+    public_context_assembly,
+)
 from .security import redact_sensitive, redact_text
 from .tools import ToolContext, ToolError, ToolExecutor
 
@@ -43,6 +49,8 @@ class RuntimeRequest:
     prompt: str
     thread_context: dict[str, Any]
     definition: AgentDefinition
+    context: ContextAssembly | None = None
+    current_message_id: str | None = None
     attachments: tuple[ImageAttachment, ...] = ()
     thinking: bool = False
     requested_tool: dict[str, Any] | None = None
@@ -52,6 +60,38 @@ class RuntimeRequest:
 class RuntimeEmission:
     type: EventType
     payload: dict[str, Any]
+
+
+def _system_prompt(request: RuntimeRequest) -> str:
+    """Use the assembled envelope when present; direct runtime callers retain compatibility."""
+    return (
+        request.context.system_prompt
+        if request.context is not None
+        else provider_instructions(request.definition)
+    )
+
+
+def _conversation(request: RuntimeRequest) -> list[dict[str, Any]]:
+    if request.context is None:
+        return [{"role": "user", "content": request.prompt}]
+    return [
+        {"role": message.role, "content": message.content, "id": message.id}
+        for message in request.context.messages
+    ]
+
+
+def _current_message_index(
+    request: RuntimeRequest,
+    messages: list[dict[str, Any]],
+) -> int:
+    if request.current_message_id:
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index].get("id") == request.current_message_id:
+                return index
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "user":
+            return index
+    raise ValueError("Runtime context has no current user message")
 
 
 class AgentRuntime(Protocol):
@@ -168,23 +208,29 @@ class OpenAICompatibleRuntime:
         provider: ProviderConfig,
     ) -> AsyncIterator[RuntimeEmission]:
         url = f"{provider.base_url.rstrip('/')}/responses"
-        user_input: str | list[dict[str, Any]] = request.prompt
+        conversation = _conversation(request)
         if request.attachments:
-            user_input = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": request.prompt},
-                        *[
-                            {"type": "input_image", "image_url": attachment.data_url}
-                            for attachment in request.attachments
-                        ],
-                    ],
-                }
+            current_index = _current_message_index(request, conversation)
+            current_text = request.prompt.strip() or str(
+                conversation[current_index].get("content") or ""
+            )
+            conversation[current_index]["content"] = [
+                {"type": "input_text", "text": current_text},
+                *[
+                    {"type": "input_image", "image_url": attachment.data_url}
+                    for attachment in request.attachments
+                ],
             ]
+        for message in conversation:
+            message.pop("id", None)
+        user_input: str | list[dict[str, Any]] = (
+            conversation if request.context is not None else request.prompt
+        )
+        if request.attachments and request.context is None:
+            user_input = conversation
         payload = {
             "model": request.definition.model.model or provider.default_model,
-            "instructions": provider_instructions(request.definition),
+            "instructions": _system_prompt(request),
             "input": user_input,
             "stream": True,
             "store": False,
@@ -232,18 +278,24 @@ class OpenAICompatibleRuntime:
         provider: ProviderConfig,
     ) -> AsyncIterator[RuntimeEmission]:
         url = f"{provider.base_url.rstrip('/')}/chat/completions"
-        user_content: str | list[dict[str, Any]] = request.prompt
+        conversation = _conversation(request)
         if request.attachments:
-            user_content = [
-                {"type": "text", "text": request.prompt},
+            current_index = _current_message_index(request, conversation)
+            current_text = request.prompt.strip() or str(
+                conversation[current_index].get("content") or ""
+            )
+            conversation[current_index]["content"] = [
+                {"type": "text", "text": current_text},
                 *[
                     {"type": "image_url", "image_url": {"url": attachment.data_url}}
                     for attachment in request.attachments
                 ],
             ]
+        for message in conversation:
+            message.pop("id", None)
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": provider_instructions(request.definition)},
-            {"role": "user", "content": user_content},
+            {"role": "system", "content": _system_prompt(request)},
+            *conversation,
         ]
         tool_definitions = self.tool_executor.definitions(
             request.definition.tools,
@@ -651,11 +703,100 @@ class RuntimeOrchestrator:
             tool_executor=self.tool_executor,
         )
         self.demo_runtime: AgentRuntime = LangGraphReactRuntime()
+        self.context_composer = RunContextComposer(store, settings)
 
     def redact_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         shaped = redact_sensitive(payload)
         serialized = json.dumps(shaped, ensure_ascii=False, default=str)
         return json.loads(redact_text(serialized, self.sensitive_values))
+
+    def _finalize_assistant(
+        self,
+        workspace_id: str,
+        run_id: str,
+        status: str,
+        content: str,
+    ) -> dict[str, Any]:
+        visible_content = redact_text(content, self.sensitive_values)
+        if not visible_content.strip():
+            self.store.set_run_status(workspace_id, run_id, status)
+            return {}
+        estimate = HeuristicTokenEstimator().estimate_text(visible_content)
+        try:
+            return self.store.finalize_assistant_message(
+                workspace_id,
+                run_id,
+                status,
+                visible_content,
+                estimate,
+            )
+        except Exception:
+            # A terminal Run event must never disappear behind a secondary persistence error.
+            # Completed responses still fail the execution so the inconsistency remains visible;
+            # failed partials fall back to the authoritative failed Run status.
+            self.store.set_run_status(workspace_id, run_id, status)
+            if status == "completed":
+                raise
+            return {}
+
+    async def _assemble_context(self, request: RuntimeRequest) -> RuntimeRequest:
+        run = self.store.get_run(request.workspace_id, request.run_id)
+        if not run:
+            raise RuntimeError("Run is no longer available")
+        thread = self.store.get_thread(request.workspace_id, run["thread_id"])
+        if not thread:
+            raise RuntimeError("Run Thread is no longer available")
+        try:
+            composition = await self.context_composer.compose(
+                workspace_id=request.workspace_id,
+                run=run,
+                thread=thread,
+                definition=request.definition,
+                platform_protocol=RUNTIME_PRESENTATION_PROTOCOL,
+            )
+        except ContextCompactionFailure as exc:
+            for event_type, payload in exc.lifecycle_events:
+                self.store.append_event(
+                    request.workspace_id,
+                    request.run_id,
+                    EventType(event_type),
+                    self.redact_payload(payload),
+                )
+            raise
+
+        for event_type, payload in composition.lifecycle_events:
+            self.store.append_event(
+                request.workspace_id,
+                request.run_id,
+                EventType(event_type),
+                self.redact_payload(payload),
+            )
+        record = self.context_composer.persist(
+            workspace_id=request.workspace_id,
+            run_id=request.run_id,
+            assembly=composition.assembly,
+        )
+        public_record = public_context_assembly(record)
+        self.store.append_event(
+            request.workspace_id,
+            request.run_id,
+            EventType.CONTEXT_ASSEMBLED,
+            {
+                "context_assembly_id": record["id"],
+                "estimated_input_tokens": record["estimated_input_tokens"],
+                "effective_budget_tokens": record["effective_budget_tokens"],
+                "compaction_trigger_tokens": record["compaction_trigger_tokens"],
+                "message_sequence_through": record["message_sequence_through"],
+                "active_compaction_id": record.get("active_compaction_id"),
+                "estimator_revision": record["estimator_revision"],
+                "entries": public_record["entries"],
+            },
+        )
+        return replace(
+            request,
+            context=composition.assembly,
+            current_message_id=str(run.get("input_message_id") or "") or None,
+        )
 
     async def execute(self, request: RuntimeRequest) -> None:
         self.store.set_run_status(request.workspace_id, request.run_id, "running")
@@ -667,6 +808,10 @@ class RuntimeOrchestrator:
                 "runtime": request.definition.runtime.adapter,
                 "provider": request.definition.model.provider,
                 "model": request.definition.model.model,
+                "agent_version_id": (
+                    self.store.get_run(request.workspace_id, request.run_id) or {}
+                ).get("agent_version_id"),
+                "input_message_id": request.current_message_id,
                 "input_modalities": [
                     "text",
                     *(["image"] if request.attachments else []),
@@ -676,7 +821,9 @@ class RuntimeOrchestrator:
                 "invocation": "requested_tool" if request.requested_tool else "agent",
             },
         )
+        visible_text: list[str] = []
         try:
+            request = await self._assemble_context(request)
             if request.requested_tool:
                 await self.execute_requested_tool(request)
                 return
@@ -684,6 +831,10 @@ class RuntimeOrchestrator:
             runtime = self.provider_runtime if provider.api_key else self.demo_runtime
             async for emission in runtime.stream(request):
                 payload = self.redact_payload(emission.payload)
+                if emission.type == EventType.MESSAGE_DELTA:
+                    delta = payload.get("delta")
+                    if isinstance(delta, str):
+                        visible_text.append(delta)
                 if emission.type == EventType.APPROVAL_REQUIRED:
                     approval = self.store.create_approval(
                         request.workspace_id, request.run_id, payload
@@ -692,16 +843,55 @@ class RuntimeOrchestrator:
                     self.store.set_run_status(
                         request.workspace_id, request.run_id, "waiting_for_approval"
                     )
+                if emission.type == EventType.RUN_COMPLETED:
+                    message = self._finalize_assistant(
+                        request.workspace_id,
+                        request.run_id,
+                        "completed",
+                        "".join(visible_text),
+                    )
+                    terminal_run = self.store.get_run(
+                        request.workspace_id, request.run_id
+                    ) or {}
+                    payload = {
+                        **payload,
+                        "output_message_id": message.get("id"),
+                        "context_assembly_id": terminal_run.get(
+                            "context_assembly_id"
+                        ),
+                    }
+                elif emission.type == EventType.RUN_FAILED:
+                    message = self._finalize_assistant(
+                        request.workspace_id,
+                        request.run_id,
+                        "failed",
+                        "".join(visible_text),
+                    )
+                    terminal_run = self.store.get_run(
+                        request.workspace_id, request.run_id
+                    ) or {}
+                    payload = {
+                        **payload,
+                        "output_message_id": message.get("id"),
+                        "context_assembly_id": terminal_run.get(
+                            "context_assembly_id"
+                        ),
+                    }
                 self.store.append_event(
                     request.workspace_id, request.run_id, emission.type, payload
                 )
-                if emission.type == EventType.RUN_COMPLETED:
-                    self.store.set_run_status(
-                        request.workspace_id, request.run_id, "completed"
-                    )
         except (
             Exception
         ) as exc:  # provider errors are normalized and never expose credentials
+            message = self._finalize_assistant(
+                request.workspace_id,
+                request.run_id,
+                "failed",
+                "".join(visible_text),
+            )
+            terminal_run = self.store.get_run(
+                request.workspace_id, request.run_id
+            ) or {}
             self.store.append_event(
                 request.workspace_id,
                 request.run_id,
@@ -709,9 +899,10 @@ class RuntimeOrchestrator:
                 {
                     "code": "runtime_error",
                     "message": redact_text(str(exc), self.sensitive_values)[:500],
+                    "output_message_id": message.get("id"),
+                    "context_assembly_id": terminal_run.get("context_assembly_id"),
                 },
             )
-            self.store.set_run_status(request.workspace_id, request.run_id, "failed")
 
     async def execute_requested_tool(self, request: RuntimeRequest) -> None:
         requested = request.requested_tool or {}
@@ -833,12 +1024,20 @@ class RuntimeOrchestrator:
                 EventType.CITATION_CREATED,
                 {"tool": tool, "call_id": call_id, **citation.as_event_payload()},
             )
+        visible_summary = execution.result.summary
         self.store.append_event(
             request.workspace_id,
             request.run_id,
             EventType.MESSAGE_DELTA,
-            {"delta": execution.result.summary},
+            {"delta": visible_summary},
         )
+        message = self._finalize_assistant(
+            request.workspace_id,
+            request.run_id,
+            "completed",
+            visible_summary,
+        )
+        terminal_run = self.store.get_run(request.workspace_id, request.run_id) or {}
         self.store.append_event(
             request.workspace_id,
             request.run_id,
@@ -859,9 +1058,13 @@ class RuntimeOrchestrator:
             request.workspace_id,
             request.run_id,
             EventType.RUN_COMPLETED,
-            {"status": "completed", "invocation": "requested_tool"},
+            {
+                "status": "completed",
+                "invocation": "requested_tool",
+                "output_message_id": message.get("id"),
+                "context_assembly_id": terminal_run.get("context_assembly_id"),
+            },
         )
-        self.store.set_run_status(request.workspace_id, request.run_id, "completed")
 
     def _fail_requested_tool(
         self,
@@ -871,6 +1074,13 @@ class RuntimeOrchestrator:
         error: ToolError,
         arguments: dict[str, Any],
     ) -> None:
+        message = self._finalize_assistant(
+            request.workspace_id,
+            request.run_id,
+            "failed",
+            "",
+        )
+        terminal_run = self.store.get_run(request.workspace_id, request.run_id) or {}
         self.store.append_event(
             request.workspace_id,
             request.run_id,
@@ -888,9 +1098,13 @@ class RuntimeOrchestrator:
             request.workspace_id,
             request.run_id,
             EventType.RUN_FAILED,
-            {"code": error.code, "message": error.message},
+            {
+                "code": error.code,
+                "message": error.message,
+                "output_message_id": message.get("id"),
+                "context_assembly_id": terminal_run.get("context_assembly_id"),
+            },
         )
-        self.store.set_run_status(request.workspace_id, request.run_id, "failed")
 
     async def resume_after_approval(
         self,
@@ -938,6 +1152,8 @@ class RuntimeOrchestrator:
                 )
                 result = self.redact_payload(execution.result.data)
             except ToolError as error:
+                message = self._finalize_assistant(workspace_id, run_id, "failed", "")
+                terminal_run = self.store.get_run(workspace_id, run_id) or {}
                 self.store.append_event(
                     workspace_id,
                     run_id,
@@ -954,11 +1170,17 @@ class RuntimeOrchestrator:
                     workspace_id,
                     run_id,
                     EventType.RUN_FAILED,
-                    {"code": error.code, "message": error.message},
+                    {
+                        "code": error.code,
+                        "message": error.message,
+                        "output_message_id": message.get("id"),
+                        "context_assembly_id": terminal_run.get("context_assembly_id"),
+                    },
                 )
-                self.store.set_run_status(workspace_id, run_id, "failed")
                 return
             except Exception:
+                message = self._finalize_assistant(workspace_id, run_id, "failed", "")
+                terminal_run = self.store.get_run(workspace_id, run_id) or {}
                 self.store.append_event(
                     workspace_id,
                     run_id,
@@ -981,9 +1203,10 @@ class RuntimeOrchestrator:
                     {
                         "code": "tool_failed",
                         "message": "Approved tool execution failed",
+                        "output_message_id": message.get("id"),
+                        "context_assembly_id": terminal_run.get("context_assembly_id"),
                     },
                 )
-                self.store.set_run_status(workspace_id, run_id, "failed")
                 return
             self.store.append_event(
                 workspace_id,
@@ -1005,11 +1228,12 @@ class RuntimeOrchestrator:
                     EventType.CITATION_CREATED,
                     {"tool": tool, "call_id": call_id, **citation.as_event_payload()},
                 )
+            visible_summary = f"The approved {tool} operation completed successfully."
             self.store.append_event(
                 workspace_id,
                 run_id,
                 EventType.MESSAGE_DELTA,
-                {"delta": f"The approved {tool} operation completed successfully."},
+                {"delta": visible_summary},
             )
             self.store.append_event(
                 workspace_id,
@@ -1042,18 +1266,30 @@ class RuntimeOrchestrator:
                     "result_summary": "Operation denied by the user.",
                 },
             )
+            visible_summary = (
+                "No external changes were made because the approval request was denied."
+            )
             self.store.append_event(
                 workspace_id,
                 run_id,
                 EventType.MESSAGE_DELTA,
-                {
-                    "delta": "No external changes were made because the approval request was denied."
-                },
+                {"delta": visible_summary},
             )
+        message = self._finalize_assistant(
+            workspace_id,
+            run_id,
+            "completed",
+            visible_summary,
+        )
+        terminal_run = self.store.get_run(workspace_id, run_id) or {}
         self.store.append_event(
             workspace_id,
             run_id,
             EventType.RUN_COMPLETED,
-            {"status": "completed", "approval": "approved" if approved else "denied"},
+            {
+                "status": "completed",
+                "approval": "approved" if approved else "denied",
+                "output_message_id": message.get("id"),
+                "context_assembly_id": terminal_run.get("context_assembly_id"),
+            },
         )
-        self.store.set_run_status(workspace_id, run_id, "completed")

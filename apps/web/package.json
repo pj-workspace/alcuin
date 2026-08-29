@@ -8,7 +8,7 @@
     "start": "next start",
     "build": "next build",
     "lint": "eslint .",
-    "test": "node --experimental-strip-types features/architecture.test.ts && node --experimental-strip-types features/extensions/extension-ui.test.ts && tsc --noEmit"
+    "test": "node --experimental-strip-types features/architecture.test.ts && node --experimental-strip-types features/extensions/extension-ui.test.ts && node --experimental-strip-types features/studio/thread-session-reducer.test.ts && tsc --noEmit"
   },
   "dependencies": {
     "@alcuin/contracts": "workspace:*",

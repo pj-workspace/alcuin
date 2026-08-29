@@ -35,6 +35,7 @@ export function usePinnedTurnScroll(
   const endRef = useRef<HTMLElement | null>(null);
   const activeTurnRef = useRef<string | null>(null);
   const autoFollowRef = useRef(true);
+  const reducedMotionRef = useRef(false);
   const previousScrollTopRef = useRef(0);
   const spacerValueRef = useRef(0);
   const [spacerPx, setSpacerPx] = useState(0);
@@ -63,7 +64,10 @@ export function usePinnedTurnScroll(
       const target = turnHeight + TOP_PAD_PX <= visibleHeight
         ? Math.max(0, anchorTop - TOP_PAD_PX)
         : Math.max(0, endBottom - visibleHeight);
-      container.scrollTop = target;
+      container.scrollTo({
+        top: target,
+        behavior: mode === "pin" && !reducedMotionRef.current ? "smooth" : "auto",
+      });
       previousScrollTopRef.current = target;
     }
   }, [updateSpacer]);
@@ -82,6 +86,10 @@ export function usePinnedTurnScroll(
   useLayoutEffect(() => {
     const container = scrollRef.current;
     if (!container) return;
+    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const syncMotion = () => { reducedMotionRef.current = motion.matches; };
+    syncMotion();
+    motion.addEventListener("change", syncMotion);
     const onScroll = () => {
       const top = container.scrollTop;
       const distance = container.scrollHeight - top - container.clientHeight;
@@ -91,8 +99,25 @@ export function usePinnedTurnScroll(
       previousScrollTopRef.current = top;
     };
     container.addEventListener("scroll", onScroll, { passive: true });
-    return () => container.removeEventListener("scroll", onScroll);
+    return () => {
+      container.removeEventListener("scroll", onScroll);
+      motion.removeEventListener("change", syncMotion);
+    };
   }, []);
+
+  useLayoutEffect(() => {
+    const container = scrollRef.current;
+    const anchor = anchorRef.current;
+    const end = endRef.current;
+    if (!container || !anchor || !end || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (autoFollowRef.current) measure("follow");
+    });
+    observer.observe(container);
+    observer.observe(anchor);
+    observer.observe(end);
+    return () => observer.disconnect();
+  }, [measure, turnKey]);
 
   useLayoutEffect(() => {
     if (autoFollowRef.current) measure("follow");

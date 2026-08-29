@@ -4,6 +4,7 @@ from .errors import RepositoryConflict, RepositoryError
 from .factory import open_repository
 from .postgres import PostgresStore
 from .repositories import (
+    ConversationRepository,
     ControlPlaneRepository,
     ExtensionRepository,
     KnowledgeRepository,
@@ -12,6 +13,7 @@ from .repositories import (
 
 __all__ = [
     "ControlPlaneRepository",
+    "ConversationRepository",
     "ExtensionRepository",
     "KnowledgeRepository",
     "RepositoryConflict",

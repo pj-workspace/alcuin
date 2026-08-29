@@ -14,6 +14,41 @@ export type RunStatus =
   | "failed"
   | "cancelled";
 
+/**
+ * Message status is independent from Run status: a failed Run may still leave a
+ * safe, partial assistant message that the conversation can render.
+ */
+export type MessageStatus = "pending" | "streaming" | "completed" | "failed";
+
+export interface TextMessagePart {
+  type: "text";
+  text: string;
+}
+
+/** Persisted messages contain resource references, never inline data URLs. */
+export interface AttachmentMessagePart {
+  type: "attachment";
+  attachment_id: string;
+  name: string;
+  media_type: string;
+}
+
+export type MessagePart = TextMessagePart | AttachmentMessagePart;
+
+export interface ThreadMessage {
+  id: string;
+  workspace_id: string;
+  thread_id: string;
+  run_id: string | null;
+  agent_version_id: string | null;
+  sequence: number;
+  role: "user" | "assistant";
+  status: MessageStatus;
+  parts: MessagePart[];
+  created_at: string;
+  completed_at?: string | null;
+}
+
 export interface AgentDefinition {
   schema_version: string;
   identity: { name: string; description: string; icon: string };
@@ -225,7 +260,13 @@ export interface Thread {
   agent_id: string;
   title: string;
   context: Record<string, unknown>;
+  /** Optional while pre-kernel Threads are migrated. */
+  context_revision?: number;
+  /** Thread-local message sequence; unrelated to per-Run SSE event sequences. */
+  last_message_sequence?: number;
+  active_compaction_id?: string | null;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface Run {
@@ -235,10 +276,43 @@ export interface Run {
   agent_version_id: string;
   status: RunStatus;
   input: string;
+  /** Optional while Runs created before the conversation kernel remain readable. */
+  input_message_id?: string;
+  output_message_id?: string | null;
+  context_assembly_id?: string | null;
   title?: string;
   agent_name?: string;
   created_at: string;
   completed_at?: string | null;
+}
+
+export interface ThreadDetail {
+  thread: Thread;
+  messages: ThreadMessage[];
+  runs: Run[];
+}
+
+export interface ContextAssemblyEntry {
+  kind: string;
+  label: string;
+  source_ref?: string | null;
+  token_estimate?: number | null;
+  included: boolean;
+}
+
+/** Operator-safe trace of the context assembled for one immutable Run version. */
+export interface ContextAssembly {
+  id: string;
+  workspace_id: string;
+  thread_id: string;
+  run_id: string;
+  agent_version_id: string;
+  entries: ContextAssemblyEntry[];
+  estimated_input_tokens: number;
+  effective_budget_tokens: number;
+  message_sequence_through: number;
+  active_compaction_id?: string | null;
+  created_at: string;
 }
 
 export interface RequestedToolCall {
@@ -259,7 +333,8 @@ export interface ExecutionEvent {
   id: string;
   run_id: string;
   sequence: number;
-  type: ExecutionEventType;
+  /** Known event vocabulary plus forward-compatible Runtime adapter events. */
+  type: ExecutionEventType | (string & {});
   timestamp: string;
   payload: Record<string, any>;
 }

@@ -19,8 +19,78 @@ Record = dict[str, Any]
 
 
 @runtime_checkable
-class RuntimeRepository(Protocol):
+class ConversationRepository(Protocol):
+    """Immutable Thread messages, compactions, and per-Run context snapshots."""
+
+    def list_messages(
+        self,
+        workspace_id: str,
+        thread_id: str,
+        *,
+        after: int = 0,
+        limit: int = 100,
+    ) -> list[Record]: ...
+
+    def get_message(self, workspace_id: str, message_id: str) -> Record | None: ...
+
+    def list_thread_runs(
+        self,
+        workspace_id: str,
+        thread_id: str,
+        limit: int = 500,
+    ) -> list[Record]: ...
+
+    def create_run_with_messages(
+        self,
+        workspace_id: str,
+        thread_id: str,
+        agent_version_id: str,
+        prompt: str,
+        parts: list[Record],
+        estimated_tokens: int,
+    ) -> Record: ...
+
+    def finalize_assistant_message(
+        self,
+        workspace_id: str,
+        run_id: str,
+        status: str,
+        content: str,
+        estimated_tokens: int,
+    ) -> Record: ...
+
+    def create_compaction(
+        self,
+        workspace_id: str,
+        thread_id: str,
+        **payload: Any,
+    ) -> Record: ...
+
+    def get_active_compaction(
+        self,
+        workspace_id: str,
+        thread_id: str,
+    ) -> Record | None: ...
+
+    def create_context_assembly(
+        self,
+        workspace_id: str,
+        run_id: str,
+        **payload: Any,
+    ) -> Record: ...
+
+    def get_context_assembly(
+        self,
+        workspace_id: str,
+        run_id: str,
+    ) -> Record | None: ...
+
+
+@runtime_checkable
+class RuntimeRepository(ConversationRepository, Protocol):
     """Persistence required while executing and resuming a Run."""
+
+    def recover_interrupted_runs(self) -> list[Record]: ...
 
     def get_run(self, workspace_id: str, run_id: str) -> Record | None: ...
 
@@ -188,6 +258,9 @@ class ControlPlaneRepository(RuntimeRepository, ExtensionRepository, KnowledgeRe
         thread_id: str,
         agent_version_id: str,
         prompt: str,
+        *,
+        message_parts: list[Record] | None = None,
+        estimated_tokens: int | None = None,
     ) -> Record: ...
 
     def list_runs(self, workspace_id: str, limit: int = 30) -> list[Record]: ...

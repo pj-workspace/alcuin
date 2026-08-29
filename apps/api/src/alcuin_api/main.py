@@ -83,6 +83,11 @@ from .knowledge_wiring import (
 from .mcp_gateway import MCPGateway
 from .openapi_gateway import OpenAPIGateway
 from .runtime import RuntimeOrchestrator, RuntimeRequest
+from .context_composition import (
+    load_thread_messages,
+    persisted_user_parts,
+    public_context_assembly,
+)
 from .security import RequestScope, issue_embed_token, resolve_scope
 from .chat_sse import project_execution_event
 from .tools import ToolExecutor, ToolRegistry
@@ -161,6 +166,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         application.state.tasks = set()
+        application.state.recovered_interrupted_runs = (
+            repository.recover_interrupted_runs()
+        )
         yield
         for task in application.state.tasks:
             task.cancel()
@@ -212,6 +220,13 @@ def create_app(
             return
         thread = repository.get_thread(scope.workspace_id, run["thread_id"])
         if not thread or thread["agent_id"] != scope.agent_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Embed session is bound to another agent",
+            )
+
+    def require_thread_agent(scope: RequestScope, thread: dict) -> None:
+        if scope.agent_id and thread["agent_id"] != scope.agent_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Embed session is bound to another agent",
@@ -678,6 +693,59 @@ def create_app(
             payload.context,
         )
 
+    @app.get("/v1/threads/{thread_id}")
+    async def get_thread(thread_id: str, scope: ScopeDependency) -> dict:
+        scope.require("run:read")
+        thread = repository.get_thread(scope.workspace_id, thread_id)
+        if not thread:
+            raise missing("Thread")
+        require_thread_agent(scope, thread)
+        messages = load_thread_messages(repository, scope.workspace_id, thread_id)
+        run_ids = list(
+            dict.fromkeys(
+                str(message["run_id"])
+                for message in messages
+                if message.get("run_id")
+            )
+        )
+        runs_by_id = {
+            str(run["id"]): run
+            for run in repository.list_thread_runs(
+                scope.workspace_id,
+                thread_id,
+                limit=500,
+            )
+        }
+        for run_id in run_ids:
+            if run_id not in runs_by_id:
+                run = repository.get_run(scope.workspace_id, run_id)
+                if run is not None:
+                    runs_by_id[run_id] = run
+        runs = sorted(
+            runs_by_id.values(),
+            key=lambda run: run["created_at"],
+        )
+        return {"thread": thread, "messages": messages, "runs": runs}
+
+    @app.get("/v1/threads/{thread_id}/messages")
+    async def list_thread_messages(
+        thread_id: str,
+        scope: ScopeDependency,
+        after: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> list[dict]:
+        scope.require("run:read")
+        thread = repository.get_thread(scope.workspace_id, thread_id)
+        if not thread:
+            raise missing("Thread")
+        require_thread_agent(scope, thread)
+        return repository.list_messages(
+            scope.workspace_id,
+            thread_id,
+            after=after,
+            limit=limit,
+        )
+
     @app.post("/v1/threads/{thread_id}/runs", status_code=202)
     async def create_run(
         thread_id: str, payload: RunCreate, scope: ScopeDependency
@@ -706,16 +774,33 @@ def create_app(
                 definition,
                 payload.requested_tool,
             )
-        run = repository.create_run(
-            scope.workspace_id, thread_id, version_id, payload.input
+        attachments = tuple(payload.attachments)
+        message_parts = persisted_user_parts(
+            payload.input,
+            attachments,
+            requested_tool_name=(
+                payload.requested_tool.name if payload.requested_tool else None
+            ),
         )
+        try:
+            run = repository.create_run_with_messages(
+                scope.workspace_id,
+                thread_id,
+                version_id,
+                payload.input,
+                message_parts,
+                app.state.runtime.context_composer.estimate_parts(message_parts),
+            )
+        except RepositoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         runtime_request = RuntimeRequest(
             workspace_id=scope.workspace_id,
             run_id=run["id"],
             prompt=payload.input,
             thread_context=thread["context"],
             definition=definition,
-            attachments=tuple(payload.attachments),
+            current_message_id=run.get("input_message_id"),
+            attachments=attachments,
             thinking=payload.thinking,
             requested_tool=(
                 payload.requested_tool.model_dump(mode="json")
@@ -741,6 +826,18 @@ def create_app(
             raise missing("Run")
         require_run_agent(scope, run)
         return {**run, "events": repository.list_events(scope.workspace_id, run_id)}
+
+    @app.get("/v1/runs/{run_id}/context")
+    async def get_run_context(run_id: str, scope: ScopeDependency) -> dict:
+        scope.require("run:read")
+        run = repository.get_run(scope.workspace_id, run_id)
+        if not run:
+            raise missing("Run")
+        require_run_agent(scope, run)
+        context = repository.get_context_assembly(scope.workspace_id, run_id)
+        if not context:
+            raise missing("Run context")
+        return public_context_assembly(context)
 
     @app.get("/v1/runs/{run_id}/events")
     async def stream_run_events(

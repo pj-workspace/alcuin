@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash-vision-exp"
     deepseek_protocol: str = Field(default="chat_completions", pattern="^(responses|chat_completions)$")
+    context_window_tokens: int = Field(default=131_072, ge=8_192, le=2_000_000)
+    context_reserved_output_tokens: int = Field(default=4_096, ge=256, le=131_072)
+    context_reserved_tool_tokens: int = Field(default=8_192, ge=0, le=131_072)
+    context_compaction_trigger_ratio: float = Field(default=0.8, gt=0.0, le=1.0)
     searxng_url: str | None = None
     searxng_timeout_seconds: float = Field(default=8.0, ge=1.0, le=30.0)
     web_search_total_timeout_seconds: float = Field(default=15.0, ge=3.0, le=60.0)
@@ -93,6 +97,13 @@ class Settings(BaseSettings):
         if self.postgres_pool_max_size < self.postgres_pool_min_size:
             raise ValueError(
                 "postgres_pool_max_size must be greater than or equal to postgres_pool_min_size"
+            )
+        if (
+            self.context_reserved_output_tokens + self.context_reserved_tool_tokens
+            >= self.context_window_tokens
+        ):
+            raise ValueError(
+                "context token reserves must leave capacity for model input"
             )
 
     def provider(self, provider_id: str) -> ProviderConfig:

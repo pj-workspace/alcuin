@@ -1,7 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createAlcuinClient, executionEventFromChatFrame } from "./index.ts";
+import {
+  createAlcuinClient,
+  executionEventFromCanonicalFrame,
+  executionEventFromChatFrame,
+} from "./index.ts";
+
+function sseResponse(...frames: string[]) {
+  const encoder = new TextEncoder();
+  return new Response(new ReadableStream({
+    start(controller) {
+      for (const frame of frames) controller.enqueue(encoder.encode(frame));
+      controller.close();
+    },
+  }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
 
 test("client scopes requests to its configured Workspace", async () => {
   const seen: Array<{ url: string; workspace: string | null }> = [];
@@ -36,6 +50,113 @@ test("client rejects ambiguous connection configuration", () => {
     () => createAlcuinClient({ baseUrl: "https://agents.example.test", workspaceId: " " }),
     /workspaceId is required/,
   );
+});
+
+test("client reads Workspace-scoped thread messages and context traces", async () => {
+  const seen: string[] = [];
+  const fetchMock: typeof fetch = async (input) => {
+    const url = String(input);
+    seen.push(url);
+    if (url.endsWith("/v1/threads/thr_test")) {
+      return Response.json({
+        thread: { id: "thr_test", workspace_id: "ws_test", agent_id: "agt_test" },
+        messages: [],
+        runs: [],
+      });
+    }
+    if (url.includes("/v1/threads/thr_test/messages")) return Response.json([]);
+    return Response.json({
+      id: "ctx_test",
+      workspace_id: "ws_test",
+      thread_id: "thr_test",
+      run_id: "run_test",
+      agent_version_id: "agv_test",
+      entries: [],
+      estimated_input_tokens: 32,
+      effective_budget_tokens: 8_192,
+      message_sequence_through: 2,
+      created_at: "2026-08-29T00:00:00Z",
+    });
+  };
+  const client = createAlcuinClient({
+    baseUrl: "https://agents.example.test",
+    workspaceId: "ws_test",
+    fetch: fetchMock,
+  });
+
+  const thread = await client.getThread("thr_test");
+  const messages = await client.listThreadMessages("thr_test", { after: 4, limit: 25 });
+  const context = await client.getRunContext("run_test");
+
+  assert.equal(thread.thread.id, "thr_test");
+  assert.deepEqual(messages, []);
+  assert.equal(context.id, "ctx_test");
+  assert.deepEqual(seen, [
+    "https://agents.example.test/v1/threads/thr_test",
+    "https://agents.example.test/v1/threads/thr_test/messages?after=4&limit=25",
+    "https://agents.example.test/v1/runs/run_test/context",
+  ]);
+});
+
+test("canonical run stream preserves forward-compatible event names", async () => {
+  const seen: Array<{ url: string; cursor: string | null }> = [];
+  const fetchMock: typeof fetch = async (input, init) => {
+    const headers = new Headers(init?.headers);
+    seen.push({ url: String(input), cursor: headers.get("Last-Event-ID") });
+    return sseResponse(
+      'id: 5\nevent: runtime.observation\ndata: {"id":"evt_5","run_id":"run_test","sequence":5,"type":"runtime.observation","timestamp":"2026-08-29T00:00:00Z","payload":{"label":"Observed"}}\n\n',
+      'id: 6\nevent: run.completed\ndata: {"id":"evt_6","run_id":"run_test","sequence":6,"type":"run.completed","timestamp":"2026-08-29T00:00:01Z","payload":{"status":"completed"}}\n\n',
+    );
+  };
+  const client = createAlcuinClient({
+    baseUrl: "https://agents.example.test",
+    workspaceId: "ws_test",
+    fetch: fetchMock,
+  });
+  const events: string[] = [];
+
+  await client.streamRun("run_test", (event) => events.push(event.type), 4);
+
+  assert.deepEqual(events, ["runtime.observation", "run.completed"]);
+  assert.deepEqual(seen, [{
+    url: "https://agents.example.test/v1/runs/run_test/events",
+    cursor: "4",
+  }]);
+});
+
+test("canonical frame validation keeps unknown events and rejects malformed envelopes", () => {
+  const event = executionEventFromCanonicalFrame({
+    id: "evt_custom",
+    run_id: "run_test",
+    sequence: 9,
+    type: "runtime.custom",
+    timestamp: "2026-08-29T00:00:00Z",
+    payload: { value: 1 },
+  });
+
+  assert.equal(event?.type, "runtime.custom");
+  assert.equal(executionEventFromCanonicalFrame({ type: "runtime.custom" }), null);
+});
+
+test("explicit chat stream remains available for compatibility", async () => {
+  let requestedUrl = "";
+  const client = createAlcuinClient({
+    baseUrl: "https://agents.example.test",
+    workspaceId: "ws_test",
+    fetch: async (input) => {
+      requestedUrl = String(input);
+      return sseResponse(
+        'id: 1\ndata: {"eventId":"evt_1","runId":"run_test","sequence":1,"timestamp":"2026-08-29T00:00:00Z","type":"text-delta","textDelta":"Hello"}\n\n',
+        'id: 2\ndata: {"eventId":"evt_2","runId":"run_test","sequence":2,"timestamp":"2026-08-29T00:00:01Z","type":"done"}\n\n',
+      );
+    },
+  });
+  const events: string[] = [];
+
+  await client.streamRunChat("run_test", (event) => events.push(event.type));
+
+  assert.equal(requestedUrl, "https://agents.example.test/v1/runs/run_test/events?protocol=chat");
+  assert.deepEqual(events, ["message.delta", "run.completed"]);
 });
 
 test("chat frames map back to canonical execution events", () => {

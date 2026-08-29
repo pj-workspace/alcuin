@@ -1,10 +1,9 @@
 "use client";
 
-import type { AgentDefinition, BootstrapPayload, ExecutionEvent } from "@alcuin/contracts";
+import type { AgentDefinition, BootstrapPayload, ExecutionEvent, Thread } from "@alcuin/contracts";
 import {
   Blocks,
   Bot,
-  Braces,
   ChevronDown,
   Command,
   GalleryVerticalEnd,
@@ -41,7 +40,6 @@ const nav = [
   { id: "agents", label: "Agents", icon: Bot },
   { id: "extensions", label: "Extensions", icon: Blocks },
   { id: "runs", label: "Runs", icon: Workflow },
-  { id: "embed", label: "Embed", icon: Braces },
 ] satisfies Array<{ id: Surface; label: MessageKey; icon: typeof Bot }>;
 
 const DEFAULT_AGENT_INSTRUCTIONS = "You are a helpful, domain-neutral agent. Use only explicitly bound capabilities and follow the configured approval policies." satisfies MessageKey;
@@ -86,6 +84,8 @@ export function Workbench({ surface }: { surface: Surface }) {
   const [commandOpen, setCommandOpen] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [requestedThread, setRequestedThread] = useState<string | null>(null);
   const [createAgentOpen, setCreateAgentOpen] = useState(false);
   const [creatingAgent, setCreatingAgent] = useState(false);
   const [createAgentError, setCreateAgentError] = useState<string | null>(null);
@@ -125,6 +125,41 @@ export function Workbench({ surface }: { surface: Surface }) {
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    const sync = () => setRequestedThread(new URLSearchParams(window.location.search).get("thread"));
+    sync();
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
+  }, []);
+  useEffect(() => {
+    if (!data || surface !== "studio") return;
+    const requested = requestedThread;
+    if (requested === "new") {
+      setActiveThreadId(null);
+      return;
+    }
+    if (requested) {
+      const thread = data.threads.find((item) => item.id === requested);
+      if (thread) {
+        setActiveThreadId(thread.id);
+        setSelectedAgentId(thread.agent_id);
+        window.localStorage.setItem("alcuin-agent-id", thread.agent_id);
+        window.localStorage.setItem(`alcuin-thread-id:${thread.agent_id}`, thread.id);
+        return;
+      }
+    }
+
+    const agentId = selectedAgentId ?? data.agents[0]?.id;
+    if (!agentId) {
+      setActiveThreadId(null);
+      return;
+    }
+    const saved = window.localStorage.getItem(`alcuin-thread-id:${agentId}`);
+    const thread = data.threads.find((item) => item.id === saved && item.agent_id === agentId)
+      ?? data.threads.find((item) => item.agent_id === agentId);
+    setActiveThreadId(thread?.id ?? null);
+    if (thread && !requested) router.replace(`/studio?thread=${encodeURIComponent(thread.id)}`, { scroll: false });
+  }, [data, requestedThread, router, selectedAgentId, surface]);
   useEffect(() => {
     const saved = window.localStorage.getItem("alcuin-theme");
     const nextTheme = saved === "dark" ? "dark" : "light";
@@ -170,6 +205,30 @@ export function Workbench({ surface }: { surface: Surface }) {
     setSelectedAgentId(agentId);
     window.localStorage.setItem("alcuin-agent-id", agentId);
     router.push("/agents");
+  }, [router]);
+  const selectThread = useCallback((thread: Thread) => {
+    setSelectedAgentId(thread.agent_id);
+    setActiveThreadId(thread.id);
+    window.localStorage.setItem("alcuin-agent-id", thread.agent_id);
+    window.localStorage.setItem(`alcuin-thread-id:${thread.agent_id}`, thread.id);
+    setRequestedThread(thread.id);
+    router.push(`/studio?thread=${encodeURIComponent(thread.id)}`);
+  }, [router]);
+  const startNewThread = useCallback(() => {
+    if (activeAgent) window.localStorage.removeItem(`alcuin-thread-id:${activeAgent.id}`);
+    setActiveThreadId(null);
+    setRequestedThread("new");
+    router.push("/studio?thread=new");
+  }, [activeAgent, router]);
+  const acceptCreatedThread = useCallback((thread: Thread) => {
+    setActiveThreadId(thread.id);
+    setData((current) => current ? {
+      ...current,
+      threads: [thread, ...current.threads.filter((item) => item.id !== thread.id)],
+    } : current);
+    window.localStorage.setItem(`alcuin-thread-id:${thread.agent_id}`, thread.id);
+    setRequestedThread(thread.id);
+    router.replace(`/studio?thread=${encodeURIComponent(thread.id)}`, { scroll: false });
   }, [router]);
   const openCreateAgent = useCallback(() => {
     setAgentForm({ name: "", slug: "", description: "", instructions: t(DEFAULT_AGENT_INSTRUCTIONS) });
@@ -227,12 +286,13 @@ export function Workbench({ surface }: { surface: Surface }) {
           workspace={data.workspace}
           agent={activeAgent}
           extensions={data.extensions}
-          initialEvents={events}
+          activeThreadId={activeThreadId}
+          onThreadCreated={acceptCreatedThread}
           onRunCreated={refresh}
         />
       );
     }
-  }, [activeAgent, data, events, openCreateAgent, refresh, selectAgent, surface]);
+  }, [acceptCreatedThread, activeAgent, activeThreadId, data, events, openCreateAgent, refresh, selectAgent, surface]);
 
   return (
     <main className="app-frame">
@@ -274,8 +334,24 @@ export function Workbench({ surface }: { surface: Surface }) {
           </div>
           <div className="sidebar-section threads-section">
             <div className="sidebar-heading"><span>{t("Recent threads")}</span></div>
-            {data?.threads.slice(0, 4).map((thread) => (
-              <Link href="/studio" className="thread-row" key={thread.id}><Play size={11} fill="currentColor" /><span>{thread.title}</span></Link>
+            <button
+              type="button"
+              className={clsx("thread-row", "new-thread-row", activeThreadId === null && "active")}
+              aria-current={activeThreadId === null ? "page" : undefined}
+              onClick={startNewThread}
+            >
+              <Plus size={12} /><span>{t("New thread")}</span>
+            </button>
+            {data?.threads.slice(0, 6).map((thread) => (
+              <button
+                type="button"
+                className={clsx("thread-row", thread.id === activeThreadId && "active")}
+                key={thread.id}
+                aria-current={thread.id === activeThreadId ? "page" : undefined}
+                onClick={() => selectThread(thread)}
+              >
+                <Play size={11} fill="currentColor" /><span>{thread.title}</span>
+              </button>
             ))}
           </div>
           <div className="sidebar-footer"><span className="runtime-dot" />{t("API connected")} <span className="version-label">pre-alpha</span></div>

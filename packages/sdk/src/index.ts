@@ -1,6 +1,7 @@
 import type {
   Agent,
   BootstrapPayload,
+  ContextAssembly,
   ExecutionEvent,
   Extension,
   ExtensionInspection,
@@ -9,13 +10,36 @@ import type {
   KnowledgeSource,
   Run,
   Thread,
+  ThreadDetail,
+  ThreadMessage,
 } from "@alcuin/contracts";
-import { streamJsonSse } from "@alcuin/sse-client";
+import { SseProtocolError, streamJsonSse } from "@alcuin/sse-client";
 
 export interface AlcuinClientOptions {
   baseUrl: string;
   workspaceId: string;
   fetch?: typeof fetch;
+}
+
+export interface ListThreadMessagesOptions {
+  /** Return only messages after this Thread-local sequence. */
+  after?: number;
+  limit?: number;
+}
+
+function resourceId(value: string): string {
+  return encodeURIComponent(value);
+}
+
+function threadMessagesPath(
+  threadId: string,
+  options: ListThreadMessagesOptions = {},
+): string {
+  const search = new URLSearchParams();
+  if (options.after !== undefined) search.set("after", String(options.after));
+  if (options.limit !== undefined) search.set("limit", String(options.limit));
+  const query = search.toString();
+  return `/v1/threads/${resourceId(threadId)}/messages${query ? `?${query}` : ""}`;
 }
 
 export function createAlcuinClient(options: AlcuinClientOptions) {
@@ -48,6 +72,14 @@ export function createAlcuinClient(options: AlcuinClientOptions) {
   return {
   bootstrap: () => request<BootstrapPayload>("/v1/bootstrap"),
   getRun: (runId: string) => request<Run & { events: ExecutionEvent[] }>(`/v1/runs/${runId}`),
+  getThread: (threadId: string) =>
+    request<ThreadDetail>(`/v1/threads/${resourceId(threadId)}`),
+  listThreadMessages: (
+    threadId: string,
+    options: ListThreadMessagesOptions = {},
+  ) => request<ThreadMessage[]>(threadMessagesPath(threadId, options)),
+  getRunContext: (runId: string) =>
+    request<ContextAssembly>(`/v1/runs/${resourceId(runId)}/context`),
   createThread: (agentId: string, context: Record<string, unknown> = {}) =>
     request<Thread>("/v1/threads", {
       method: "POST",
@@ -195,9 +227,34 @@ export function createAlcuinClient(options: AlcuinClientOptions) {
     after = 0,
   ) => {
     await streamJsonSse({
-      url: `${baseUrl}/v1/runs/${runId}/events?protocol=chat`,
+      url: `${baseUrl}/v1/runs/${resourceId(runId)}/events`,
       headers,
       lastEventId: after,
+      fetcher: fetchImpl,
+      onEvent(value) {
+        const event = executionEventFromCanonicalFrame(value);
+        if (!event) throw new SseProtocolError("Canonical SSE frame is not an ExecutionEvent");
+        onEvent(event);
+      },
+      isTerminal(value) {
+        if (!value || typeof value !== "object") return false;
+        return ["run.completed", "run.failed", "run.cancelled"].includes(
+          String((value as Record<string, unknown>).type ?? ""),
+        );
+      },
+    });
+  },
+  /** Compatibility stream for hosts that explicitly consume Alcuin chat frames. */
+  streamRunChat: async (
+    runId: string,
+    onEvent: (event: ExecutionEvent) => void,
+    after = 0,
+  ) => {
+    await streamJsonSse({
+      url: `${baseUrl}/v1/runs/${resourceId(runId)}/events?protocol=chat`,
+      headers,
+      lastEventId: after,
+      fetcher: fetchImpl,
       onEvent(value) {
         const event = executionEventFromChatFrame(value);
         if (event) onEvent(event);
@@ -211,6 +268,36 @@ export function createAlcuinClient(options: AlcuinClientOptions) {
 }
 
 export type AlcuinClient = ReturnType<typeof createAlcuinClient>;
+
+/**
+ * Validate the stable event envelope without rejecting an event name introduced
+ * by a newer Runtime adapter. Consumers can therefore retain and render unknown
+ * trace events while upgrading their known vocabulary independently.
+ */
+export function executionEventFromCanonicalFrame(value: unknown): ExecutionEvent | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (
+    typeof row.id !== "string"
+    || typeof row.run_id !== "string"
+    || typeof row.type !== "string"
+    || typeof row.timestamp !== "string"
+    || typeof row.sequence !== "number"
+    || !Number.isSafeInteger(row.sequence)
+    || row.sequence < 0
+    || !row.payload
+    || typeof row.payload !== "object"
+    || Array.isArray(row.payload)
+  ) return null;
+  return {
+    id: row.id,
+    run_id: row.run_id,
+    sequence: row.sequence,
+    type: row.type,
+    timestamp: row.timestamp,
+    payload: row.payload as Record<string, unknown>,
+  };
+}
 
 export function executionEventFromChatFrame(value: unknown): ExecutionEvent | null {
   if (!value || typeof value !== "object") return null;

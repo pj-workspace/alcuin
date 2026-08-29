@@ -24,6 +24,10 @@ class StrictModel(BaseModel):
 
 class EventType(StrEnum):
     RUN_STARTED = "run.started"
+    CONTEXT_COMPACTION_STARTED = "context.compaction.started"
+    CONTEXT_COMPACTION_COMPLETED = "context.compaction.completed"
+    CONTEXT_COMPACTION_FAILED = "context.compaction.failed"
+    CONTEXT_ASSEMBLED = "context.assembled"
     REASONING_DELTA = "reasoning.delta"
     MESSAGE_DELTA = "message.delta"
     TOOL_REQUESTED = "tool.requested"

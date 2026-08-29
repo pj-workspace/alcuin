@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from alcuin_context import ContextAssembly, ContextMessage
 from alcuin_api.config import Settings
 from alcuin_core.contracts import AgentDefinition, EventType, ImageAttachment
 from alcuin_api.runtime import OpenAICompatibleRuntime, RuntimeRequest
@@ -16,6 +17,66 @@ from alcuin_api.tools import (
     ToolRegistry,
     ToolResult,
 )
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_serializes_normalized_multiturn_context_once() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["instructions"] == "Platform protocol\n\nAgent instructions exactly once"
+        assert payload["instructions"].count("Agent instructions exactly once") == 1
+        assert payload["input"] == [
+            {"role": "user", "content": "Earlier question"},
+            {"role": "assistant", "content": "Earlier answer"},
+            {"role": "user", "content": "Current question"},
+        ]
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"type":"response.output_text.delta","delta":"Current answer"}\n\n'
+                'data: {"type":"response.completed"}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    context = ContextAssembly(
+        system_prompt="Platform protocol\n\nAgent instructions exactly once",
+        messages=(
+            ContextMessage("msg_1", 1, "user", "Earlier question", "run_1"),
+            ContextMessage("msg_2", 2, "assistant", "Earlier answer", "run_1"),
+            ContextMessage("msg_3", 3, "user", "Current question", "run_2"),
+        ),
+        trace=(),
+        estimated_tokens=32,
+        token_budget=1000,
+        compaction_trigger_tokens=800,
+        estimator_revision="test",
+    )
+    runtime = OpenAICompatibleRuntime(
+        Settings(
+            deepseek_api_key="ds-test-key",
+            deepseek_model="deepseek-v4-flash",
+            deepseek_protocol="responses",
+        ),
+        httpx.MockTransport(handler),
+    )
+    request = RuntimeRequest(
+        workspace_id="ws_test",
+        run_id="run_2",
+        prompt="Current question",
+        thread_context={},
+        definition=AgentDefinition(
+            identity={"name": "Context Agent"},
+            instructions="Agent instructions exactly once",
+            model={"provider": "deepseek", "model": "deepseek-v4-flash"},
+        ),
+        context=context,
+        current_message_id="msg_3",
+    )
+
+    emissions = [emission async for emission in runtime.stream(request)]
+
+    assert emissions[0].payload["delta"] == "Current answer"
 
 
 @pytest.mark.asyncio
