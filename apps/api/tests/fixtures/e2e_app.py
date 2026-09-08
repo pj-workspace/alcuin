@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 
 import psycopg
 from alcuin_knowledge import KnowledgeChunk, KnowledgeHit, KnowledgeService
@@ -94,9 +95,17 @@ class MemoryKnowledgeIndex:
 
 
 settings = Settings()
+database_name = urlsplit(settings.database_url).path.removeprefix("/")
+if not database_name.endswith("_test"):
+    raise RuntimeError(
+        "Refusing to reset a PostgreSQL database whose name does not end in '_test'"
+    )
 with psycopg.connect(settings.database_url) as connection:
     connection.execute(
         """TRUNCATE TABLE
+        artifact_versions, artifacts,
+        message_attachments, attachment_blobs, attachments,
+        run_context_assemblies, thread_compactions, messages,
         knowledge_documents, knowledge_sources, extensions, approvals, events,
         runs, threads, agent_versions, agents, workspaces
         CASCADE"""

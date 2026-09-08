@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import json
+import hashlib
 
 import httpx
 import pytest
 
+from alcuin_context import ContextAssembly, ContextMessage
 from alcuin_api.config import Settings
-from alcuin_core.contracts import AgentDefinition, EventType, ImageAttachment
-from alcuin_api.runtime import OpenAICompatibleRuntime, RuntimeRequest
+from alcuin_core.contracts import (
+    AgentDefinition,
+    EventType,
+    ReasoningEffort,
+)
+from alcuin_api.runtime import (
+    OpenAICompatibleRuntime,
+    RuntimeAttachmentRef,
+    RuntimeRequest,
+)
 from alcuin_api.tools import (
     ToolCitation,
     ToolContext,
@@ -16,6 +26,121 @@ from alcuin_api.tools import (
     ToolRegistry,
     ToolResult,
 )
+
+
+class MemoryAttachmentResolver:
+    def __init__(self, records: dict[str, dict]) -> None:
+        self.records = records
+
+    def get_attachment_blob(
+        self,
+        workspace_id: str,
+        attachment_id: str,
+    ) -> dict | None:
+        record = self.records.get(attachment_id)
+        return record if record and record["workspace_id"] == workspace_id else None
+
+
+def test_runtime_request_preserves_legacy_thinking_with_explicit_effort_precedence() -> (
+    None
+):
+    definition = AgentDefinition(
+        identity={"name": "Reasoning Agent"},
+        instructions="Answer the supplied request carefully.",
+        model={"provider": "deepseek", "model": "deepseek-v4-flash"},
+    )
+    enabled = RuntimeRequest(
+        workspace_id="ws_test",
+        run_id="run_enabled",
+        prompt="Answer",
+        thread_context={},
+        definition=definition,
+        thinking=True,
+    )
+    disabled = RuntimeRequest(
+        workspace_id="ws_test",
+        run_id="run_disabled",
+        prompt="Answer",
+        thread_context={},
+        definition=definition,
+        thinking=False,
+    )
+    explicit = RuntimeRequest(
+        workspace_id="ws_test",
+        run_id="run_explicit",
+        prompt="Answer",
+        thread_context={},
+        definition=definition,
+        thinking=False,
+        reasoning_effort=ReasoningEffort.MEDIUM,
+    )
+
+    assert enabled.reasoning_effort is ReasoningEffort.HIGH
+    assert enabled.thinking_enabled is True
+    assert disabled.reasoning_effort is ReasoningEffort.NONE
+    assert disabled.thinking_enabled is False
+    assert explicit.reasoning_effort is ReasoningEffort.MEDIUM
+    assert explicit.thinking_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_serializes_normalized_multiturn_context_once() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["instructions"] == "Platform protocol\n\nAgent instructions exactly once"
+        assert payload["instructions"].count("Agent instructions exactly once") == 1
+        assert payload["input"] == [
+            {"role": "user", "content": "Earlier question"},
+            {"role": "assistant", "content": "Earlier answer"},
+            {"role": "user", "content": "Current question"},
+        ]
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"type":"response.output_text.delta","delta":"Current answer"}\n\n'
+                'data: {"type":"response.completed"}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    context = ContextAssembly(
+        system_prompt="Platform protocol\n\nAgent instructions exactly once",
+        messages=(
+            ContextMessage("msg_1", 1, "user", "Earlier question", "run_1"),
+            ContextMessage("msg_2", 2, "assistant", "Earlier answer", "run_1"),
+            ContextMessage("msg_3", 3, "user", "Current question", "run_2"),
+        ),
+        trace=(),
+        estimated_tokens=32,
+        token_budget=1000,
+        compaction_trigger_tokens=800,
+        estimator_revision="test",
+    )
+    runtime = OpenAICompatibleRuntime(
+        Settings(
+            deepseek_api_key="ds-test-key",
+            deepseek_model="deepseek-v4-flash",
+            deepseek_protocol="responses",
+        ),
+        httpx.MockTransport(handler),
+    )
+    request = RuntimeRequest(
+        workspace_id="ws_test",
+        run_id="run_2",
+        prompt="Current question",
+        thread_context={},
+        definition=AgentDefinition(
+            identity={"name": "Context Agent"},
+            instructions="Agent instructions exactly once",
+            model={"provider": "deepseek", "model": "deepseek-v4-flash"},
+        ),
+        context=context,
+        current_message_id="msg_3",
+    )
+
+    emissions = [emission async for emission in runtime.stream(request)]
+
+    assert emissions[0].payload["delta"] == "Current answer"
 
 
 @pytest.mark.asyncio
@@ -67,14 +192,53 @@ async def test_deepseek_responses_stream_maps_to_execution_events() -> None:
     assert [emission.type for emission in emissions] == [
         EventType.MESSAGE_DELTA,
         EventType.MESSAGE_DELTA,
-        EventType.ARTIFACT_UPDATED,
         EventType.RUN_COMPLETED,
     ]
-    assert emissions[-2].payload["artifact"]["content"] == "Hello from DeepSeek"
+    assert not any(event.type == EventType.ARTIFACT_UPDATED for event in emissions)
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_uses_effective_model_and_reasoning_effort() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://api.openai.com/v1/responses"
+        payload = json.loads(request.content)
+        assert payload["model"] == "configured-model"
+        assert payload["reasoning"] == {"effort": "low"}
+        assert "thinking" not in payload
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"type":"response.output_text.delta","delta":"done"}\n\n'
+                'data: {"type":"response.completed"}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    runtime = OpenAICompatibleRuntime(
+        Settings(openai_api_key="openai-test-key", openai_model="configured-model"),
+        httpx.MockTransport(handler),
+    )
+    request = RuntimeRequest(
+        workspace_id="ws_test",
+        run_id="run_openai_reasoning",
+        prompt="Answer",
+        thread_context={},
+        definition=AgentDefinition(
+            identity={"name": "OpenAI Agent"},
+            instructions="Answer the supplied request clearly.",
+            model={"provider": "openai-compatible", "model": "configured-model"},
+        ),
+        reasoning_effort=ReasoningEffort.LOW,
+    )
+
+    emissions = [emission async for emission in runtime.stream(request)]
+
+    assert emissions[0].payload["delta"] == "done"
 
 
 @pytest.mark.asyncio
 async def test_deepseek_vision_uses_chat_completions_image_content() -> None:
+    image_content = b"\x89PNG\r\n\x1a\n"
     async def handler(request: httpx.Request) -> httpx.Response:
         assert str(request.url) == "https://api.deepseek.com/chat/completions"
         payload = json.loads(request.content)
@@ -105,7 +269,19 @@ async def test_deepseek_vision_uses_chat_completions_image_content() -> None:
         deepseek_model="deepseek-v4-flash-vision-exp",
         deepseek_protocol="responses",
     )
-    runtime = OpenAICompatibleRuntime(settings, httpx.MockTransport(handler))
+    runtime = OpenAICompatibleRuntime(
+        settings,
+        httpx.MockTransport(handler),
+        attachment_resolver=MemoryAttachmentResolver(
+            {
+                "att_image": {
+                    "workspace_id": "ws_test",
+                    "media_type": "image/png",
+                    "content": image_content,
+                }
+            }
+        ),
+    )
     request = RuntimeRequest(
         workspace_id="ws_test",
         run_id="run_vision",
@@ -121,10 +297,15 @@ async def test_deepseek_vision_uses_chat_completions_image_content() -> None:
             },
         ),
         attachments=(
-            ImageAttachment(
+            RuntimeAttachmentRef(
+                id="att_image",
+                message_id="",
                 name="sample.png",
                 media_type="image/png",
-                data_url="data:image/png;base64,iVBORw0KGgo=",
+                kind="image",
+                size_bytes=len(image_content),
+                sha256=hashlib.sha256(image_content).hexdigest(),
+                current=True,
             ),
         ),
     )
@@ -137,15 +318,16 @@ async def test_deepseek_vision_uses_chat_completions_image_content() -> None:
         if emission.type == EventType.REASONING_DELTA
     ]
     assert reasoning == ["checking"]
-    assert emissions[-2].payload["artifact"]["content"] == "blue"
+    assert "".join(event.payload["delta"] for event in emissions if event.type == EventType.MESSAGE_DELTA) == "blue"
 
 
 @pytest.mark.asyncio
 async def test_deepseek_thinking_mode_is_explicit_and_streamed() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
+        assert payload["model"] == "deepseek-v4-pro"
         assert payload["thinking"] == {"type": "enabled"}
-        assert payload["reasoning_effort"] == "high"
+        assert payload["reasoning_effort"] == "medium"
         return httpx.Response(
             200,
             text=(
@@ -170,7 +352,9 @@ async def test_deepseek_thinking_mode_is_explicit_and_streamed() -> None:
             instructions="Think carefully, then answer.",
             model={"provider": "deepseek", "model": "deepseek-v4-flash-vision-exp"},
         ),
-        thinking=True,
+        thinking=False,
+        effective_model="deepseek-v4-pro",
+        reasoning_effort=ReasoningEffort.MEDIUM,
     )
 
     emissions = [emission async for emission in runtime.stream(request)]
@@ -206,7 +390,9 @@ async def test_chat_completions_executes_tool_and_continues_to_final_answer() ->
         tool_message = payload["messages"][-1]
         assert tool_message["role"] == "tool"
         assert tool_message["tool_call_id"] == "call_1"
-        assert json.loads(tool_message["content"])["hits"][0]["title"] == "Alcuin"
+        evidence = json.loads(tool_message["content"])
+        assert evidence["data"]["hits"][0]["title"] == "Alcuin"
+        assert evidence["evidence"][0]["citation_id"] == "s1"
         return httpx.Response(
             200,
             text=(
@@ -221,6 +407,7 @@ async def test_chat_completions_executes_tool_and_continues_to_final_answer() ->
         return ToolResult(
             data={"hits": [{"title": "Alcuin", "text": arguments["query"]}]},
             summary="1 knowledge hit",
+            public_data={"hit_count": 1},
             citations=(
                 ToolCitation(
                     label="Architecture",
@@ -271,14 +458,15 @@ async def test_chat_completions_executes_tool_and_continues_to_final_answer() ->
         EventType.TOOL_COMPLETED,
         EventType.CITATION_CREATED,
         EventType.MESSAGE_DELTA,
-        EventType.ARTIFACT_UPDATED,
         EventType.RUN_COMPLETED,
     ]
     assert emissions[0].payload["delta"] == "I will search first."
     assert emissions[1].payload["arguments"] == {"query": "Alcuin"}
     assert emissions[2].payload["result_summary"] == "1 knowledge hit"
+    assert emissions[2].payload["result"] == {"hit_count": 1}
     assert emissions[3].payload["locator"] == "kb://docs/alcuin"
-    assert emissions[-2].payload["artifact"]["content"] == "Alcuin is extensible."
+    assert emissions[-2].payload["delta"] == "Alcuin is extensible."
+    assert emissions[3].payload["citation_id"] == "s1"
     assert seen_contexts[0].workspace_id == "ws_test"
     assert len(requests) == 2
 
@@ -412,4 +600,4 @@ async def test_tool_loop_enforces_per_tool_budget_and_allows_final_answer() -> N
     assert provider_calls == 3
     assert [row.payload["status"] for row in completed] == ["succeeded", "failed"]
     assert completed[1].payload["error"]["code"] == "tool_budget_exceeded"
-    assert emissions[-2].payload["artifact"]["content"] == "Enough evidence."
+    assert emissions[-2].payload["delta"] == "Enough evidence."

@@ -1,12 +1,13 @@
 "use client";
 
 import type { ExecutionEvent } from "@alcuin/contracts";
-import { Check, CircleAlert, Clock3, Copy, Database, Search, Wrench } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, ChevronRight, CircleAlert, Clock3, Database, Search, Wrench } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
-import { ThinkingOrb, type OrbState, type OrbTheme } from "thinking-orbs";
+import type { OrbState } from "thinking-orbs";
 
-import { MarkdownContent } from "@/shared/components/markdown-content";
+import { AgentPresenceOrb } from "@/features/studio/agent-presence-orb";
+import { CitationResponse } from "@/features/studio/citations";
 import { ThinkingMarkdown } from "@/shared/components/thinking-markdown";
 import { useI18n } from "@/shared/lib/i18n";
 
@@ -30,21 +31,22 @@ type ToolTrace = {
 type TraceStep = ReasoningTrace | ToolTrace;
 type Presence = { label: string; state: OrbState };
 
-const ORB_FADE_MS = 500;
-
 export function RunOutput({
   events,
   running,
   assistantText,
   onCopy,
+  runId,
 }: {
   events: ExecutionEvent[];
   running: boolean;
   assistantText: string;
-  onCopy: () => void;
+  onCopy: (text: string) => void | Promise<void>;
+  runId?: string | null;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
+  const [tracePinned, setTracePinned] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const steps = useMemo(() => collectTraceSteps(events), [events]);
   const tools = steps.filter((step): step is ToolTrace => step.kind === "tool");
@@ -55,7 +57,19 @@ export function RunOutput({
   const hasTrace = Boolean(running || startedAt || steps.length || completed || failed);
   const runIdentity = startedEvent?.run_id ?? events[0]?.run_id ?? "empty";
 
-  useEffect(() => setCollapsed(true), [runIdentity]);
+  useEffect(() => {
+    setCollapsed(true);
+    setTracePinned(false);
+  }, [runIdentity]);
+
+  useEffect(() => {
+    if (tracePinned) return;
+    if (running && steps.length > 0 && !assistantText) {
+      setCollapsed(false);
+      return;
+    }
+    if (assistantText || !running) setCollapsed(true);
+  }, [assistantText, running, steps.length, tracePinned]);
 
   useEffect(() => {
     if (!running || !startedAt) return;
@@ -85,15 +99,16 @@ export function RunOutput({
       <section className={clsx("run-brainstorm", running && "streaming")}>
         <button
           className="brainstorm-toggle"
-          onClick={() => setCollapsed((value) => !value)}
+          onClick={() => { setTracePinned(true); setCollapsed((value) => !value); }}
           aria-expanded={!collapsed}
           aria-label={t(collapsed ? "Show run trace" : "Hide run trace")}
         >
-          <PresenceOrb state={presence.state} active={running} />
+          <AgentPresenceOrb state={presence.state} active={running} />
           <span className="brainstorm-label-shell">
             <span className="brainstorm-label" key={presence.label}>{presence.label}</span>
             {running && <i className="brainstorm-label-sweep" />}
           </span>
+          <ChevronRight className={clsx("brainstorm-chevron", !collapsed && "expanded")} size={14} />
         </button>
         <div
           className={clsx("brainstorm-collapse", collapsed && "collapsed")}
@@ -136,59 +151,13 @@ export function RunOutput({
         </div>
       </section>
     )}
-    {assistantText && (
-      <div className="assistant-output">
-        <MarkdownContent content={assistantText} />
-        {!running && <div className="assistant-actions"><button onClick={onCopy} aria-label={t("Copy response")}><Copy size={13} />{t("Copy")}</button></div>}
+    {(assistantText || events.some((event) => event.type === "citation.created")) && (
+      <div className={clsx("assistant-output", running && "streaming")}>
+        <CitationResponse content={assistantText} events={events} runId={runId ?? startedEvent?.run_id} running={running} onCopy={onCopy} />
       </div>
     )}
     {!assistantText && errorMessage && <div className="run-error"><CircleAlert size={14} /><span>{String(errorMessage)}</span></div>}
   </>;
-}
-
-function PresenceOrb({ state, active }: { state: OrbState; active: boolean }) {
-  const [shown, setShown] = useState(state);
-  const [leaving, setLeaving] = useState<OrbState | null>(null);
-  const [theme, setTheme] = useState<OrbTheme>("light");
-  const shownRef = useRef(state);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    const sync = () => setTheme(root.dataset.theme === "dark" ? "dark" : "light");
-    sync();
-    const observer = new MutationObserver(sync);
-    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    if (state === shownRef.current) return;
-    const previous = shownRef.current;
-    shownRef.current = state;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setLeaving(null);
-      setShown(state);
-      return;
-    }
-    setLeaving(previous);
-    setShown(state);
-    const timer = window.setTimeout(() => setLeaving(null), ORB_FADE_MS);
-    return () => window.clearTimeout(timer);
-  }, [state]);
-
-  const speed = active ? orbSpeed(state) : 0.72;
-  return (
-    <span className="presence-orb" aria-hidden>
-      {leaving && (
-        <span className="presence-orb-layer presence-orb-layer-out">
-          <ThinkingOrb state={leaving} size={20} theme={theme} speed={speed} />
-        </span>
-      )}
-      <span className={clsx("presence-orb-layer", leaving && "presence-orb-layer-in")}>
-        <ThinkingOrb state={shown} size={20} theme={theme} speed={speed} />
-      </span>
-    </span>
-  );
 }
 
 function derivePresence(
@@ -285,13 +254,6 @@ function toolOrbState(name: string): OrbState {
   if (isSearchTool(name)) return "searching";
   if (/artifact|form|schema|render|shape/i.test(name)) return "shaping";
   return "working";
-}
-
-function orbSpeed(state: OrbState): number {
-  if (state === "searching" || state === "solving") return 1.08;
-  if (state === "connecting") return 1.05;
-  if (state === "composing" || state === "weaving") return 1.02;
-  return 1;
 }
 
 function isKnowledgeTool(name: string): boolean {

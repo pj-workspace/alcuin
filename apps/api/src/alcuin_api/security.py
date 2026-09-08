@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 from fastapi import Header, HTTPException, Request, status
 
-from .config import get_settings
+from .config import Settings, get_settings
 from alcuin_core.contracts import EmbedClaims
 
 
@@ -97,13 +97,45 @@ class RequestScope:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Action not allowed: {action}")
 
 
+def _request_settings(request: Request) -> Settings:
+    configured = getattr(request.app.state, "settings", None)
+    return configured if isinstance(configured, Settings) else get_settings()
+
+
+def _bearer_token(authorization: str | None) -> str | None:
+    if authorization is None:
+        return None
+    scheme, separator, credentials = authorization.partition(" ")
+    if not separator or scheme.casefold() != "bearer":
+        return None
+    token = credentials.strip()
+    return token or None
+
+
+def _require_operator_token(settings: Settings, token: str | None) -> None:
+    expected = settings.operator_api_key
+    candidate = token.encode("utf-8") if token is not None else b""
+    configured = (
+        expected.get_secret_value().strip().encode("utf-8")
+        if expected is not None
+        else b""
+    )
+    if not configured or not hmac.compare_digest(candidate, configured):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Operator authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 async def resolve_scope(
     request: Request,
     x_alcuin_workspace: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> RequestScope:
-    if authorization and authorization.startswith("Bearer "):
-        claims = verify_embed_token(authorization.removeprefix("Bearer ").strip(), request.headers.get("origin"))
+    token = _bearer_token(authorization)
+    if token is not None and token.startswith("alc1."):
+        claims = verify_embed_token(token, request.headers.get("origin"))
         return RequestScope(
             workspace_id=claims.workspace_id,
             agent_id=claims.agent_id,
@@ -111,6 +143,13 @@ async def resolve_scope(
             allowed_actions=frozenset(claims.allowed_actions),
             embed=True,
         )
+    settings = _request_settings(request)
+    if settings.is_production:
+        _require_operator_token(settings, token)
+    elif token is not None:
+        # Preserve the previous fail-closed behavior for unexpected Bearer credentials
+        # while local development continues to support the Workspace header alone.
+        verify_embed_token(token, request.headers.get("origin"))
     if not x_alcuin_workspace:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Workspace header required")
     return RequestScope(workspace_id=x_alcuin_workspace)

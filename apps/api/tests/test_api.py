@@ -138,7 +138,80 @@ def test_provider_status_never_returns_credentials() -> None:
         deepseek = next(item for item in response.json() if item["id"] == "deepseek")
         assert deepseek["default_model"] == "deepseek-v4-flash-vision-exp"
         assert deepseek["input_modalities"] == ["text", "image"]
+        assert [model["id"] for model in deepseek["models"]] == [
+            "deepseek-v4-flash-vision-exp",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+        ]
+        assert [model["tier"] for model in deepseek["models"]] == [
+            "vision",
+            "flash",
+            "pro",
+        ]
+        assert deepseek["models"][0]["input_modalities"] == ["text", "image"]
+        assert deepseek["models"][1]["input_modalities"] == ["text"]
+        assert deepseek["models"][2]["reasoning_efforts"] == [
+            "none",
+            "low",
+            "medium",
+            "high",
+        ]
+        generic = next(
+            item for item in response.json() if item["id"] == "openai-compatible"
+        )
+        assert [model["id"] for model in generic["models"]] == ["gpt-4.1-mini"]
+        assert generic["models"][0]["tier"] == "standard"
         assert "api_key" not in deepseek
+        assert "test-provider-key" not in response.text
+
+
+def test_run_model_override_is_provider_scoped_and_image_capability_is_enforced() -> (
+    None
+):
+    headers = {"X-Alcuin-Workspace": "ws_demo"}
+    with make_client() as client:
+        thread = client.post(
+            "/v1/threads",
+            headers=headers,
+            json={"agent_id": "agt_starter", "context": {}},
+        ).json()
+        cross_provider = client.post(
+            f"/v1/threads/{thread['id']}/runs",
+            headers=headers,
+            json={"input": "Hello", "model_override": "gpt-4.1-mini"},
+        )
+        assert cross_provider.status_code == 422
+        assert cross_provider.json()["detail"] == (
+            "model_override is unavailable for this Agent provider"
+        )
+
+        uploaded = client.post(
+            "/v1/attachments",
+            headers=headers,
+            data={"upload_id": "upload-model-capability"},
+            files={
+                "file": (
+                    "pixel.png",
+                    b"\x89PNG\r\n\x1a\n",
+                    "image/png",
+                )
+            },
+        )
+        assert uploaded.status_code == 201
+        text_only = client.post(
+            f"/v1/threads/{thread['id']}/runs",
+            headers=headers,
+            json={
+                "input": "Inspect this image",
+                "model_override": "deepseek-v4-flash",
+                "attachment_ids": [uploaded.json()["id"]],
+            },
+        )
+        assert text_only.status_code == 422
+        assert text_only.json()["detail"] == (
+            "selected model does not accept image attachments"
+        )
+        assert client.get("/v1/runs", headers=headers).json() == []
 
 
 def test_agent_creation_is_versioned_and_rejects_duplicate_workspace_slug() -> None:
@@ -172,7 +245,9 @@ def test_agent_creation_is_versioned_and_rejects_duplicate_workspace_slug() -> N
         )
         assert created.status_code == 201
         assert created.json()["status"] == "draft"
+        assert created.json()["published_version_id"] is None
         assert created.json()["version"] == 1
+        assert created.json()["updated_at"]
         assert created.json()["definition"]["identity"]["name"] == "Release Copilot"
 
         duplicate = client.post(
@@ -194,6 +269,109 @@ def test_agent_creation_is_versioned_and_rejects_duplicate_workspace_slug() -> N
             )
             == 1
         )
+
+
+def test_exact_agent_version_publication_pins_threads_and_runs() -> None:
+    headers = {"X-Alcuin-Workspace": "ws_demo"}
+    with make_client() as client:
+        original = client.get("/v1/agents/agt_starter", headers=headers).json()
+        first_version_id = original["current_version_id"]
+        assert original["published_version_id"] == first_version_id
+
+        definition = json.loads(json.dumps(original["definition"]))
+        definition["instructions"] = "Use the exact second immutable version."
+        created = client.post(
+            "/v1/agents/agt_starter/versions",
+            headers=headers,
+            json={"definition": definition},
+        )
+        assert created.status_code == 201
+        second_version_id = created.json()["current_version_id"]
+        assert created.json()["status"] == "published"
+        assert created.json()["published_version_id"] == first_version_id
+
+        versions = client.get(
+            "/v1/agents/agt_starter/versions",
+            headers=headers,
+        )
+        assert versions.status_code == 200
+        assert [version["version"] for version in versions.json()] == [2, 1]
+        second_version = client.get(
+            f"/v1/agents/agt_starter/versions/{second_version_id}",
+            headers=headers,
+        )
+        assert second_version.status_code == 200
+        assert second_version.json()["published_at"] is None
+        assert len(second_version.json()["definition_sha256"]) == 64
+
+        old_thread = client.post(
+            "/v1/threads",
+            headers=headers,
+            json={
+                "agent_id": "agt_starter",
+                "agent_version_id": first_version_id,
+                "title": "Pinned to v1",
+                "context": {},
+            },
+        )
+        assert old_thread.status_code == 201
+        assert old_thread.json()["agent_version_id"] == first_version_id
+
+        published = client.post(
+            f"/v1/agents/agt_starter/versions/{second_version_id}/publish",
+            headers=headers,
+        )
+        assert published.status_code == 200
+        assert published.json()["published_version_id"] == second_version_id
+        assert published.json()["current_version_id"] == second_version_id
+
+        run = client.post(
+            f"/v1/threads/{old_thread.json()['id']}/runs",
+            headers=headers,
+            json={"input": "Which immutable version is this Thread using?"},
+        )
+        assert run.status_code == 202
+        assert run.json()["agent_version_id"] == first_version_id
+
+        new_thread = client.post(
+            "/v1/threads",
+            headers=headers,
+            json={"agent_id": "agt_starter", "context": {}},
+        )
+        assert new_thread.status_code == 201
+        assert new_thread.json()["agent_version_id"] == second_version_id
+
+        definition["instructions"] = "Use the compatibility publication proxy safely."
+        third = client.post(
+            "/v1/agents/agt_starter/versions",
+            headers=headers,
+            json={"definition": definition},
+        ).json()
+        third_version_id = third["current_version_id"]
+        compatible = client.post(
+            "/v1/agents/agt_starter/publish",
+            headers=headers,
+        )
+        assert compatible.status_code == 200
+        assert compatible.json()["published_version_id"] == third_version_id
+
+        wrong_agent = client.post(
+            "/v1/threads",
+            headers=headers,
+            json={
+                "agent_id": "agt_starter",
+                "agent_version_id": "av_operations_1",
+                "context": {},
+            },
+        )
+        assert wrong_agent.status_code == 422
+        assert "does not belong" in wrong_agent.json()["detail"]
+
+        hidden_version = client.get(
+            f"/v1/agents/agt_operations/versions/{first_version_id}",
+            headers=headers,
+        )
+        assert hidden_version.status_code == 404
 
 
 def test_web_search_tool_is_registered_only_when_searxng_is_configured() -> None:
@@ -367,7 +545,11 @@ def test_run_emits_ordered_terminal_events() -> None:
         run = client.post(
             f"/v1/threads/{thread['id']}/runs",
             headers=headers,
-            json={"input": "Summarize the checkout incident"},
+            json={
+                "input": "Summarize the checkout incident",
+                "model_override": "deepseek-v4-pro",
+                "reasoning_effort": "medium",
+            },
         ).json()
         deadline = time.time() + 3
         body = None
@@ -381,6 +563,12 @@ def test_run_emits_ordered_terminal_events() -> None:
         sequences = [event["sequence"] for event in body["events"]]
         assert sequences == sorted(sequences)
         assert body["events"][0]["type"] == "run.started"
+        assert body["events"][0]["payload"]["model"] == "deepseek-v4-pro"
+        assert body["events"][0]["payload"]["reasoning_effort"] == "medium"
+        assert body["events"][0]["payload"]["thinking"] is True
+        assert "api_key" not in body["events"][0]["payload"]
+        assert "base_url" not in body["events"][0]["payload"]
+        assert "test-provider-key" not in json.dumps(body["events"][0])
         assert body["events"][-1]["type"] == "run.completed"
         resumed = client.get(
             f"/v1/runs/{run['id']}/events?after=2",
@@ -431,11 +619,17 @@ def test_run_emits_ordered_terminal_events() -> None:
         assert tcm_ids == [frame["sequence"] for frame in tcm_frames]
         assert tcm_ids == sorted(set(tcm_ids))
         assert tcm_types[0] == "meta"
+        assert tcm_frames[0]["chatModel"] == "deepseek-v4-pro"
+        assert tcm_frames[0]["reasoningEffort"] == "medium"
+        assert "apiKey" not in tcm_frames[0]
+        assert "baseUrl" not in tcm_frames[0]
+        assert "test-provider-key" not in json.dumps(tcm_frames[0])
         assert tcm_types[-1] == "done"
         assert tcm_types.index("tool-call") < tcm_types.index("tool-result")
         assert tcm_types.index("tool-result") < tcm_types.index("text-delta")
         assert "source-registry" in tcm_types
-        assert "artifact-updated" in tcm_types
+        # A normal answer is not an independent generated document.
+        assert "artifact-updated" not in tcm_types
 
 
 def test_approved_tool_fails_truthfully_when_runtime_handler_is_unavailable() -> None:
@@ -645,20 +839,53 @@ def test_embed_session_remains_pinned_to_published_agent_version() -> None:
         agent = client.get("/v1/agents/agt_operations", headers=operator).json()
         definition = agent["definition"]
         definition["instructions"] = "A newer published instruction set."
-        assert (
-            client.post(
-                "/v1/agents/agt_operations/versions",
-                headers=operator,
-                json={"definition": definition},
-            ).status_code
-            == 201
+        draft = client.post(
+            "/v1/agents/agt_operations/versions",
+            headers=operator,
+            json={"definition": definition},
         )
+        assert draft.status_code == 201
+        draft_version = draft.json()["current_version_id"]
+        assert draft.json()["published_version_id"] == original_version
+
+        before_publish = client.post(
+            "/v1/embed/sessions",
+            headers=operator,
+            json={"agent_id": "agt_operations", "origin": "http://localhost:3000"},
+        )
+        assert before_publish.status_code == 201
+        assert before_publish.json()["agent_version_id"] == original_version
+
+        before_publish_embed = {
+            "Authorization": f"Bearer {before_publish.json()['token']}",
+            "Origin": "http://localhost:3000",
+        }
+        mismatch = client.post(
+            "/v1/threads",
+            headers=before_publish_embed,
+            json={
+                "agent_id": "agt_operations",
+                "agent_version_id": draft_version,
+                "context": {},
+            },
+        )
+        assert mismatch.status_code == 403
+
         assert (
             client.post(
-                "/v1/agents/agt_operations/publish", headers=operator
+                f"/v1/agents/agt_operations/versions/{draft_version}/publish",
+                headers=operator,
             ).status_code
             == 200
         )
+
+        after_publish = client.post(
+            "/v1/embed/sessions",
+            headers=operator,
+            json={"agent_id": "agt_operations", "origin": "http://localhost:3000"},
+        )
+        assert after_publish.status_code == 201
+        assert after_publish.json()["agent_version_id"] == draft_version
 
         embed = {
             "Authorization": f"Bearer {session['token']}",
@@ -669,6 +896,7 @@ def test_embed_session_remains_pinned_to_published_agent_version() -> None:
             headers=embed,
             json={"agent_id": "agt_operations", "context": {}},
         ).json()
+        assert thread["agent_version_id"] == original_version
         run = client.post(
             f"/v1/threads/{thread['id']}/runs",
             headers=embed,

@@ -1,8 +1,9 @@
 "use client";
 
-import type { Agent, KnowledgeSource, ToolCatalogEntry } from "@alcuin/contracts";
+import type { Agent, AgentDefinition, KnowledgeSource, Rule, Skill, SkillInvocationMode, ToolCatalogEntry } from "@alcuin/contracts";
 import {
   Blocks,
+  BookOpenCheck,
   Bot,
   BrainCircuit,
   Check,
@@ -15,6 +16,7 @@ import {
   Play,
   Plus,
   Save,
+  Scale,
   Settings2,
   ShieldCheck,
   Sparkles,
@@ -26,23 +28,29 @@ import { clsx } from "clsx";
 
 import { alcuinApi } from "@/shared/lib/api";
 import { StatusPill, Toast } from "@/shared/components/ui";
+import { skillDisplayName } from "@/shared/lib/customization";
 import { useI18n, type MessageKey } from "@/shared/lib/i18n";
 
 const sections = [
-  { id: "identity", label: "Identity", icon: Bot },
-  { id: "instructions", label: "Instructions", icon: FileJson2 },
-  { id: "model", label: "Model", icon: BrainCircuit },
-  { id: "capabilities", label: "Capabilities", icon: Wrench },
-  { id: "knowledge", label: "Knowledge", icon: Database },
-  { id: "policies", label: "Policies", icon: ShieldCheck },
-  { id: "output", label: "Output", icon: Sparkles },
-] satisfies Array<{ id: string; label: MessageKey; icon: typeof Bot }>;
+  { id: "identity", group: "Definition", label: "Identity", icon: Bot },
+  { id: "instructions", group: "Definition", label: "Instructions", icon: FileJson2 },
+  { id: "model", group: "Definition", label: "Model", icon: BrainCircuit },
+  { id: "capabilities", group: "Context & Capability", label: "Tools", icon: Wrench },
+  { id: "skills", group: "Context & Capability", label: "Skills", icon: BookOpenCheck },
+  { id: "knowledge", group: "Context & Capability", label: "Knowledge", icon: Database },
+  { id: "rules", group: "Boundaries", label: "Rules", icon: Scale },
+  { id: "policies", group: "Boundaries", label: "Policies", icon: ShieldCheck },
+  { id: "output", group: "Result", label: "Output", icon: Sparkles },
+] satisfies Array<{ id: string; group: MessageKey; label: MessageKey; icon: typeof Bot }>;
 
 export function AgentBuilderView({
   agent,
   agents,
   knowledgeSources,
   tools,
+  skills,
+  rules,
+  customizationError,
   onChanged,
   onCreateAgent,
   onSelectAgent,
@@ -51,6 +59,9 @@ export function AgentBuilderView({
   agents: Agent[];
   knowledgeSources: KnowledgeSource[];
   tools: ToolCatalogEntry[];
+  skills: Skill[];
+  rules: Rule[];
+  customizationError: string | null;
   onChanged: () => Promise<void>;
   onCreateAgent: () => void;
   onSelectAgent: (agentId: string) => void;
@@ -59,6 +70,7 @@ export function AgentBuilderView({
   const [active, setActive] = useState("identity");
   const [definition, setDefinition] = useState(agent?.definition);
   const [saving, setSaving] = useState(false);
+  const [saveState, setSaveState] = useState<"saved" | "unsaved" | "saving" | "error">("saved");
   const [toast, setToast] = useState<string | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const completeness = useMemo(() => {
@@ -69,8 +81,9 @@ export function AgentBuilderView({
   if (!agent || !definition) return null;
   const currentAgent = agent;
   const currentDefinition = definition;
-  const updateIdentity = (field: "name" | "description", value: string) => setDefinition({ ...definition, identity: { ...definition.identity, [field]: value } });
-  const updateProvider = (provider: string) => setDefinition({
+  const changeDefinition = (next: AgentDefinition) => { setDefinition(next); setSaveState("unsaved"); };
+  const updateIdentity = (field: "name" | "description", value: string) => changeDefinition({ ...definition, identity: { ...definition.identity, [field]: value } });
+  const updateProvider = (provider: string) => changeDefinition({
     ...definition,
     model: provider === "deepseek"
       ? { provider, model: "deepseek-v4-flash-vision-exp", credential_ref: "secret://workspace/deepseek-primary" }
@@ -85,17 +98,20 @@ export function AgentBuilderView({
     const tools = knowledge.length
       ? Array.from(new Set([...definition.tools, "knowledge.search"]))
       : definition.tools.filter((tool) => tool !== "knowledge.search");
-    setDefinition({ ...definition, knowledge, tools });
+    changeDefinition({ ...definition, knowledge, tools });
   };
 
   async function save(publish = false) {
     setSaving(true);
+    setSaveState("saving");
     try {
       await alcuinApi.saveAgent(currentAgent.id, currentDefinition);
       if (publish) await alcuinApi.publishAgent(currentAgent.id);
-      notify(t(publish ? "Agent version published" : "Draft version saved"));
+      setSaveState("saved");
+      notify(t(publish ? "Agent ready in Studio" : "Agent changes saved"));
       await onChanged();
     } catch (error) {
+      setSaveState("error");
       notify(error instanceof Error ? error.message : t("Unable to save agent"));
     } finally {
       setSaving(false);
@@ -104,23 +120,22 @@ export function AgentBuilderView({
 
   return <div className="builder-surface">
     <header className="wide-header">
-      <div><div className="breadcrumbs"><span>{t("Agents")}</span><ChevronRight size={12} /><label className="builder-agent-switch"><select aria-label={t("Select agent")} value={agent.id} onChange={(event) => onSelectAgent(event.target.value)}>{agents.map((item) => <option key={item.id} value={item.id}>{item.name} · v{item.version}</option>)}</select><ChevronRight size={11} /></label></div><div className="title-row"><h1>{t("Agent Builder")}</h1><StatusPill status={agent.status} /><span className="version-badge">v{agent.version}</span></div><p>{t("Compose behavior from stable, versioned capabilities.")}</p></div>
-      <div className="header-actions"><button className="button secondary" onClick={onCreateAgent}><Plus size={14} />{t("New agent")}</button><button className="button secondary"><Eye size={14} />{t("Preview")}</button><button className="button secondary" disabled={saving} onClick={() => void save()}><Save size={14} />{t("Save draft")}</button><button className="button dark" disabled={saving} onClick={() => void save(true)}><Play size={13} fill="currentColor" />{t("Publish version")}</button></div>
+      <div><div className="breadcrumbs"><span>{t("Agents")}</span><ChevronRight size={12} /><label className="builder-agent-switch"><select aria-label={t("Select agent")} value={agent.id} onChange={(event) => onSelectAgent(event.target.value)}>{agents.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><ChevronRight size={11} /></label></div><div className="title-row"><h1>{t("Agent Builder")}</h1><StatusPill status={agent.status} /><span className={`save-indicator ${saveState}`}>{t(saveState === "saved" ? "Saved" : saveState === "unsaved" ? "Unsaved changes" : saveState === "saving" ? "Saving…" : "Save failed")}</span></div><p>{t("Define how this Agent thinks, what it can use, and where it must stop.")}</p></div>
+      <div className="header-actions"><button className="button secondary" onClick={onCreateAgent}><Plus size={14} />{t("New agent")}</button><button className="button secondary" disabled={saving || saveState === "saved"} onClick={() => void save()}><Save size={14} />{t("Save changes")}</button><button className="button dark" disabled={saving} onClick={() => void save(true)}><Play size={13} fill="currentColor" />{t("Use in Studio")}</button></div>
     </header>
     <div className="builder-body">
       <aside className="builder-nav">
-        <p>{t("Definition")}</p>
-        {sections.map((section) => <button key={section.id} aria-label={t(section.label)} onClick={() => setActive(section.id)} className={clsx(active === section.id && "active")}><section.icon size={15} /><span>{t(section.label)}</span>{section.id === "capabilities" && <small>{definition.tools.length}</small>}</button>)}
-        <div className="definition-score"><div><span>{t("Definition health")}</span><strong>{completeness}%</strong></div><div className="score-track"><i style={{ width: `${completeness}%` }} /></div><p>{t("Ready to publish")}</p></div>
+        {sections.map((section, index) => <div className="builder-nav-item" key={section.id}>{(index === 0 || sections[index - 1].group !== section.group) && <p>{t(section.group)}</p>}<button aria-label={t(section.label)} onClick={() => setActive(section.id)} className={clsx(active === section.id && "active")}><section.icon size={15} /><span>{t(section.label)}</span>{section.id === "capabilities" && <small>{definition.tools.length}</small>}{section.id === "skills" && <small>{definition.skills?.length ?? 0}</small>}{section.id === "rules" && <small>{definition.rules?.length ?? 0}</small>}</button></div>)}
+        <div className="definition-score"><div><span>{t("Definition health")}</span><strong>{completeness}%</strong></div><div className="score-track"><i style={{ width: `${completeness}%` }} /></div><p>{t("Ready to use")}</p></div>
       </aside>
       <section className="definition-editor">
         <div className="editor-heading"><span className="section-icon"><Bot size={18} /></span><div><h2>{t(sections.find((item) => item.id === active)?.label ?? "Identity")}</h2><p>{t(sectionDescription(active))}</p></div></div>
         {active === "identity" && <div className="form-stack">
-          <label className="field"><span>{t("Agent name")}</span><input value={definition.identity.name} onChange={(event) => updateIdentity("name", event.target.value)} /><small>{t("Shown in Studio and embedded experiences.")}</small></label>
+          <label className="field"><span>{t("Agent name")}</span><input value={definition.identity.name} onChange={(event) => updateIdentity("name", event.target.value)} /><small>{t("Shown throughout the Alcuin workspace.")}</small></label>
           <label className="field"><span>{t("Description")}</span><textarea rows={3} value={definition.identity.description} onChange={(event) => updateIdentity("description", event.target.value)} /></label>
-          <div className="field"><span>{t("Appearance")}</span><div className="appearance-row"><button className="agent-icon-choice active"><Bot size={19} /></button>{["#3157d5", "#596557", "#a45536", "#7656b6", "#252724"].map((color) => <button key={color} className="color-choice" style={{ backgroundColor: color }} aria-label={t("Color {color}", { color })} />)}</div></div>
+          <div className="field"><span>{t("Appearance")}</span><div className="appearance-row"><span className="agent-icon-choice active"><Bot size={19} /></span><small>{t("Alcuin mark · Ultramarine")}</small></div></div>
         </div>}
-        {active === "instructions" && <div className="form-stack"><label className="field"><span>{t("System instructions")}</span><textarea className="instruction-editor" rows={14} value={definition.instructions} onChange={(event) => setDefinition({ ...definition, instructions: event.target.value })} /><small>{t("{count} / 20,000 characters", { count: definition.instructions.length.toLocaleString() })}</small></label><div className="editor-tip"><Sparkles size={15} /><span>{t("Keep domain behavior in extensions. The core definition should describe intent, policies, and output expectations.")}</span></div></div>}
+        {active === "instructions" && <div className="form-stack"><label className="field"><span>{t("System instructions")}</span><textarea className="instruction-editor" rows={14} value={definition.instructions} onChange={(event) => changeDefinition({ ...definition, instructions: event.target.value })} /><small>{t("{count} / 20,000 characters", { count: definition.instructions.length.toLocaleString() })}</small></label><div className="editor-tip"><Sparkles size={15} /><span>{t("These instructions are included in every conversation with this Agent.")}</span></div></div>}
         {active === "model" && <div className="form-stack">
           <label className="field">
             <span>{t("Provider adapter")}</span>
@@ -133,13 +148,13 @@ export function AgentBuilderView({
           <label className="field">
             <span>{t("Model identifier")}</span>
             {definition.model.provider === "deepseek" ? (
-              <select value={definition.model.model} onChange={(event) => setDefinition({ ...definition, model: { ...definition.model, model: event.target.value } })}>
+              <select value={definition.model.model} onChange={(event) => changeDefinition({ ...definition, model: { ...definition.model, model: event.target.value } })}>
                 <option value="deepseek-v4-flash-vision-exp">DeepSeek V4 Flash Vision (Experimental)</option>
                 <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
                 <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
               </select>
             ) : (
-              <input value={definition.model.model} onChange={(event) => setDefinition({ ...definition, model: { ...definition.model, model: event.target.value } })} />
+              <input value={definition.model.model} onChange={(event) => changeDefinition({ ...definition, model: { ...definition.model, model: event.target.value } })} />
             )}
           </label>
           {definition.model.model === "deepseek-v4-flash-vision-exp" && (
@@ -151,7 +166,8 @@ export function AgentBuilderView({
             <small>{t("Paste the real key into .env; definitions store only this Secret Reference.")}</small>
           </label>
         </div>}
-        {active === "capabilities" && <Capabilities definition={definition} tools={tools} onChange={setDefinition} />}
+        {active === "capabilities" && <Capabilities definition={definition} tools={tools} onChange={changeDefinition} />}
+        {active === "skills" && <SkillBindings definition={definition} skills={skills} error={customizationError} onChange={changeDefinition} />}
         {active === "knowledge" && (
           <KnowledgeEditor
             sources={knowledgeSources}
@@ -165,13 +181,14 @@ export function AgentBuilderView({
             onSourcesChanged={onChanged}
           />
         )}
-        {active === "policies" && <div className="form-stack"><div className="policy-card"><ShieldCheck size={18} /><div><strong>{t("Mutating tools")}</strong><p>{t("External write operations pause the run and create an explicit approval event.")}</p></div><select value={definition.policies.mutating_tools} onChange={(event) => setDefinition({ ...definition, policies: { ...definition.policies, mutating_tools: event.target.value as "ask" | "deny" | "auto" } })}><option value="ask">{t("Ask every time")}</option><option value="deny">{t("Always deny")}</option><option value="auto">{t("Allow automatically")}</option></select></div><div className="policy-card"><LockKeyhole size={18} /><div><strong>{t("Sensitive values")}</strong><p>{t("Credentials remain scoped secret references and are redacted from execution events.")}</p></div><StatusPill status="enabled" /></div></div>}
-        {active === "output" && <div className="form-stack"><label className="field"><span>{t("Output kind")}</span><select defaultValue="artifact"><option value="artifact">artifact</option><option value="structured data">{t("structured data")}</option><option value="message only">{t("message only")}</option></select></label><label className="field"><span>{t("Output schema")}</span><textarea className="code-editor" rows={8} value={JSON.stringify(definition.output_schema, null, 2)} readOnly /></label></div>}
+        {active === "rules" && <RuleBindings definition={definition} rules={rules} error={customizationError} onChange={changeDefinition} />}
+        {active === "policies" && <div className="form-stack"><div className="policy-card"><ShieldCheck size={18} /><div><strong>{t("Mutating tools")}</strong><p>{t("External write operations pause the run and create an explicit approval event.")}</p></div><select value={definition.policies.mutating_tools} onChange={(event) => changeDefinition({ ...definition, policies: { ...definition.policies, mutating_tools: event.target.value as "ask" | "deny" | "auto" } })}><option value="ask">{t("Ask every time")}</option><option value="deny">{t("Always deny")}</option><option value="auto">{t("Allow automatically")}</option></select></div><div className="policy-card"><LockKeyhole size={18} /><div><strong>{t("Sensitive values")}</strong><p>{t("Credentials remain scoped secret references and are redacted from execution events.")}</p></div><StatusPill status="enabled" /></div></div>}
+        {active === "output" && <div className="form-stack"><label className="field"><span>{t("Output kind")}</span><select value={String(definition.output_schema.type ?? "artifact")} onChange={(event) => changeDefinition({ ...definition, output_schema: { ...definition.output_schema, type: event.target.value } })}><option value="artifact">artifact</option><option value="structured data">{t("structured data")}</option><option value="message only">{t("message only")}</option></select></label><label className="field"><span>{t("Output schema")}</span><textarea className="code-editor" rows={8} value={JSON.stringify(definition.output_schema, null, 2)} readOnly /></label></div>}
         <div className="advanced-toggle"><button onClick={() => setAdvanced((value) => !value)}><Settings2 size={14} />{t("Advanced definition JSON")}<ChevronRight className={clsx(advanced && "rotate")} size={13} /></button>{advanced && <pre>{JSON.stringify(definition, null, 2)}</pre>}</div>
       </section>
       <aside className="builder-preview">
-        <div className="preview-label">{t("Live identity preview")}</div><div className="agent-preview-card"><span className="preview-mark">A</span><h3>{definition.identity.name}</h3><p>{definition.identity.description}</p><div className="preview-meta"><span><BrainCircuit size={12} />{definition.model.model}</span><span><Blocks size={12} />{t("{count} extension", { count: definition.extensions.length })}</span></div><button><Sparkles size={14} />{t("Start a conversation")}</button></div>
-        <div className="contract-note"><FileJson2 size={15} /><div><strong>{t("Versioned contract")}</strong><p>{t("Saving creates a new immutable version. Publishing makes it available to Embed sessions.")}</p></div></div>
+        <div className="preview-label">{t("Live identity preview")}</div><div className="agent-preview-card"><span className="preview-mark">A</span><h3>{definition.identity.name}</h3><p>{definition.identity.description}</p><div className="preview-meta"><span><BrainCircuit size={12} />{definition.model.model}</span><span><Blocks size={12} />{t("{count} extension", { count: definition.extensions.length })}</span></div></div>
+        <div className="contract-note"><FileJson2 size={15} /><div><strong>{t("Stable Agent contract")}</strong><p>{t("Instructions, Skills, Rules, knowledge, and tool boundaries travel together when the Agent runs.")}</p></div></div>
       </aside>
     </div>
     {toast && <Toast message={toast} />}
@@ -269,7 +286,7 @@ function KnowledgeEditor({
       <div className="capability-toolbar">
         <div>
           <strong>{t("Workspace sources")}</strong>
-          <p>{t("Qwen dense + sparse hybrid retrieval. Agent versions store only source references.")}</p>
+          <p>{t("Qwen dense + sparse hybrid retrieval. The Agent stores only governed source references.")}</p>
         </div>
         <button className="button secondary" onClick={() => setImportOpen((open) => !open)}>
           <Plus size={14} />{t("Import document")}
@@ -338,7 +355,7 @@ function KnowledgeEditor({
       ) : (
         <div className="empty-editor compact"><Database size={24} /><h3>{t("No knowledge sources yet")}</h3><p>{t("Import the first governed document for this Workspace.")}</p></div>
       )}
-      <div className="editor-tip"><ShieldCheck size={15} /><span>{t("Search is always filtered by Workspace and the source IDs frozen into this Agent version. Retrieved content is treated as untrusted reference data.")}</span></div>
+      <div className="editor-tip"><ShieldCheck size={15} /><span>{t("Search is always filtered by Workspace and this Agent's bound source IDs. Retrieved content is treated as untrusted reference data.")}</span></div>
     </div>
   );
 }
@@ -418,6 +435,96 @@ function Capabilities({
   </div>;
 }
 
+function SkillBindings({
+  definition,
+  skills,
+  error,
+  onChange,
+}: {
+  definition: AgentDefinition;
+  skills: Skill[];
+  error: string | null;
+  onChange: (definition: AgentDefinition) => void;
+}) {
+  const { t } = useI18n();
+  const bindings = definition.skills ?? [];
+  const bindingFor = (skill: Skill) => bindings.find((item) => item.skill_version_id === skill.current_version_id);
+  const toggle = (skill: Skill) => {
+    const current = bindingFor(skill);
+    onChange({
+      ...definition,
+      skills: current
+        ? bindings.filter((item) => item.skill_version_id !== skill.current_version_id)
+        : [...bindings, { skill_version_id: skill.current_version_id, mode: "auto" }],
+    });
+  };
+  const setMode = (skill: Skill, mode: SkillInvocationMode) => onChange({
+    ...definition,
+    skills: bindings.map((item) => item.skill_version_id === skill.current_version_id ? { ...item, mode } : item),
+  });
+
+  return <div className="binding-editor">
+    <div className="capability-toolbar"><div><strong>{t("Skill library")}</strong><p>{t("Bind reusable operating knowledge. Auto Skills stay lightweight until the Agent needs them.")}</p></div><span className="count-badge">{t("{count} bound", { count: bindings.length })}</span></div>
+    {error && <div className="wizard-error">{error}</div>}
+    <div className="binding-list">
+      {skills.map((skill) => {
+        const binding = bindingFor(skill);
+        return <div className={clsx("binding-row", binding && "selected", !skill.enabled && "disabled")} key={skill.id}>
+          <button className={clsx("binding-check", binding && "checked")} disabled={!skill.enabled && !binding} onClick={() => toggle(skill)} aria-label={t(binding ? "Unbind {name}" : "Bind {name}", { name: skillDisplayName(skill) })}>{binding && <Check size={12} />}</button>
+          <span className="binding-icon"><BookOpenCheck size={16} /></span>
+          <div className="binding-copy"><strong>{skillDisplayName(skill)}</strong><p>{skill.definition.description}</p><small>{skill.source_kind === "native" ? t("Native Skill") : skill.source_kind === "cursor_plugin" ? t("Cursor Plugin") : t("Agent Plugin")}{skill.definition.required_tools.length > 0 ? ` · ${t("{count} required tools", { count: skill.definition.required_tools.length })}` : ""}</small></div>
+          {binding ? <select className="compact-select" value={binding.mode} onChange={(event) => setMode(skill, event.target.value as SkillInvocationMode)}><option value="auto">{t("Auto")}</option><option value="always">{t("Always loaded")}</option><option value="manual">{t("Manual")}</option></select> : <span className={clsx("resource-state", skill.enabled ? "available" : "unavailable")}>{t(skill.enabled ? "Available" : "Disabled")}</span>}
+        </div>;
+      })}
+      {!skills.length && !error && <div className="binding-empty"><BookOpenCheck size={18} /><strong>{t("No Skills yet")}</strong><p>{t("Create a native Skill or inspect a compatible plugin in Extensions.")}</p></div>}
+    </div>
+    <div className="editor-tip"><ShieldCheck size={15} /><span>{t("A Skill can teach the Agent how to work, but it can never grant tools or bypass approval policies.")}</span></div>
+  </div>;
+}
+
+function RuleBindings({
+  definition,
+  rules,
+  error,
+  onChange,
+}: {
+  definition: AgentDefinition;
+  rules: Rule[];
+  error: string | null;
+  onChange: (definition: AgentDefinition) => void;
+}) {
+  const { t } = useI18n();
+  const bindings = definition.rules ?? [];
+  const workspaceRules = rules.filter((rule) => rule.scope === "workspace" && rule.enabled);
+  const libraryRules = rules.filter((rule) => rule.scope === "library");
+  const bindingFor = (rule: Rule) => bindings.some((item) => item.rule_version_id === rule.current_version_id);
+  const toggle = (rule: Rule) => onChange({
+    ...definition,
+    rules: bindingFor(rule)
+      ? bindings.filter((item) => item.rule_version_id !== rule.current_version_id)
+      : [...bindings, { rule_version_id: rule.current_version_id }],
+  });
+  return <div className="binding-editor">
+    <div className="capability-toolbar"><div><strong>{t("Operating rules")}</strong><p>{t("Workspace Rules apply everywhere. Library Rules become part of this Agent when bound.")}</p></div><span className="count-badge">{t("{count} active", { count: workspaceRules.length + bindings.length })}</span></div>
+    {error && <div className="wizard-error">{error}</div>}
+    {workspaceRules.length > 0 && <div className="rule-section"><div className="binding-section-label"><span>{t("Workspace Rules")}</span><small>{t("Applied automatically")}</small></div>{workspaceRules.map((rule) => <RuleRow key={rule.id} rule={rule} selected locked />)}</div>}
+    <div className="rule-section"><div className="binding-section-label"><span>{t("Agent Rules")}</span><small>{t("Choose from the reusable library")}</small></div>{libraryRules.map((rule) => <RuleRow key={rule.id} rule={rule} selected={bindingFor(rule)} disabled={!rule.enabled} onToggle={() => toggle(rule)} />)}{!libraryRules.length && !error && <div className="binding-empty"><Scale size={18} /><strong>{t("No reusable Rules yet")}</strong><p>{t("Create Always, Conditional, or Manual Rules in Extensions.")}</p></div>}</div>
+    <div className="editor-tip"><Scale size={15} /><span>{t("Manual Rules are available in the Studio Context Ledger and apply from the next turn until changed.")}</span></div>
+  </div>;
+}
+
+function RuleRow({ rule, selected, locked = false, disabled = false, onToggle }: { rule: Rule; selected: boolean; locked?: boolean; disabled?: boolean; onToggle?: () => void }) {
+  const { t } = useI18n();
+  const activation = rule.definition.activation;
+  const conditionCount = rule.definition.conditions.prompt_terms.length + rule.definition.conditions.context_paths.length + rule.definition.conditions.file_globs.length;
+  return <div className={clsx("binding-row rule-binding-row", selected && "selected", disabled && "disabled")}>
+    <button className={clsx("binding-check", selected && "checked", locked && "locked")} disabled={locked || disabled} onClick={onToggle} aria-label={rule.definition.name}>{selected && <Check size={12} />}</button>
+    <span className="binding-icon"><Scale size={16} /></span>
+    <div className="binding-copy"><strong>{rule.definition.name}</strong><p>{rule.definition.description || rule.definition.content.slice(0, 120)}</p><small>{rule.scope === "workspace" ? t("Workspace") : t("Rule library")} · {activation === "always" ? t("Always") : activation === "conditional" ? t("Conditional") : t("Manual")}{conditionCount ? ` · ${t("{count} conditions", { count: conditionCount })}` : ""}</small></div>
+    <span className={`activation-badge ${activation}`}>{t(activation === "always" ? "Always" : activation === "conditional" ? "Conditional" : "Manual")}</span>
+  </div>;
+}
+
 function toolStatusLabel(status: ToolCatalogEntry["status"], t: ReturnType<typeof useI18n>["t"]) {
   return t(({
     available: "Available",
@@ -429,5 +536,5 @@ function toolStatusLabel(status: ToolCatalogEntry["status"], t: ReturnType<typeo
 }
 
 function sectionDescription(section: string): MessageKey {
-  return ({ identity: "How this agent appears across Studio and embedded surfaces.", instructions: "Stable behavior and operating boundaries.", model: "Provider-neutral model binding and scoped credentials.", capabilities: "Tools and skills contributed by installed extensions.", knowledge: "Governed retrieval sources and citation behavior.", policies: "Human approval and execution safety boundaries.", output: "The structured result this agent produces." } as Record<string, MessageKey>)[section] ?? "Stable behavior and operating boundaries.";
+  return ({ identity: "How this Agent appears in Studio.", instructions: "Behavior included in every conversation.", model: "Provider-neutral model binding and scoped credentials.", capabilities: "Tools this Agent may call.", skills: "Reusable operating knowledge loaded only when relevant.", knowledge: "Governed retrieval sources and citation behavior.", rules: "Always, Conditional, and Manual boundaries.", policies: "Human approval and execution safety boundaries.", output: "The structured result this agent produces." } as Record<string, MessageKey>)[section] ?? "Stable behavior and operating boundaries.";
 }

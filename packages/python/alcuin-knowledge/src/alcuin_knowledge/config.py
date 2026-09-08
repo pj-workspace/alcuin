@@ -2,20 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
-@dataclass(frozen=True)
-class DocumentLimits:
-    upload_max_bytes: int = 8 * 1024 * 1024
-    extracted_max_chars: int = 2_000_000
-    pdf_max_pages: int = 500
-
-    def __post_init__(self) -> None:
-        if self.upload_max_bytes < 1:
-            raise ValueError("upload_max_bytes must be positive")
-        if self.extracted_max_chars < 1:
-            raise ValueError("extracted_max_chars must be positive")
-        if self.pdf_max_pages < 1:
-            raise ValueError("pdf_max_pages must be positive")
+from alcuin_documents import DocumentLimits
 
 
 @dataclass(frozen=True)
