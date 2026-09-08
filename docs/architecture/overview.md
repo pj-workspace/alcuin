@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Alcuin's current product center is the **Agent Foundation**: Studio, durable multi-turn conversations, deterministic context assembly, versioned Agent definitions, governed capabilities, approvals, and persisted execution events. The existing Embed implementation is frozen as a compatibility layer and is not a driver for new architecture contracts.
+Alcuin's current product center is the **Agent Foundation**: Studio, durable conversations and Tasks, Skills/Rules, deterministic context assembly, governed capabilities, source inspection, independent Artifacts, and persisted execution events. Agent snapshots and internal revisions support correctness; version-management product flows and quick embedding remain frozen.
 
 ## Core Boundary
 
@@ -9,10 +9,11 @@ Alcuin separates the platform control plane from execution runtimes and domain e
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │                      Studio Experience                      │
-│ Conversations · Context Inspector · Builder · Run Trace     │
+│ Conversations · Task Canvas · Sources · Builder · Run Trace │
 ├─────────────────────────────────────────────────────────────┤
 │                       Agent Foundation                      │
-│ Workspaces · Agent Versions · Threads · Messages · Runs     │
+│ Workspaces · Agents · Threads · Messages · Runs · Tasks     │
+│ Artifacts · Skills · Rules · Scoped Preferences             │
 ├─────────────────────────────────────────────────────────────┤
 │                       Context Kernel                        │
 │ Ordered Layers · Budgets · Compaction · Immutable Traces    │
@@ -26,7 +27,7 @@ Alcuin separates the platform control plane from execution runtimes and domain e
 └─────────────────────────────────────────────────────────────┘
 ```
 
-This diagram is the implemented pre-alpha boundary. Workflow and multi-agent runtimes, active Skills, platform Tasks, first-class durable Artifacts, Redis, object storage, team RBAC, and production checkpoint infrastructure remain roadmap work.
+This diagram describes the implemented code boundary, not a production SLA or a blanket UI acceptance claim. Automatic Task planning, workflow/multi-agent runtimes, executable Skill scripts, full plugin hook compatibility, Redis, object storage, team RBAC, and distributed failover remain roadmap work. Artifact history/rollback/publish product flows remain paused.
 
 ## Design Direction
 
@@ -61,6 +62,8 @@ apps/web/features                Studio, Agents, Extensions, Runs, and Shell; fr
 apps/web/shared                  Shared web UI, localization, and application SDK wiring
 packages/python/alcuin-core      Framework-neutral Python contracts and tool envelopes
 packages/python/alcuin-context   Provider-neutral context ordering, budgets, traces, and compaction
+packages/python/alcuin-customization Native Skill/Rule parsing and supported plugin importers
+packages/python/alcuin-documents Bounded document parsing and editable DOCX export
 packages/python/alcuin-knowledge Domain-neutral document ingestion, Qwen embeddings, and Qdrant retrieval
 packages/python/alcuin-storage   Persistence ports, Alembic migrations, and pooled PostgreSQL Store
 packages/python/alcuin-web-search Provider-neutral web evidence contracts and bounded SearXNG retrieval
@@ -78,7 +81,7 @@ Persistence consumers depend on structural `RuntimeRepository`, `ExtensionReposi
 
 A fresh Core store creates only the domain-neutral **Alcuin Starter**, with no tools or Extensions bound. Domain examples must install their Agent Definition, Manifest, and adapter explicitly; the Operations Copilot package lives under `extensions/operations-copilot`, and `examples/operations_copilot` is only its composition root. Neither is imported by `alcuin_api.main`.
 
-The Context Kernel persists immutable user and assistant Messages within Workspace-owned Threads and assembles a normalized context envelope for every Run. Studio reuses and restores Threads, while the API records an operator-safe assembly trace with source digests and estimated token budgets. Compaction is a traceable overlay over complete conversation turns; it does not rewrite message history. The implemented composition currently supplies the platform protocol, Agent Instructions, durable conversation Messages, an optional active compaction, and allow-listed host context. Workspace Rules, User Preferences, Thread Rules, and active Skills are ordered extension points in the kernel contract, not resolved resources in the current application.
+The Context Kernel persists immutable user and assistant Messages within Workspace-owned Threads and assembles a normalized context envelope for every Run. Studio restores Threads while the API records an operator-safe assembly trace with source digests and estimated token budgets. Compaction is a traceable overlay over complete turns, not a history rewrite. Composition resolves the platform protocol, Agent Instructions, Workspace preferences, authorized Rules, selected/loaded Skills, durable messages, optional compaction, and allow-listed context. Mutable customization inputs are captured per Run so approval continuation sees the accepted configuration. Skill instructions and bounded resources can be loaded; arbitrary Skill scripts and imported plugin hooks/commands/subagents are not executed.
 
 The HTTP API never exposes LangGraph state. Runtime adapters receive a normalized text-and-attachment request and emit ordered `ExecutionEvent` records. Provider events, MCP results, approval interrupts, and Artifact projections are translated at this boundary. DeepSeek vision uses native Chat Completions streaming and maps provider reasoning into `reasoning.delta` separately from visible `message.delta` output. Studio enables thinking by default, while headless clients can disable it per run.
 
@@ -94,7 +97,13 @@ The first registered adapter is `web.search`. It targets a configured self-hoste
 
 Persisted `ExecutionEvent` records remain the canonical protocol. A Run-owned sequence cursor is incremented in the same storage transaction as each event insert, so independent local database connections cannot allocate the same sequence. Every emitted frame carries its persisted sequence as the SSE `id`; reconnecting clients send that cursor through `Last-Event-ID`, while `after` remains a headless API fallback. The shared `@alcuin/sse-client` retries bounded transport failures, resumes from the last successfully handled event, and suppresses replayed sequences. The run-events endpoint also provides Alcuin's compact chat projection with `?protocol=chat`, mapping reasoning, text, tools, approvals, Artifact projections, citations, errors, and completion into data-only SSE frames. Studio consumes that projection and renders a collapsed reasoning/tool timeline followed by the Markdown answer. Completion is a terminal stream event, not an Agent tool call; domain-specific workflow states are not part of Alcuin Core.
 
-`artifact.updated` is currently an execution event whose latest payload can be rendered in Studio's read-only Artifact panel or used by declarative Extension UI. There is no independent Artifact repository, cross-Run version history, editing contract, or Artifact lifecycle API. Likewise, manifest `skills` fields and the Context Kernel's `active_skills` layer are reserved contract shapes, not an installed and executable Skills system. Alcuin has no platform Task resource, task queue, task assignment model, or autonomous Task orchestration.
+`artifact.updated` backs an independent Workspace-owned Artifact. Runtime persistence atomically stores content, an internal revision, and its Run event; unchanged replays are no-ops. Explicit answer/artifact delimiters separate chat from up to eight generated files per Run. The final-answer marker allows tool-free answer streaming without a synthetic completion tool. A legacy plain answer remains chat and is never mirrored automatically into the Canvas. Only persisted Artifact events populate the Canvas. Markdown, plain text, JSON, and self-contained HTML are supported with bounded content; incomplete JSON is persisted only after validation at its closing delimiter.
+
+The Artifact API supports Workspace-scoped list/get, optimistic edits after the source Run terminates, and downloads. HTML renders in a sandboxed iframe without same-origin privileges, network access, remote assets, or parent access; local inline controls are allowed. Downloaded HTML is a standalone file, and its later use outside Studio is not governed by Studio's iframe sandbox. `alcuin-documents` exports Markdown/plain text/JSON to native editable DOCX headings, lists, tables, code, and links without loading external resources. HTML-to-Word conversion and general binary generation are unsupported. Revision history, rollback, branching, and publishing remain paused product features.
+
+`RunCitationRegistry` assigns exact `citation_id` values such as `s1` to bounded retrieved evidence, deduplicates canonical locators, and restores the same registry on approval continuation. Tool messages carry IDs, locators, and snippets; `citation.created` persists their public metadata. `[[cite:s1]]` markers resolve only against the current Run. Studio opens source details from inline references, and Word exports use the same registry numbering and append used sources. Unknown or ambiguous references must not resolve to an invented source. Knowledge document/chunk metadata supports source inspection but does not imply a PDF page. Citation identity is not an automatic proof that a source entails every claim.
+
+`apps/api/tasks` orchestrates explicit sequential Steps above Runs. PostgreSQL persists Tasks, Plans, Attempts, links to Runs, checkpoint transitions, idempotent commands, and dispatch leases. Operator controls include pause/resume/cancel/retry and queue/steer/interrupt guidance. Completed Run boundaries are reconciled after restart; uncertain in-flight work pauses for operator verification instead of silently repeating external effects. Task creation persists `model_override` and `reasoning_effort`, validates them with the shared chat catalog policy, and revalidates them before each new Step Run. Default values use the Thread's pinned Agent definition. This is not automatic decomposition, multi-agent execution, or a proven distributed exactly-once scheduler.
 
 MCP processes and remote transports terminate in the API service. Browser clients only communicate with the Alcuin gateway. In the frozen Embed compatibility layer, tokens bind a workspace, published Agent Version, allowed origin, actions, and expiry. The framework-neutral Web Component creates scoped threads, consumes resumable canonical SSE, exposes host context and custom events, and can decide an approval only when the session explicitly includes `approval:decide`. This compatibility behavior remains implemented, but new product and contract work targets Studio and the Agent Foundation rather than expanding quick embedding.
 
@@ -116,13 +125,16 @@ See [ADR-0003](adr-0003-storage-ports.md) for the verified storage boundary and 
 See [ADR-0004](adr-0004-knowledge-package.md) for the implemented Knowledge package and retrieval boundaries.
 See [ADR-0005](adr-0005-web-search-package.md) for the public web evidence contract and degradation policy.
 See [ADR-0006](adr-0006-conversation-context-kernel.md) for durable Messages, context assembly, and compaction invariants.
+See [ADR-0009](adr-0009-editable-artifact-resources.md) for durable editable Artifact resources, atomic runtime persistence, and optimistic edits.
+See [ADR-0010](adr-0010-independent-artifacts-and-evidence.md) for separate chat/Artifact output, citation identity, sandboxed HTML, Word export, and durable Task model controls.
+See [Source evidence](source-evidence.md) for citation display, portable copying, bounded history recovery, and factuality boundaries.
 
 ## Remaining Decisions
 
-- Checkpoint storage and resume semantics
-- Active Skill packaging, trust, resolution, and context injection
-- First-class Artifact persistence, versioning, editing, and lifecycle
-- Platform Task semantics, queues, assignment, and orchestration
+- Distributed worker leases, failover, and production recovery verification
+- Executable Skill resource sandboxing and broader plugin compatibility
+- General binary Artifact lifecycle and document-format fidelity
+- Automatic Task decomposition, dynamic planning, and assignment
 - Workflow and multi-agent runtime adapters
 - Production PostgreSQL, Redis, managed-Qdrant, and object-storage adapters
 - Team membership and RBAC beyond workspace ownership

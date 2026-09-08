@@ -6,7 +6,6 @@
 cp .env.example .env
 pnpm install
 uv sync --project apps/api
-pnpm dev:prepare
 pnpm dev
 ```
 
@@ -16,7 +15,7 @@ Studio is the current product path. It provides a persistent multi-turn Agent wo
 
 To use the live DeepSeek vision runtime, set `ALCUIN_DEEPSEEK_API_KEY` in the ignored local `.env`. The prototype selects `deepseek-v4-flash-vision-exp` through Chat Completions; without a key the domain-neutral Alcuin Starter records a local preview without invoking tools or inventing results.
 
-`pnpm dev:prepare` starts PostgreSQL, Qdrant, and the self-hosted SearXNG service, then applies the database migrations. To restart only the retrieval dependencies:
+`pnpm dev` starts PostgreSQL, Qdrant, and the self-hosted SearXNG service, applies database migrations, and launches the API and web apps. It automatically reuses the Compose PostgreSQL mapping or chooses a free local port. Press `Ctrl+C` to stop the complete stack. To prepare only the infrastructure and migrations, run `pnpm dev:prepare`. To restart only the retrieval dependencies:
 
 ```bash
 docker compose up -d searxng qdrant

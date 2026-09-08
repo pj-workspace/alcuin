@@ -2,7 +2,7 @@
 
 > Intelligence, composed.
 
-Alcuin is an extensible Agent Foundation for building, operating, and evolving domain-neutral AI agents. Its current product center is Studio: a persistent multi-turn workspace backed by versioned Agent definitions, a provider-neutral Context Kernel, governed knowledge and tools, approvals, and auditable execution events.
+Alcuin is an extensible Agent Foundation for building and operating domain-neutral AI agents. Its current product center is Studio: persistent conversations, Skills and Rules, governed tools and knowledge, durable Tasks, independent Artifacts, source inspection, and auditable execution events. Internal definition snapshots and concurrency tokens protect execution; product-facing version management and quick embedding are paused.
 
 The project is named after Alcuin of York, a scholar and organizer of knowledge whose work helped shape the Carolingian Renaissance.
 
@@ -25,13 +25,13 @@ The current pre-alpha product path is a full-stack, Studio-centered Agent worksp
 
 ```text
 Studio Experience
-  Persistent conversations · Context inspection · Run trace · Agent Builder
+  Conversations · Task progress · Source inspection · Artifact Canvas · Agent Builder
 
 Agent Foundation
-  Agent definitions · Versions · Threads · Messages · Context assembly · Run events
+  Agent definitions · Threads · Messages · Tasks · Artifacts · Context · Run events
 
 Governed Capabilities
-  Model adapters · Tools · MCP/OpenAPI · Knowledge · Web search · Approvals
+  Model adapters · Skills/Rules · MCP/OpenAPI · Knowledge · Web search · Approvals
 
 Implemented Infrastructure
   PostgreSQL · Qdrant · SearXNG
@@ -41,12 +41,12 @@ The existing `@alcuin/embed` Web Component and Embed Session API remain in the r
 
 ## Roadmap, Not Current Capability
 
-- Active Skill installation, resolution, and context injection. Skill-shaped manifest fields and Context Kernel layers are extension points, not an implemented Skills system.
-- First-class durable Artifacts with independent storage, versioning, editing, and lifecycle. Studio currently renders an `artifact.updated` event projection only.
-- Platform Task resources, queues, assignment, and autonomous task orchestration.
+- Skill script execution and full third-party plugin hooks, commands, and subagents. Installed Skill instructions and resources already participate in scoped context assembly.
+- Automatic Task decomposition, dynamic planning, assignment, and distributed worker scheduling. Current Tasks execute explicit steps sequentially above durable Runs.
+- Arbitrary binary Artifact generation, collaborative editing, and broad document-format fidelity. Text Artifacts already support editing, isolated HTML preview, and editable DOCX export.
 - Workflow and multi-agent runtimes beyond the current replaceable runtime boundary.
 - Team membership and RBAC, production secrets infrastructure, cost accounting, evaluation, and full observability integration.
-- Redis, object storage, and production checkpoint/resume infrastructure.
+- Redis, object storage, and production multi-worker failover guarantees. PostgreSQL Task checkpoints and explicit restart recovery are implemented.
 
 ## Architecture Principles
 
@@ -65,7 +65,10 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 
 - A Next.js Agent Studio with durable multi-turn Threads and Messages, refresh restoration, run trace, approval handling, context inspection, light/dark themes, and responsive navigation
 - A provider-neutral Context Kernel with deterministic layer ordering, bounded input budgets, immutable per-Run context snapshots, traceable complete-turn compaction, and Workspace-scoped conversation persistence
-- A read-only Studio Artifact panel projected from `artifact.updated` execution events; Artifacts are not yet independent durable resources
+- Workspace-owned Artifacts with independent storage, optimistic edits, multiple outputs per Run, live Canvas updates, isolated HTML preview, and editable Word export from Markdown/plain text/JSON; ordinary chat answers do not automatically become Artifacts
+- Run-local citation IDs shared by tool evidence, inline answer references, source inspection, Markdown Artifacts, and Word references; sources include available snippets and metadata without invented PDF pages or claims of automatic fact verification
+- Installed native Skills, always/conditional/manual Rules, Workspace preferences, and scoped per-Run snapshots; plugin importers adapt supported declarative resources without executing arbitrary imported scripts or hooks
+- Durable sequential Tasks with explicit steps, attempts, checkpoints, approvals, pause/resume/cancel/retry, and user guidance; selected model and thinking effort persist through steps and recovery
 - Workspace-scoped Agent creation and selection with versioned declarative definitions behind a FastAPI control plane
 - An authoritative Workspace Tool Catalog that exposes configured built-ins and installed Extension tools with runtime availability, mutation metadata, and contributing Extension ownership
 - A replaceable runtime boundary with a LangGraph ReAct demo adapter and an optional OpenAI-compatible streaming adapter
@@ -86,7 +89,13 @@ Alcuin is a working **pre-alpha prototype**. It currently includes:
 - Framework-neutral Python `alcuin-core`, independently packaged `alcuin-knowledge`, configurable `@alcuin/sdk`, enforced web feature boundaries, and an independently packaged Operations example
 - PostgreSQL-only control-plane persistence with Workspace-scoped Repository ports, pooled connections, Alembic migrations, and atomic Run event sequencing
 
-The contracts are versioned but not yet stable. PostgreSQL stores control-plane metadata and canonical knowledge text, while Qdrant is the implemented knowledge vector index. Redis remains roadmap infrastructure rather than a claimed runtime dependency.
+The contracts are not yet stable. PostgreSQL stores control-plane metadata, Tasks, Artifact text, and canonical knowledge text; Qdrant is the implemented knowledge vector index. Redis remains roadmap infrastructure. Internal revisions do not introduce a version-history product workflow.
+
+Provider output uses the same `ALCUIN_CONTEXT_RESERVED_OUTPUT_TOKENS` budget reserved by
+context assembly: 16,384 tokens by default, with smaller implicit reserves for small context
+windows. Explicit configured budgets take precedence. Chat Completions and Responses receive
+this shared limit without a model-specific token cap. Truncated, filtered, failed, or empty
+answers produce `run.failed` while retaining partial output; reasoning alone is not completion.
 
 ## Quick Start
 
@@ -96,17 +105,18 @@ Requirements: Node.js 22+, pnpm 11+, Python 3.11+, `uv`, and Docker.
 cp .env.example .env
 pnpm install
 uv sync --project apps/api
-pnpm dev:prepare
 pnpm dev
 ```
 
 Open [http://localhost:3000/studio](http://localhost:3000/studio). The API and interactive OpenAPI reference run at [http://localhost:8000/docs](http://localhost:8000/docs).
 
+`pnpm dev` starts PostgreSQL, Qdrant, and SearXNG, applies Alembic migrations, and then runs the API and web apps. It reuses an existing Compose PostgreSQL port or selects a free local port automatically. Press `Ctrl+C` to stop the complete development stack; set `ALCUIN_DEV_KEEP_SERVICES=1` only when the infrastructure should remain running.
+
 No model credential is required for the domain-neutral Alcuin Starter preview. The preview records the request but never invokes a bound tool or invents a result. DeepSeek is the first configured provider preset: put the key in the ignored local `.env` as `ALCUIN_DEEPSEEK_API_KEY`; the default endpoint is `https://api.deepseek.com`, model is the experimental `deepseek-v4-flash-vision-exp`, and protocol is Chat Completions. Studio enables thinking and renders its native stream in a compact, collapsible trace before the final Markdown output; API clients can disable thinking per run. Studio accepts up to four PNG, JPEG, WebP, or GIF attachments of 5 MiB each and sends only the active run's image data to the configured provider. DeepSeek V4 Flash text remains selectable, while generic OpenAI-compatible endpoints remain available through the `ALCUIN_OPENAI_*` variables.
 
 Operations Copilot is intentionally separate from Core. Run the optional example API with `uv run --project apps/api uvicorn examples.operations_copilot.app:app --reload --port 8000`; see [its README](examples/operations_copilot/README.md).
 
-Public web search uses the bundled SearXNG service and does not require another API key. `pnpm dev:prepare` starts it at `http://localhost:9888`; keep `ALCUIN_SEARXNG_URL` pointed there for the locally run API. Quick search returns normalized, deduplicated snippets. Deep search additionally reads at most three validated public pages under strict byte, time, and output limits. Partial page reads and stale-cache fallback remain usable but are explicitly marked as degraded evidence.
+Public web search uses the bundled SearXNG service and does not require another API key. `pnpm dev` starts it at `http://localhost:9888`; keep `ALCUIN_SEARXNG_URL` pointed there for the locally run API. Quick search returns normalized, deduplicated snippets. Deep search additionally reads at most three validated public pages under strict byte, time, and output limits. Partial page reads and stale-cache fallback remain usable but are explicitly marked as degraded evidence.
 
 Workspace knowledge uses the bundled Qdrant service at `http://localhost:6333` and Qwen `text-embedding-v3` through DashScope. Put `ALCUIN_DASHSCOPE_API_KEY` in the ignored local `.env`; Workspace-specific DashScope endpoints can be set with `ALCUIN_DASHSCOPE_HTTP_API_URL`. In **Agents → Knowledge**, upload TXT, Markdown, PDF, or DOCX files—or paste text—then bind the resulting source and publish the Agent version. Uploads are signature-checked, limited to 8 MiB, parsed without executing embedded content, and reduced to at most two million characters of canonical text; raw files are not persisted. `knowledge.search` fuses Qwen dense and sparse vectors only across the bound source IDs and active Workspace. Embedding requests are batched, bounded, validated, and never expose provider credentials or raw provider errors.
 
@@ -119,7 +129,7 @@ pnpm test
 pnpm test:e2e
 ```
 
-Docker Compose provides the local PostgreSQL, Qdrant, and SearXNG dependencies. `pnpm dev:prepare` starts them and applies Alembic migrations; the API and web apps then run through `pnpm dev`.
+Docker Compose provides the local PostgreSQL, Qdrant, and SearXNG dependencies. `pnpm dev` owns the complete local lifecycle; `pnpm dev:prepare` remains available when only infrastructure and migrations are needed.
 
 ## Development Workflow
 
