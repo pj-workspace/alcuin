@@ -23,6 +23,7 @@ def project_execution_event(event: dict[str, Any]) -> list[dict[str, Any]]:
             "chatModel": payload.get("model"),
             "runtime": payload.get("runtime"),
             "thinking": payload.get("thinking", False),
+            "reasoningEffort": payload.get("reasoning_effort"),
             "inputModalities": payload.get("input_modalities", ["text"]),
             "attachmentCount": payload.get("attachment_count", 0),
         }]

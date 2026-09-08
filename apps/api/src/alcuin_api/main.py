@@ -4,8 +4,9 @@ import asyncio
 import json
 import time
 from collections.abc import Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated, Literal
+from urllib.parse import quote
 
 import httpx
 from alcuin_knowledge import (
@@ -17,7 +18,17 @@ from alcuin_knowledge import (
     QdrantKnowledgeIndex,
     UnsupportedDocumentError,
 )
-from alcuin_storage import ControlPlaneRepository, RepositoryConflict, open_repository
+from alcuin_storage import (
+    ArtifactVersionConflict,
+    AttachmentBindingError,
+    ControlPlaneRepository,
+    RepositoryConflict,
+    RuleSummary,
+    SkillSummary,
+    open_repository,
+)
+from alcuin_customization import PluginArchiveError, inspect_plugin_archive
+from alcuin_customization.plugin_import import MAX_ARCHIVE_BYTES
 from alcuin_web_search import WebSearchService, is_public_http_url
 from fastapi import (
     Depends,
@@ -36,10 +47,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from .config import Settings, get_settings
+from .attachments import AttachmentService, AttachmentUploadError, public_attachment
 from alcuin_core.contracts import (
     AgentCreate,
     AgentDefinition,
     AgentVersionCreate,
+    ArtifactResource,
+    ArtifactUpdate,
+    AttachmentResource,
     ApprovalDecision,
     BuiltinEntrypoint,
     EmbedClaims,
@@ -57,9 +72,19 @@ from alcuin_core.contracts import (
     MCPToolCallRequest,
     OpenAPIImportRequest,
     OpenAPIEntrypoint,
+    ReasoningEffort,
     RequestedToolCall,
     RunCreate,
     ThreadCreate,
+    ThreadDetail,
+)
+from alcuin_core.customization import (
+    PreferenceUpdate,
+    RuleCreate,
+    RulePatch,
+    SkillCreate,
+    SkillPatch,
+    ThreadConfigurationUpdate,
 )
 from .extensions import (
     check_extension_health,
@@ -82,7 +107,14 @@ from .knowledge_wiring import (
 )
 from .mcp_gateway import MCPGateway
 from .openapi_gateway import OpenAPIGateway
-from .runtime import RuntimeOrchestrator, RuntimeRequest
+from .plugin_install import (
+    PLUGIN_INSPECTION_POLICY_REVISION,
+    PluginInspectionReceiptError,
+    customization_bundle_draft,
+    issue_plugin_inspection_receipt,
+    verify_plugin_inspection_receipt,
+)
+from .runtime import RuntimeAttachmentRef, RuntimeOrchestrator, RuntimeRequest
 from .context_composition import (
     load_thread_messages,
     persisted_user_parts,
@@ -91,7 +123,16 @@ from .context_composition import (
 from .security import RequestScope, issue_embed_token, resolve_scope
 from .chat_sse import project_execution_event
 from .tools import ToolExecutor, ToolRegistry
+from .tasks import (
+    RuntimeTaskStepRunner,
+    TaskCoordinator,
+    TaskService,
+    create_task_router,
+)
+from .skill_wiring import skill_tool_definitions
 from .web_search_wiring import web_search_config, web_search_tool_definition
+from .run_profile import resolve_run_model_controls
+from .artifact_downloads import export_artifact
 
 
 ScopeDependency = Annotated[RequestScope, Depends(resolve_scope)]
@@ -142,11 +183,12 @@ def create_app(
     configured_document_parser = document_parser or FileDocumentParser(
         document_limits(settings)
     )
+    attachment_service = AttachmentService(repository, settings)
     configured_mcp_gateway = mcp_gateway or MCPGateway()
     configured_openapi_gateway = openapi_gateway or OpenAPIGateway(
         timeout_seconds=settings.extension_health_timeout_seconds
     )
-    definitions = []
+    definitions = list(skill_tool_definitions(repository))
     if web_search_service:
         definitions.append(web_search_tool_definition(web_search_service))
     if configured_knowledge_service:
@@ -169,7 +211,9 @@ def create_app(
         application.state.recovered_interrupted_runs = (
             repository.recover_interrupted_runs()
         )
+        application.state.recovered_tasks = application.state.task_coordinator.recover()
         yield
+        await application.state.task_coordinator.close()
         for task in application.state.tasks:
             task.cancel()
         if web_search_service:
@@ -193,8 +237,10 @@ def create_app(
         allow_headers=["*"],
     )
     app.state.store = repository
+    app.state.settings = settings
     app.state.web_search_service = web_search_service
     app.state.knowledge_service = configured_knowledge_service
+    app.state.attachment_service = attachment_service
     app.state.extension_tool_service = extension_tool_service
     app.state.runtime = RuntimeOrchestrator(
         repository,
@@ -202,6 +248,16 @@ def create_app(
         tool_executor,
         provider_transport=provider_transport,
     )
+    app.state.task_coordinator = TaskCoordinator(
+        repository,
+        RuntimeTaskStepRunner(repository, settings, app.state.runtime),
+    )
+    app.state.task_service = TaskService(
+        repository,
+        dispatch=app.state.task_coordinator.schedule,
+        settings=settings,
+    )
+    app.include_router(create_task_router(app.state.task_service))
 
     def missing(resource: str) -> HTTPException:
         return HTTPException(
@@ -214,6 +270,18 @@ def create_app(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Embed sessions cannot access workspace management APIs",
             )
+
+    async def read_plugin_archive(file: UploadFile) -> bytes:
+        try:
+            archive = await file.read(MAX_ARCHIVE_BYTES + 1)
+        finally:
+            await file.close()
+        if len(archive) > MAX_ARCHIVE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="Plugin archive exceeds the 10 MiB limit",
+            )
+        return archive
 
     def require_run_agent(scope: RequestScope, run: dict) -> None:
         if not scope.agent_id:
@@ -497,6 +565,243 @@ def create_app(
     async def list_providers(scope: ScopeDependency) -> list[dict[str, object]]:
         require_workspace_operator(scope)
         return settings.provider_statuses()
+
+    @app.post(
+        "/v1/attachments",
+        status_code=status.HTTP_201_CREATED,
+        response_model=AttachmentResource,
+    )
+    async def upload_attachment(
+        scope: ScopeDependency,
+        file: Annotated[UploadFile, File()],
+        upload_id: Annotated[str, Form(min_length=1, max_length=160)],
+    ) -> dict:
+        require_workspace_operator(scope)
+        try:
+            content = await file.read(
+                max(
+                    settings.attachment_image_max_bytes,
+                    settings.attachment_document_max_bytes,
+                )
+                + 1
+            )
+        finally:
+            await file.close()
+        try:
+            return attachment_service.create(
+                scope.workspace_id,
+                upload_id=upload_id,
+                filename=file.filename or "attachment",
+                declared_media_type=file.content_type,
+                content=content,
+            )
+        except AttachmentUploadError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+
+    @app.get("/v1/attachments/{attachment_id}", response_model=AttachmentResource)
+    async def get_attachment(attachment_id: str, scope: ScopeDependency) -> dict:
+        require_workspace_operator(scope)
+        attachment = repository.get_attachment(scope.workspace_id, attachment_id)
+        if attachment is None:
+            raise missing("Attachment")
+        return public_attachment(attachment)
+
+    @app.get("/v1/attachments/{attachment_id}/content")
+    async def get_attachment_content(
+        attachment_id: str,
+        scope: ScopeDependency,
+    ) -> Response:
+        require_workspace_operator(scope)
+        attachment = repository.get_attachment_blob(
+            scope.workspace_id,
+            attachment_id,
+        )
+        if attachment is None:
+            raise missing("Attachment")
+        disposition = "inline" if attachment["kind"] == "image" else "attachment"
+        filename = quote(str(attachment["name"]), safe="")
+        return Response(
+            content=attachment["content"],
+            media_type=str(attachment["media_type"]),
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": f"{disposition}; filename*=UTF-8''{filename}",
+                "Cache-Control": "private, no-store",
+            },
+        )
+
+    @app.delete(
+        "/v1/attachments/{attachment_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    async def delete_attachment(
+        attachment_id: str,
+        scope: ScopeDependency,
+    ) -> Response:
+        require_workspace_operator(scope)
+        try:
+            deleted = repository.delete_attachment(
+                scope.workspace_id,
+                attachment_id,
+            )
+        except RepositoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise missing("Attachment")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.get("/v1/skills")
+    async def list_skills(scope: ScopeDependency) -> list[dict]:
+        require_workspace_operator(scope)
+        return repository.list_skills(scope.workspace_id)
+
+    @app.get("/v1/skills/summaries", response_model=list[SkillSummary])
+    async def list_skill_summaries(
+        scope: ScopeDependency,
+        enabled_only: bool = False,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        offset: Annotated[int, Query(ge=0, le=100_000)] = 0,
+    ) -> list[SkillSummary]:
+        """Return bounded list metadata without loading Skill bodies or resources."""
+        require_workspace_operator(scope)
+        return repository.list_skill_summaries(
+            scope.workspace_id,
+            enabled_only=enabled_only,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.post("/v1/skills", status_code=201)
+    async def create_skill(payload: SkillCreate, scope: ScopeDependency) -> dict:
+        require_workspace_operator(scope)
+        try:
+            return repository.create_skill(scope.workspace_id, payload)
+        except RepositoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="Skill contains unsafe or invalid persisted data",
+            ) from exc
+
+    @app.get("/v1/skills/{skill_id}")
+    async def get_skill(skill_id: str, scope: ScopeDependency) -> dict:
+        require_workspace_operator(scope)
+        skill = repository.get_skill(scope.workspace_id, skill_id)
+        if skill is None:
+            raise missing("Skill")
+        return skill
+
+    @app.patch("/v1/skills/{skill_id}")
+    async def update_skill(
+        skill_id: str, payload: SkillPatch, scope: ScopeDependency
+    ) -> dict:
+        require_workspace_operator(scope)
+        skill = repository.update_skill(scope.workspace_id, skill_id, payload)
+        if skill is None:
+            raise missing("Skill")
+        return skill
+
+    @app.get("/v1/rules")
+    async def list_rules(
+        scope: ScopeDependency,
+        rule_scope: Annotated[
+            Literal["workspace", "thread", "library"] | None,
+            Query(alias="scope"),
+        ] = None,
+        thread_id: str | None = None,
+    ) -> list[dict]:
+        require_workspace_operator(scope)
+        return repository.list_rules(
+            scope.workspace_id,
+            scope=rule_scope,
+            thread_id=thread_id,
+        )
+
+    @app.get("/v1/rules/summaries", response_model=list[RuleSummary])
+    async def list_rule_summaries(
+        scope: ScopeDependency,
+        rule_scope: Annotated[
+            Literal["workspace", "thread", "library"] | None,
+            Query(alias="scope"),
+        ] = None,
+        thread_id: str | None = None,
+        enabled_only: bool = False,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        offset: Annotated[int, Query(ge=0, le=100_000)] = 0,
+    ) -> list[RuleSummary]:
+        """Return bounded Rule metadata without loading instruction content."""
+        require_workspace_operator(scope)
+        return repository.list_rule_summaries(
+            scope.workspace_id,
+            enabled_only=enabled_only,
+            scope=rule_scope,
+            thread_id=thread_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.post("/v1/rules", status_code=201)
+    async def create_rule(payload: RuleCreate, scope: ScopeDependency) -> dict:
+        require_workspace_operator(scope)
+        try:
+            return repository.create_rule(scope.workspace_id, payload)
+        except RepositoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="Rule contains unsafe or invalid persisted data",
+            ) from exc
+
+    @app.get("/v1/rules/{rule_id}")
+    async def get_rule(rule_id: str, scope: ScopeDependency) -> dict:
+        require_workspace_operator(scope)
+        rule = repository.get_rule(scope.workspace_id, rule_id)
+        if rule is None:
+            raise missing("Rule")
+        return rule
+
+    @app.patch("/v1/rules/{rule_id}")
+    async def update_rule(
+        rule_id: str, payload: RulePatch, scope: ScopeDependency
+    ) -> dict:
+        require_workspace_operator(scope)
+        rule = repository.update_rule(scope.workspace_id, rule_id, payload)
+        if rule is None:
+            raise missing("Rule")
+        return rule
+
+    @app.get("/v1/preferences")
+    async def get_workspace_preferences(scope: ScopeDependency) -> dict:
+        require_workspace_operator(scope)
+        preferences = repository.get_workspace_preferences(scope.workspace_id)
+        if preferences is None:
+            raise missing("Workspace")
+        return preferences
+
+    @app.patch("/v1/preferences")
+    async def update_workspace_preferences(
+        payload: PreferenceUpdate, scope: ScopeDependency
+    ) -> dict:
+        require_workspace_operator(scope)
+        try:
+            preferences = repository.update_workspace_preferences(
+                scope.workspace_id, payload
+            )
+        except RepositoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="Preferences contain unsafe or invalid persisted data",
+            ) from exc
+        if preferences is None:
+            raise missing("Workspace")
+        return preferences
 
     @app.get("/v1/knowledge/sources")
     async def list_knowledge_sources(scope: ScopeDependency) -> list[dict]:
@@ -809,7 +1114,7 @@ def create_app(
         except RepositoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.get("/v1/threads/{thread_id}")
+    @app.get("/v1/threads/{thread_id}", response_model=ThreadDetail)
     async def get_thread(thread_id: str, scope: ScopeDependency) -> dict:
         scope.require("run:read")
         thread = repository.get_thread(scope.workspace_id, thread_id)
@@ -841,7 +1146,15 @@ def create_app(
             runs_by_id.values(),
             key=lambda run: run["created_at"],
         )
-        return {"thread": thread, "messages": messages, "runs": runs}
+        citation_events = repository.list_thread_citation_events(
+            scope.workspace_id, thread_id, run_ids[-50:]
+        )
+        return {
+            "thread": thread,
+            "messages": messages,
+            "runs": runs,
+            "citation_events": citation_events,
+        }
 
     @app.get("/v1/threads/{thread_id}/messages")
     async def list_thread_messages(
@@ -861,6 +1174,55 @@ def create_app(
             after=after,
             limit=limit,
         )
+
+    @app.get(
+        "/v1/threads/{thread_id}/artifacts",
+        response_model=list[ArtifactResource],
+    )
+    async def list_thread_artifacts(
+        thread_id: str,
+        scope: ScopeDependency,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> list[dict]:
+        scope.require("run:read")
+        thread = repository.get_thread(scope.workspace_id, thread_id)
+        if not thread:
+            raise missing("Thread")
+        require_thread_agent(scope, thread)
+        return repository.list_thread_artifacts(
+            scope.workspace_id,
+            thread_id,
+            limit=limit,
+        )
+
+    @app.get("/v1/threads/{thread_id}/configuration")
+    async def get_thread_configuration(
+        thread_id: str, scope: ScopeDependency
+    ) -> dict:
+        require_workspace_operator(scope)
+        configuration = repository.get_thread_configuration(
+            scope.workspace_id, thread_id
+        )
+        if configuration is None:
+            raise missing("Thread")
+        return configuration
+
+    @app.patch("/v1/threads/{thread_id}/configuration")
+    async def update_thread_configuration(
+        thread_id: str,
+        payload: ThreadConfigurationUpdate,
+        scope: ScopeDependency,
+    ) -> dict:
+        require_workspace_operator(scope)
+        try:
+            configuration = repository.update_thread_configuration(
+                scope.workspace_id, thread_id, payload
+            )
+        except RepositoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if configuration is None:
+            raise missing("Thread")
+        return configuration
 
     @app.post("/v1/threads/{thread_id}/runs", status_code=202)
     async def create_run(
@@ -883,13 +1245,34 @@ def create_app(
                 detail="Embedded Agent version must be published",
             )
         definition = AgentDefinition.model_validate(version["definition"])
+        attachments: tuple[dict, ...] = tuple(
+            attachment
+            for attachment_id in payload.attachment_ids
+            if (
+                attachment := repository.get_attachment(
+                    scope.workspace_id,
+                    attachment_id,
+                )
+            )
+            is not None
+        )
+        if len(attachments) != len(payload.attachment_ids):
+            raise HTTPException(
+                status_code=422,
+                detail="One or more attachments are unavailable in this Workspace",
+            )
+        effective_model, reasoning_effort = resolve_run_model_controls(
+            settings,
+            definition,
+            payload,
+            attachments,
+        )
         if payload.requested_tool:
             validate_requested_ui_tool(
                 scope.workspace_id,
                 definition,
                 payload.requested_tool,
             )
-        attachments = tuple(payload.attachments)
         message_parts = persisted_user_parts(
             payload.input,
             attachments,
@@ -897,6 +1280,19 @@ def create_app(
                 payload.requested_tool.name if payload.requested_tool else None
             ),
         )
+        attachment_texts = {
+            str(attachment["id"]): str(blob["extracted_text"])
+            for attachment in attachments
+            if attachment.get("kind") == "document"
+            and (
+                blob := repository.get_attachment_blob(
+                    scope.workspace_id,
+                    str(attachment["id"]),
+                )
+            )
+            is not None
+            and blob.get("extracted_text")
+        }
         try:
             run = repository.create_run_with_messages(
                 scope.workspace_id,
@@ -904,10 +1300,28 @@ def create_app(
                 version_id,
                 payload.input,
                 message_parts,
-                app.state.runtime.context_composer.estimate_parts(message_parts),
+                app.state.runtime.context_composer.estimate_parts(
+                    message_parts,
+                    attachment_texts,
+                ),
+                attachment_ids=tuple(payload.attachment_ids),
+                max_total_attachment_bytes=settings.attachment_run_total_max_bytes,
             )
+        except AttachmentBindingError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
         except RepositoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        runtime_attachments = tuple(
+            RuntimeAttachmentRef.from_record(
+                attachment,
+                message_id=str(run.get("input_message_id") or ""),
+                current=True,
+            )
+            for attachment in attachments
+        )
         runtime_request = RuntimeRequest(
             workspace_id=scope.workspace_id,
             run_id=run["id"],
@@ -915,13 +1329,16 @@ def create_app(
             thread_context=thread["context"],
             definition=definition,
             current_message_id=run.get("input_message_id"),
-            attachments=attachments,
-            thinking=payload.thinking,
+            attachments=runtime_attachments,
+            thinking=reasoning_effort != ReasoningEffort.NONE,
+            effective_model=effective_model,
+            reasoning_effort=reasoning_effort,
             requested_tool=(
                 payload.requested_tool.model_dump(mode="json")
                 if payload.requested_tool
                 else None
             ),
+            include_workspace_preferences=not scope.embed,
         )
         task = asyncio.create_task(app.state.runtime.execute(runtime_request))
         app.state.tasks.add(task)
@@ -941,6 +1358,93 @@ def create_app(
             raise missing("Run")
         require_run_agent(scope, run)
         return {**run, "events": repository.list_events(scope.workspace_id, run_id)}
+
+    @app.get("/v1/runs/{run_id}/citations")
+    async def get_run_citations(run_id: str, scope: ScopeDependency) -> list[dict]:
+        scope.require("run:read")
+        run = repository.get_run(scope.workspace_id, run_id)
+        if not run:
+            raise missing("Run")
+        require_run_agent(scope, run)
+        return repository.list_run_citation_events(scope.workspace_id, run_id)
+
+    @app.get("/v1/artifacts/{artifact_id}", response_model=ArtifactResource)
+    async def get_artifact(artifact_id: str, scope: ScopeDependency) -> dict:
+        scope.require("run:read")
+        artifact = repository.get_artifact(scope.workspace_id, artifact_id)
+        if artifact is None:
+            raise missing("Artifact")
+        source_run = repository.get_run(
+            scope.workspace_id,
+            str(artifact["source_run_id"]),
+        )
+        if source_run is None:
+            raise missing("Artifact source Run")
+        require_run_agent(scope, source_run)
+        return artifact
+
+    @app.get("/v1/artifacts/{artifact_id}/download")
+    async def download_artifact(
+        artifact_id: str,
+        scope: ScopeDependency,
+        format: Literal["docx", "html", "md"] = Query(default="docx"),
+    ) -> Response:
+        artifact = await get_artifact(artifact_id, scope)
+        source_run = repository.get_run(scope.workspace_id, str(artifact["source_run_id"]))
+        if source_run is None or source_run["status"] not in {"completed", "failed", "cancelled"}:
+            raise HTTPException(status_code=409, detail="Wait for artifact generation to finish before downloading")
+        citations = [
+            event["payload"] for event in repository.list_events(scope.workspace_id, str(artifact["source_run_id"]))
+            if event["type"] == EventType.CITATION_CREATED
+        ]
+        try:
+            content, media_type, extension = await asyncio.to_thread(export_artifact, artifact, format, citations=citations)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        filename = quote(str(artifact["title"]) + "." + extension, safe="")
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f"attachment; filename=\"alcuin.{extension}\"; filename*=UTF-8''{filename}",
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "sandbox; default-src 'none'",
+            },
+        )
+
+    @app.patch("/v1/artifacts/{artifact_id}", response_model=ArtifactResource)
+    async def update_artifact(
+        artifact_id: str,
+        payload: ArtifactUpdate,
+        scope: ScopeDependency,
+    ) -> dict:
+        require_workspace_operator(scope)
+        try:
+            artifact = repository.update_artifact(
+                scope.workspace_id,
+                artifact_id,
+                expected_version=payload.expected_version,
+                title=payload.title,
+                content=payload.content,
+            )
+        except ArtifactVersionConflict as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "artifact_version_conflict",
+                    "message": str(exc),
+                    "current_version": exc.current_version,
+                },
+            ) from exc
+        except RepositoryConflict as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+        if artifact is None:
+            raise missing("Artifact")
+        return artifact
 
     @app.get("/v1/runs/{run_id}/context")
     async def get_run_context(run_id: str, scope: ScopeDependency) -> dict:
@@ -1034,23 +1538,174 @@ def create_app(
         if not run or not approval or approval["run_id"] != run_id:
             raise missing("Approval")
         require_run_agent(scope, run)
-        decided = repository.decide_approval(
-            scope.workspace_id, approval_id, payload.decision, payload.note
-        )
-        if not decided:
-            raise HTTPException(status_code=409, detail="Approval already decided")
-        await app.state.runtime.resume_after_approval(
-            scope.workspace_id,
-            run_id,
-            payload.decision == "approved",
-            approval["request"],
-        )
+        task_link = repository.get_task_run_link(scope.workspace_id, run_id)
+        resumed_task = None
+        if task_link is not None:
+            # Approval and the owning Task cross the governed boundary in one
+            # transaction. Concurrent pause/cancel either wins first and prevents
+            # execution, or follows the already-authorized in-flight Run.
+            try:
+                outcome = repository.decide_task_approval(
+                    scope.workspace_id,
+                    approval_id,
+                    payload.decision,
+                    payload.note,
+                )
+            except RepositoryConflict as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=str(exc),
+                ) from exc
+            if not outcome:
+                raise HTTPException(status_code=409, detail="Approval already decided")
+            decided = outcome["approval"]
+            resumed_task = outcome["task"]
+        else:
+            decided = repository.decide_approval(
+                scope.workspace_id, approval_id, payload.decision, payload.note
+            )
+            if not decided:
+                raise HTTPException(status_code=409, detail="Approval already decided")
+
+        try:
+            await app.state.runtime.resume_after_approval(
+                scope.workspace_id,
+                run_id,
+                payload.decision == "approved",
+                approval["request"],
+            )
+        except Exception:
+            if resumed_task is not None:
+                # The authorization is durable but the result is not. Never replay
+                # a possibly completed mutation automatically; surface an explicit
+                # verification boundary instead of leaving the Task stranded.
+                current_task = repository.get_task(
+                    scope.workspace_id,
+                    str(resumed_task["id"]),
+                )
+                if current_task and current_task["status"] == "running":
+                    with suppress(Exception):
+                        repository.mark_task_waiting_for_user(
+                            scope.workspace_id,
+                            str(current_task["id"]),
+                            str(current_task["current_step_id"]),
+                            expected_revision=int(current_task["revision"]),
+                            prompt={
+                                "code": "approval_result_verification_required",
+                                "message": (
+                                    "The approved operation may have executed, but its "
+                                    "result was not durably reconciled. Verify the target "
+                                    "system before retrying."
+                                ),
+                                "run_id": run_id,
+                                "approval_id": approval_id,
+                            },
+                        )
+            raise
+
+        if resumed_task is not None:
+            repository.wake_task_dispatch(
+                scope.workspace_id,
+                str(resumed_task["id"]),
+            )
+            app.state.task_coordinator.schedule(
+                scope.workspace_id,
+                str(resumed_task["id"]),
+            )
         return decided
 
     @app.get("/v1/extensions")
     async def list_extensions(scope: ScopeDependency) -> list[dict]:
         require_workspace_operator(scope)
         return repository.list_extensions(scope.workspace_id)
+
+    @app.post("/v1/plugins/inspect")
+    async def inspect_plugin_bundle(
+        scope: ScopeDependency,
+        file: Annotated[UploadFile, File(description="Agent or Cursor Plugin ZIP")],
+    ) -> dict:
+        """Inspect an inert archive; no component is installed or executed."""
+        require_workspace_operator(scope)
+        archive = await read_plugin_archive(file)
+        try:
+            inspection = await asyncio.to_thread(inspect_plugin_archive, archive)
+        except PluginArchiveError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)[:500]) from exc
+        issued = issue_plugin_inspection_receipt(
+            signing_secret=settings.signing_secret,
+            workspace_id=scope.workspace_id,
+            archive=archive,
+            permissions=inspection.permissions,
+            policy_revision=PLUGIN_INSPECTION_POLICY_REVISION,
+        )
+        return {
+            "inspection_receipt": issued.receipt,
+            "inspection_digest": issued.inspection_digest,
+            "permissions_hash": issued.permissions_hash,
+            "policy_revision": issued.policy_revision,
+            "expires_at": issued.expires_at,
+            "inspection": inspection.public_dict(),
+        }
+
+    @app.post("/v1/plugins/install", status_code=201)
+    async def install_plugin_bundle(
+        scope: ScopeDependency,
+        file: Annotated[UploadFile, File(description="Previously inspected Plugin ZIP")],
+        inspection_receipt: Annotated[
+            str,
+            Form(min_length=32, max_length=4096),
+        ],
+    ) -> dict:
+        """Re-inspect the exact bytes and install portable resources disabled-first."""
+        require_workspace_operator(scope)
+        archive = await read_plugin_archive(file)
+        try:
+            inspection = await asyncio.to_thread(inspect_plugin_archive, archive)
+            verify_plugin_inspection_receipt(
+                inspection_receipt,
+                signing_secret=settings.signing_secret,
+                workspace_id=scope.workspace_id,
+                archive=archive,
+                permissions=inspection.permissions,
+                policy_revision=PLUGIN_INSPECTION_POLICY_REVISION,
+            )
+            draft = customization_bundle_draft(inspection)
+            installed = repository.install_customization_bundle(
+                scope.workspace_id,
+                skills=list(draft.skills),
+                rules=list(draft.rules),
+            )
+        except PluginArchiveError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)[:500]) from exc
+        except PluginInspectionReceiptError as exc:
+            failure_status = (
+                status.HTTP_410_GONE
+                if exc.code == "plugin_inspection_receipt_expired"
+                else status.HTTP_409_CONFLICT
+            )
+            raise HTTPException(
+                status_code=failure_status,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+        except RepositoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)[:500]) from exc
+        return {
+            **installed,
+            "plugin": {
+                "format": inspection.format,
+                "name": inspection.name,
+                "version": inspection.version,
+            },
+            "status": "installed_disabled",
+            "mcp_servers": list(inspection.mcp_servers),
+            "mcp_install_state": (
+                "needs_connection_review" if inspection.mcp_servers else "not_declared"
+            ),
+            "disabled_components": list(inspection.disabled_components),
+            "warnings": list(inspection.warnings),
+        }
 
     @app.post("/v1/extensions/inspect")
     async def inspect_extension(

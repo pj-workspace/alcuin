@@ -1,6 +1,7 @@
 "use client";
 
-import type { Agent, ContextAssembly, ExecutionEvent, ImageAttachment, Run, Thread } from "@alcuin/contracts";
+import type { Agent, AttachmentResource, ContextAssembly, ExecutionEvent, Run, Thread } from "@alcuin/contracts";
+import type { CreateRunOptions } from "@alcuin/sdk";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { alcuinApi } from "@/shared/lib/api";
@@ -14,6 +15,7 @@ import {
 
 type SendOptions = {
   onAccepted?: () => void;
+  runOptions?: CreateRunOptions;
 };
 
 type ToolRunInput = {
@@ -213,7 +215,7 @@ export function useThreadSession({
 
   const send = useCallback(async (
     input: string,
-    attachments: ImageAttachment[] = [],
+    attachments: AttachmentResource[] = [],
     options: SendOptions = {},
   ) => {
     const value = input.trim();
@@ -224,7 +226,7 @@ export function useThreadSession({
     dispatch({ type: "turn.submitted", turn: optimisticTurn(optimisticId, value, attachments) });
     try {
       const thread = await ensureThread();
-      const run = await alcuinApi.createRun(thread.id, value, attachments);
+      const run = await alcuinApi.createRun(thread.id, value, attachments.map((attachment) => attachment.id), options.runOptions ?? {});
       connectedRun = run;
       dispatch({ type: "run.created", optimisticId, run });
       stateRef.current = { ...stateRef.current, activeRunId: run.id, phase: "streaming" };
@@ -286,6 +288,7 @@ export function useThreadSession({
   return {
     state,
     contextAssembly,
+    ensureThread,
     send,
     runTool,
     refresh,

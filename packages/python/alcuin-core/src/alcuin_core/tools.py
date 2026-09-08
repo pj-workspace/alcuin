@@ -51,6 +51,7 @@ class ToolResult:
     data: dict[str, Any]
     summary: str
     citations: tuple[ToolCitation, ...] = ()
+    public_data: dict[str, Any] | None = None
 
     def model_content(self, *, max_chars: int = 24_000) -> str:
         content = json.dumps(self.data, ensure_ascii=False, separators=(",", ":"))
@@ -62,3 +63,12 @@ class ToolResult:
             "content": content[:max_chars],
         }
         return json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+
+    def event_data(self) -> dict[str, Any]:
+        """Return the bounded public projection persisted to Events and SSE.
+
+        Tool ``data`` is model-facing and may contain retrieved text. Tools returning such
+        content provide ``public_data`` so the trace stays useful without becoming a second
+        content store.
+        """
+        return self.public_data if self.public_data is not None else self.data

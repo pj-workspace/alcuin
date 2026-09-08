@@ -20,8 +20,8 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <body className={`${geist.variable} ${instrumentSerif.variable}`}><LocaleProvider>{children}</LocaleProvider></body>
+    <html lang="en" className={`${geist.variable} ${instrumentSerif.variable}`} suppressHydrationWarning>
+      <body><LocaleProvider>{children}</LocaleProvider></body>
     </html>
   );
 }

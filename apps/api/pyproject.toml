@@ -6,6 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
   "alcuin-context",
   "alcuin-core",
+  "alcuin-customization",
+  "alcuin-documents",
   "alcuin-knowledge",
   "alcuin-storage",
   "alcuin-web-search",
@@ -38,6 +40,8 @@ packages = ["src/alcuin_api"]
 [tool.uv.sources]
 alcuin-context = { path = "../../packages/python/alcuin-context", editable = true }
 alcuin-core = { path = "../../packages/python/alcuin-core", editable = true }
+alcuin-customization = { path = "../../packages/python/alcuin-customization", editable = true }
+alcuin-documents = { path = "../../packages/python/alcuin-documents", editable = true }
 alcuin-knowledge = { path = "../../packages/python/alcuin-knowledge", editable = true }
 alcuin-storage = { path = "../../packages/python/alcuin-storage", editable = true }
 alcuin-web-search = { path = "../../packages/python/alcuin-web-search", editable = true }
@@ -50,6 +54,8 @@ testpaths = [
   "tests",
   "../../packages/python/alcuin-context/tests",
   "../../packages/python/alcuin-core/tests",
+  "../../packages/python/alcuin-customization/tests",
+  "../../packages/python/alcuin-documents/tests",
   "../../packages/python/alcuin-knowledge/tests",
   "../../packages/python/alcuin-storage/tests",
   "../../packages/python/alcuin-web-search/tests",

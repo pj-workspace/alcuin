@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import json
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -12,6 +10,8 @@ from typing import Annotated, Any, Literal
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+
+from .customization import AgentRuleBinding, AgentSkillBinding
 
 
 def utc_now() -> str:
@@ -37,6 +37,13 @@ class EventType(StrEnum):
     CITATION_CREATED = "citation.created"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
+
+
+class ReasoningEffort(StrEnum):
+    NONE = "none"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 class ModelBinding(StrictModel):
@@ -75,11 +82,23 @@ class AgentDefinition(StrictModel):
     extensions: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)
     knowledge: list[str] = Field(default_factory=list)
+    skills: list[AgentSkillBinding] = Field(default_factory=list, max_length=32)
+    rules: list[AgentRuleBinding] = Field(default_factory=list, max_length=64)
     runtime: RuntimeBinding = Field(default_factory=RuntimeBinding)
     policies: ApprovalPolicy = Field(default_factory=ApprovalPolicy)
     context_policy: dict[str, Any] = Field(default_factory=dict)
     output_schema: dict[str, Any] = Field(default_factory=lambda: {"type": "artifact"})
     starter_prompts: list[str] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def validate_customization_bindings(self) -> "AgentDefinition":
+        skill_ids = [binding.skill_version_id for binding in self.skills]
+        if len(skill_ids) != len(set(skill_ids)):
+            raise ValueError("Agent Skill version bindings must be unique")
+        rule_ids = [binding.rule_version_id for binding in self.rules]
+        if len(rule_ids) != len(set(rule_ids)):
+            raise ValueError("Agent Rule version bindings must be unique")
+        return self
 
 
 class AgentCreate(StrictModel):
@@ -98,23 +117,69 @@ class ThreadCreate(StrictModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
-class ImageAttachment(StrictModel):
-    type: Literal["image"] = "image"
+class AttachmentDocumentMetadata(StrictModel):
+    format: Literal["txt", "markdown", "pdf", "docx"]
+    page_count: int | None = Field(default=None, ge=1)
+    extracted_chars: int = Field(ge=1)
+
+
+class AttachmentResource(StrictModel):
+    id: str
+    workspace_id: str
     name: str = Field(min_length=1, max_length=180)
-    media_type: Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
-    data_url: str
+    media_type: str = Field(min_length=1, max_length=160)
+    kind: Literal["image", "document"]
+    size_bytes: int = Field(gt=0)
+    status: Literal["ready"] = "ready"
+    document: AttachmentDocumentMetadata | None = None
+    created_at: str
+    expires_at: str
 
     @model_validator(mode="after")
-    def validate_data_url(self) -> "ImageAttachment":
-        prefix = f"data:{self.media_type};base64,"
-        if not self.data_url.startswith(prefix):
-            raise ValueError("data_url must match the declared image media_type")
-        try:
-            payload = base64.b64decode(self.data_url[len(prefix) :], validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise ValueError("data_url must contain valid base64 image data") from exc
-        if len(payload) > 5 * 1024 * 1024:
-            raise ValueError("image attachments must be 5 MiB or smaller")
+    def validate_document_metadata(self) -> "AttachmentResource":
+        if self.kind == "document" and self.document is None:
+            raise ValueError("document attachments require document metadata")
+        if self.kind == "image" and self.document is not None:
+            raise ValueError("image attachments cannot include document metadata")
+        return self
+
+
+class ArtifactResource(StrictModel):
+    """Latest public projection of a Workspace-scoped editable Artifact."""
+
+    id: str
+    workspace_id: str
+    thread_id: str
+    source_run_id: str
+    title: str = Field(min_length=1, max_length=200)
+    kind: str = Field(
+        default="document",
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    content_type: Literal["text/markdown", "text/plain", "application/json", "text/html"] = (
+        "text/markdown"
+    )
+    version: int = Field(ge=1)
+    content: str = Field(max_length=500_000)
+    created_at: str
+    updated_at: str
+
+
+class ArtifactUpdate(StrictModel):
+    """Optimistic edit against the latest Artifact projection."""
+
+    expected_version: int = Field(ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    content: str | None = Field(default=None, max_length=500_000)
+
+    @model_validator(mode="after")
+    def validate_changes(self) -> "ArtifactUpdate":
+        if self.title is None and self.content is None:
+            raise ValueError("an Artifact update requires title or content")
+        if self.title is not None and not self.title.strip():
+            raise ValueError("Artifact title cannot be blank")
         return self
 
 
@@ -133,16 +198,25 @@ class RequestedToolCall(StrictModel):
 
 class RunCreate(StrictModel):
     input: str = Field(default="", max_length=40_000)
-    attachments: list[ImageAttachment] = Field(default_factory=list, max_length=4)
-    thinking: bool = True
+    attachment_ids: list[str] = Field(default_factory=list, max_length=4)
+    thinking: bool | None = None
+    model_override: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+    )
+    reasoning_effort: ReasoningEffort | None = None
     requested_tool: RequestedToolCall | None = None
 
     @model_validator(mode="after")
     def validate_content(self) -> "RunCreate":
-        if not self.input.strip() and not self.attachments and not self.requested_tool:
+        if not self.input.strip() and not self.attachment_ids and not self.requested_tool:
             raise ValueError("a run requires text, an attachment, or a requested tool")
-        if self.requested_tool and self.attachments:
+        if self.requested_tool and self.attachment_ids:
             raise ValueError("requested tool runs cannot include attachments")
+        if len(self.attachment_ids) != len(set(self.attachment_ids)):
+            raise ValueError("attachment_ids must be unique")
         return self
 
 
@@ -183,6 +257,25 @@ class ExecutionEvent(StrictModel):
     type: EventType
     timestamp: str
     payload: dict[str, Any]
+
+
+class ThreadDetail(StrictModel):
+    """Conversation log with a bounded recent-source projection, not full Run traces."""
+
+    thread: dict[str, Any]
+    messages: list[dict[str, Any]]
+    runs: list[dict[str, Any]]
+    citation_events: list[ExecutionEvent] = Field(default_factory=list, max_length=6_400)
+
+    @model_validator(mode="after")
+    def validate_citation_scope(self) -> "ThreadDetail":
+        run_ids = {run.get("id") for run in self.runs}
+        if any(
+            event.type != EventType.CITATION_CREATED or event.run_id not in run_ids
+            for event in self.citation_events
+        ):
+            raise ValueError("Thread evidence must contain only this Thread's Run citations")
+        return self
 
 
 class PermissionSpec(StrictModel):

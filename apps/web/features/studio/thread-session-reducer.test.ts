@@ -55,7 +55,7 @@ const detail: ThreadDetail = {
       status: "completed",
       parts: [
         { type: "text", text: "Persisted input" },
-        { type: "attachment", attachment_id: "att_1", name: "map.png", media_type: "image/png" },
+        { type: "attachment", attachment_id: "att_1", kind: "image", name: "map.png", media_type: "image/png", size_bytes: 4_096 },
       ],
       created_at: "2026-08-29T00:00:01Z",
     },
@@ -69,9 +69,27 @@ test("materializes ordered conversation turns and attachment references", () => 
   assert.equal(turns[0]?.assistantText, "Persisted response");
   assert.deepEqual(turns[0]?.attachments, [{
     id: "att_1",
+    kind: "image",
     name: "map.png",
     mediaType: "image/png",
+    sizeBytes: 4_096,
   }]);
+});
+
+test("historical citation projection survives refresh without mixing Run-local source IDs or duplicating latest events", () => {
+  const firstSource: ExecutionEvent = { id: "source-first", run_id: "run_1", sequence: 4, type: "citation.created", timestamp: "2026-08-29T00:00:03Z", payload: { citation_id: "s1", locator: "https://example.com/first" } };
+  const latestSource: ExecutionEvent = { ...firstSource, id: "source-latest", run_id: "run_2", payload: { citation_id: "s1", locator: "https://example.com/latest" } };
+  const historical: ThreadDetail = {
+    ...detail,
+    runs: [...detail.runs, { ...detail.runs[0]!, id: "run_2", input_message_id: undefined, output_message_id: undefined, created_at: "2026-08-29T00:01:00Z" }],
+    citation_events: [latestSource, firstSource, { ...firstSource, run_id: "run_foreign" }, { ...firstSource, type: "message.delta", payload: { delta: "Must not replace an answer" } }],
+  };
+  const turns = turnsFromThreadDetail(historical, [latestSource]);
+  assert.deepEqual(turns[0]?.events, [firstSource]);
+  assert.deepEqual(turns[1]?.events, [latestSource]);
+  assert.equal(turns[0]?.assistantText, "Persisted response");
+  assert.equal(turns[0]?.events[0]?.payload.locator, "https://example.com/first");
+  assert.equal(turns[1]?.events[0]?.payload.locator, "https://example.com/latest");
 });
 
 test("keeps optimistic turn identity while attaching a real run and deduplicates replayed events", () => {

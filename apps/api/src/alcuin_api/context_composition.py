@@ -7,7 +7,6 @@ kernel contract, and persists an operator-auditable Run snapshot.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -25,10 +24,11 @@ from alcuin_context import (
     HeuristicTokenEstimator,
     TokenBudget,
 )
-from alcuin_core.contracts import AgentDefinition, ImageAttachment
-from alcuin_storage import ConversationRepository
+from alcuin_core.contracts import AgentDefinition
+from alcuin_storage import RuntimeRepository
 
 from .config import Settings
+from .customization_context import resolve_customization_context
 from .security import redact_sensitive
 
 
@@ -36,6 +36,9 @@ from .security import redact_sensitive
 class ContextComposition:
     assembly: ContextAssembly
     lifecycle_events: tuple[tuple[str, dict[str, Any]], ...] = ()
+    customization_snapshot_sha256: str | None = None
+    thread_configuration_revision: int = 0
+    workspace_preferences_revision: int | None = None
 
 
 class ContextCompactionFailure(RuntimeError):
@@ -50,7 +53,7 @@ class ContextCompactionFailure(RuntimeError):
 
 def persisted_user_parts(
     prompt: str,
-    attachments: tuple[ImageAttachment, ...],
+    attachments: tuple[dict[str, Any], ...],
     *,
     requested_tool_name: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -68,15 +71,15 @@ def persisted_user_parts(
         )
 
     for attachment in attachments:
-        digest = hashlib.sha256(attachment.data_url.encode("utf-8")).hexdigest()
         parts.append(
             {
                 "type": "attachment",
-                # A content digest is a non-secret, non-resolvable reference until the formal
-                # Attachment resource lands. The original data URL remains request-scoped only.
-                "attachment_id": f"sha256:{digest}",
-                "name": attachment.name,
-                "media_type": attachment.media_type,
+                "attachment_id": str(attachment["id"]),
+                "name": str(attachment["name"]),
+                "media_type": str(attachment["media_type"]),
+                "kind": str(attachment["kind"]),
+                "size_bytes": int(attachment["size_bytes"]),
+                "sha256": str(attachment["sha256"]),
             }
         )
     return parts
@@ -85,25 +88,52 @@ def persisted_user_parts(
 def message_content(message: dict[str, Any]) -> str:
     """Project provider-neutral persisted parts into a truthful text conversation."""
     fragments: list[str] = []
+    attachment_texts = message.get("attachment_texts") or {}
     for part in message.get("parts") or []:
         if not isinstance(part, dict):
             continue
         if part.get("type") == "text" and str(part.get("text") or "").strip():
             fragments.append(str(part["text"]).strip())
+        elif (
+            part.get("type") == "task_instruction"
+            and str(part.get("text") or "").strip()
+        ):
+            # Task instructions are system-created, never presented as user-authored text.
+            # They remain explicit in the model envelope so a resumable Step Run has a
+            # durable and auditable input rather than relying on process memory.
+            fragments.append(
+                "<task_step_instruction "
+                f"task_id={json.dumps(str(part.get('task_id') or ''))} "
+                f"step_id={json.dumps(str(part.get('step_id') or ''))}>\n"
+                f"{str(part['text']).strip()}\n"
+                "</task_step_instruction>"
+            )
         elif part.get("type") == "attachment":
             name = str(part.get("name") or "attachment")
             media_type = str(part.get("media_type") or "application/octet-stream")
-            fragments.append(
-                f"[Attachment: {name} ({media_type}); binary content was available only "
-                "during its original run.]"
-            )
+            attachment_id = str(part.get("attachment_id") or "")
+            extracted_text = attachment_texts.get(attachment_id)
+            if part.get("kind") == "document" and isinstance(extracted_text, str):
+                fragments.append(
+                    f"<untrusted_document_attachment name={json.dumps(name)} "
+                    f"media_type={json.dumps(media_type)}>\n"
+                    f"{extracted_text}\n"
+                    "</untrusted_document_attachment>"
+                )
+            else:
+                fragments.append(
+                    f"[Attachment: {name} ({media_type}); content is an untrusted "
+                    "resource resolved only for authorized model input.]"
+                )
     return "\n\n".join(fragments).strip()
 
 
 def load_thread_messages(
-    repository: ConversationRepository,
+    repository: RuntimeRepository,
     workspace_id: str,
     thread_id: str,
+    *,
+    hydrate_document_text: bool = False,
 ) -> list[dict[str, Any]]:
     """Read the complete immutable message log using bounded storage pages."""
     messages: list[dict[str, Any]] = []
@@ -117,7 +147,26 @@ def load_thread_messages(
         )
         if not page:
             break
-        messages.extend(page)
+        for message in page:
+            hydrated = dict(message)
+            attachment_texts: dict[str, str] = {}
+            if hydrate_document_text:
+                for attachment in repository.list_message_attachments(
+                    workspace_id,
+                    str(message["id"]),
+                ):
+                    if attachment.get("kind") != "document":
+                        continue
+                    blob = repository.get_attachment_blob(
+                        workspace_id,
+                        str(attachment["id"]),
+                    )
+                    extracted = blob.get("extracted_text") if blob else None
+                    if isinstance(extracted, str) and extracted:
+                        attachment_texts[str(attachment["id"])] = extracted
+            if attachment_texts:
+                hydrated["attachment_texts"] = attachment_texts
+            messages.append(hydrated)
         cursor = int(page[-1]["sequence"])
         if len(page) < 500:
             break
@@ -171,15 +220,21 @@ def _authorized_host_context(
 class RunContextComposer:
     """Compose and persist one immutable, replayable context envelope per Run."""
 
-    def __init__(self, repository: ConversationRepository, settings: Settings) -> None:
+    def __init__(self, repository: RuntimeRepository, settings: Settings) -> None:
         self.repository = repository
         self.settings = settings
         self.estimator = HeuristicTokenEstimator()
         self.assembler = ContextAssembler(self.estimator)
         self.compactor = ExtractiveContextCompactor(self.estimator)
 
-    def estimate_parts(self, parts: list[dict[str, Any]]) -> int:
-        content = message_content({"parts": parts})
+    def estimate_parts(
+        self,
+        parts: list[dict[str, Any]],
+        attachment_texts: dict[str, str] | None = None,
+    ) -> int:
+        content = message_content(
+            {"parts": parts, "attachment_texts": attachment_texts or {}}
+        )
         return self.estimator.estimate_text(content)
 
     async def compose(
@@ -190,11 +245,13 @@ class RunContextComposer:
         thread: dict[str, Any],
         definition: AgentDefinition,
         platform_protocol: str,
+        include_workspace_preferences: bool = True,
     ) -> ContextComposition:
         records = load_thread_messages(
             self.repository,
             workspace_id,
             str(thread["id"]),
+            hydrate_document_text=True,
         )
         messages = tuple(
             ContextMessage(
@@ -224,6 +281,21 @@ class RunContextComposer:
                 None,
             )
             current_message_id = current.id if current else ""
+        current_record = next(
+            (
+                record
+                for record in records
+                if str(record.get("id") or "") == current_message_id
+            ),
+            None,
+        )
+        attachment_names = tuple(
+            str(part.get("name"))
+            for part in (current_record or {}).get("parts") or []
+            if isinstance(part, dict)
+            and part.get("type") == "attachment"
+            and str(part.get("name") or "").strip()
+        )
 
         sections = [
             ContextSection(
@@ -243,6 +315,35 @@ class RunContextComposer:
                 source_version=definition.schema_version,
             ),
         ]
+        snapshot_record = self.repository.get_run_customization_snapshot(
+            workspace_id,
+            str(run["id"]),
+        )
+        run_snapshot = (
+            snapshot_record.get("snapshot")
+            if isinstance(snapshot_record, dict)
+            and isinstance(snapshot_record.get("snapshot"), dict)
+            else None
+        )
+        customization = resolve_customization_context(
+            self.repository,
+            workspace_id=workspace_id,
+            thread=thread,
+            run=run,
+            definition=definition,
+            prompt=next(
+                (
+                    message.content
+                    for message in reversed(messages)
+                    if message.id == current_message_id
+                ),
+                "",
+            ),
+            attachment_names=attachment_names,
+            include_workspace_preferences=include_workspace_preferences,
+            run_snapshot=run_snapshot,
+        )
+        sections.extend(customization.sections)
         host_context = _authorized_host_context(definition, thread.get("context") or {})
         if host_context:
             sections.append(
@@ -419,7 +520,22 @@ class RunContextComposer:
                     ),
                 ),
             )
-        return ContextComposition(assembly=assembly, lifecycle_events=tuple(lifecycle))
+        return ContextComposition(
+            assembly=assembly,
+            lifecycle_events=tuple(lifecycle),
+            customization_snapshot_sha256=(
+                str(snapshot_record.get("snapshot_sha256"))
+                if isinstance(snapshot_record, dict)
+                and snapshot_record.get("snapshot_sha256")
+                else None
+            ),
+            thread_configuration_revision=(
+                customization.thread_configuration_revision
+            ),
+            workspace_preferences_revision=(
+                customization.workspace_preferences_revision
+            ),
+        )
 
     def _compaction_prefix(
         self,
@@ -479,6 +595,8 @@ def public_context_assembly(record: dict[str, Any]) -> dict[str, Any]:
             "kind": str(entry.get("kind") or "unknown"),
             "label": str(entry.get("layer") or entry.get("id") or "Context"),
             "source_ref": entry.get("source_id") or entry.get("id"),
+            "source_version": entry.get("source_version"),
+            "digest": entry.get("digest"),
             "token_estimate": entry.get("estimated_tokens"),
             "included": True,
         }

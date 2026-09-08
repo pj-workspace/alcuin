@@ -1,6 +1,7 @@
 import type {
+  AttachmentKind,
+  AttachmentResource,
   ExecutionEvent,
-  ImageAttachment,
   MessagePart,
   Run,
   RunStatus,
@@ -15,9 +16,10 @@ export type ThreadDetailShape = ThreadDetail;
 
 export type ConversationAttachment = {
   id: string;
+  kind: AttachmentKind;
   name: string;
   mediaType: string;
-  dataUrl?: string;
+  sizeBytes: number;
 };
 
 export type ConversationTurn = {
@@ -177,17 +179,18 @@ export function threadSessionReducer(
 export function optimisticTurn(
   id: string,
   input: string,
-  attachments: ImageAttachment[],
+  attachments: AttachmentResource[],
 ): ConversationTurn {
   return {
     id,
     runId: null,
     input,
-    attachments: attachments.map((attachment, index) => ({
-      id: `${id}-attachment-${index}`,
+    attachments: attachments.map((attachment) => ({
+      id: attachment.id,
+      kind: attachment.kind,
       name: attachment.name,
       mediaType: attachment.media_type,
-      dataUrl: attachment.data_url,
+      sizeBytes: attachment.size_bytes,
     })),
     assistantText: "",
     events: [],
@@ -213,6 +216,14 @@ export function turnsFromThreadDetail(
 
   const orderedRuns = [...detail.runs].sort((left, right) =>
     Date.parse(left.created_at) - Date.parse(right.created_at));
+  const knownRunIds = new Set(orderedRuns.map((run) => run.id));
+  const citationsByRun = new Map<string, ExecutionEvent[]>();
+  for (const event of detail.citation_events ?? []) {
+    if (event.type !== "citation.created" || !knownRunIds.has(event.run_id)) continue;
+    const citations = citationsByRun.get(event.run_id) ?? [];
+    citations.push(event);
+    citationsByRun.set(event.run_id, citations);
+  }
   const latestRunId = orderedRuns.at(-1)?.id;
   const turns = orderedRuns.map((run) => {
     const runMessages = messagesByRun.get(run.id) ?? [];
@@ -226,11 +237,10 @@ export function turnsFromThreadDetail(
       run,
       userMessage,
       assistantMessage,
-      run.id === latestRunId ? latestRunEvents : [],
+      mergeRunEvents(run.id, citationsByRun.get(run.id) ?? [], run.id === latestRunId ? latestRunEvents : []),
     );
   });
 
-  const knownRunIds = new Set(orderedRuns.map((run) => run.id));
   for (const [runId, runMessages] of messagesByRun) {
     if (knownRunIds.has(runId)) continue;
     const userMessage = runMessages.find((message) => message.role === "user");
@@ -283,21 +293,29 @@ function attachmentsFromMessage(message: ThreadMessageShape | undefined): Conver
     .filter((part): part is Extract<ThreadMessagePartShape, { type: "attachment" }> => part.type === "attachment")
     .map((part) => ({
       id: part.attachment_id,
+      kind: part.kind,
       name: part.name,
       mediaType: part.media_type,
+      sizeBytes: part.size_bytes,
     }));
 }
 
 function appendEvents(turn: ConversationTurn, nextEvents: ExecutionEvent[]): ConversationTurn {
   if (nextEvents.length === 0) return turn;
-  const bySequence = new Map(turn.events.map((event) => [event.sequence, event]));
-  for (const event of nextEvents) bySequence.set(event.sequence, event);
-  const events = [...bySequence.values()].sort((left, right) => left.sequence - right.sequence);
+  const events = mergeRunEvents(turn.runId, turn.events, nextEvents);
   return {
     ...turn,
     events,
     assistantText: assistantTextFromEvents(events) || turn.assistantText,
   };
+}
+
+function mergeRunEvents(runId: string | null, ...batches: ExecutionEvent[][]): ExecutionEvent[] {
+  const bySequence = new Map<number, ExecutionEvent>();
+  for (const batch of batches) for (const event of batch) {
+    if (event.run_id === runId) bySequence.set(event.sequence, event);
+  }
+  return [...bySequence.values()].sort((left, right) => left.sequence - right.sequence);
 }
 
 function assistantTextFromEvents(events: ExecutionEvent[]): string {

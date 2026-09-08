@@ -8,7 +8,7 @@
     "start": "next start",
     "build": "next build",
     "lint": "eslint .",
-    "test": "node --experimental-strip-types features/architecture.test.ts && node --experimental-strip-types features/extensions/extension-ui.test.ts && node --experimental-strip-types features/studio/thread-session-reducer.test.ts && tsc --noEmit"
+    "test": "node --experimental-strip-types shared/lib/i18n-format.test.ts && node --experimental-strip-types features/architecture.test.ts && node --experimental-strip-types features/extensions/extension-ui.test.ts && node --experimental-strip-types features/studio/attachments/attachment-upload-model.test.ts && node --experimental-strip-types features/studio/attachments/attachment-motion.test.ts && node --experimental-strip-types features/studio/artifacts/artifact-workspace-model.test.ts && node --experimental-strip-types features/studio/artifacts/artifact-motion.test.ts && node --experimental-strip-types features/studio/citations/citation-model.test.ts && node --experimental-strip-types features/studio/citations/citation-cache.test.ts && node --experimental-strip-types features/studio/citations/portable-citations.test.ts && node --experimental-strip-types features/studio/context-ledger-model.test.ts && node --experimental-strip-types features/studio/run-profile-model.test.ts && node --experimental-strip-types features/studio/thread-session-reducer.test.ts && node --experimental-strip-types features/studio/use-pinned-turn-scroll.test.ts && node --experimental-strip-types features/studio/studio-layout-contract.test.ts && node --experimental-strip-types features/studio/tasks/task-projection.test.ts && node --experimental-strip-types features/studio/tasks/task-motion.test.ts && node --experimental-strip-types features/studio/tasks/task-studio-integration.test.ts && tsc --noEmit"
   },
   "dependencies": {
     "@alcuin/contracts": "workspace:*",
@@ -16,6 +16,7 @@
     "@alcuin/sdk": "workspace:*",
     "clsx": "^2.1.1",
     "lucide-react": "^0.468.0",
+    "mdast-util-from-markdown": "^2.0.3",
     "next": "^16.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

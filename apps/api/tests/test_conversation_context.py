@@ -233,6 +233,8 @@ def test_same_thread_context_is_persisted_replayed_and_workspace_isolated() -> N
             "kind",
             "label",
             "source_ref",
+            "source_version",
+            "digest",
             "token_estimate",
             "included",
         }

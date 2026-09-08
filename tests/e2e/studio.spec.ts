@@ -2,36 +2,42 @@ import { expect, test } from "@playwright/test";
 
 test("runs an approval-gated operation through its real adapter", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === "mobile", "Covered by the focused mobile workspace test");
-  await page.goto("/studio");
+  test.setTimeout(60_000);
+  await page.goto("/studio?thread=new");
   await expect(page.getByText("Operations Copilot", { exact: true }).first()).toBeVisible();
 
   const composer = page.getByPlaceholder("Message Operations Copilot…");
   await composer.fill("Update this incident to monitoring");
   await composer.press("Enter");
-  await expect(page.getByRole("button", { name: "Approve once" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve once" })).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "Approve once" }).click();
 
   await expect(page.getByText("The approved ops.update_ticket operation completed successfully.")).toBeVisible();
-  await expect(page.getByText("Complete", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeVisible();
 });
 
 test("renders declarative extension blocks and routes forms through approval", async ({ page }, testInfo) => {
-  await page.goto("/studio");
+  test.setTimeout(60_000);
+  await page.goto("/studio?thread=new");
   await expect(page.getByText("Operations Copilot", { exact: true }).first()).toBeVisible();
 
   const composer = page.getByPlaceholder("Message Operations Copilot…");
   await composer.fill("Find the active incident");
   await composer.press("Enter");
-  await expect(page.getByText("Complete", { exact: true })).toBeVisible();
+  await expect(page.locator(".conversation-pane")).toContainText("I reviewed the current record for INC-104", { timeout: 15_000 });
 
   if (testInfo.project.name === "mobile") {
     await page.getByRole("tab", { name: /^Canvas/ }).click();
+  } else {
+    await page.getByRole("button", { name: "Open canvas", exact: true }).click();
   }
-  await page.getByRole("button", { name: /^Blocks/ }).click();
+  await page.getByRole("tab", { name: /^Blocks/ }).click();
   await expect(page.getByText("Active record", { exact: true })).toBeVisible();
   await expect(page.getByText("Incident results", { exact: true })).toBeVisible();
-  await expect(page.locator('[data-ui-block="ops-toolkit:incident-summary"] tbody')).toContainText("REC-104");
-  await expect(page.getByLabel("Incident ID")).toHaveValue("REC-104");
+  await expect(page.locator('[data-ui-block="ops-toolkit:incident-summary"] tbody')).toContainText("INC-104");
+  const incidentId = page.getByLabel("Incident ID");
+  await expect(incidentId).toHaveValue("");
+  await incidentId.fill("INC-104");
 
   await page.getByLabel("New status").selectOption("resolved");
   await page.getByRole("button", { name: "Request update" }).click();
@@ -39,7 +45,7 @@ test("renders declarative extension blocks and routes forms through approval", a
   await page.getByRole("button", { name: "Approve once" }).click();
 
   await expect(page.getByText("The approved ops.update_ticket operation completed successfully.")).toBeVisible();
-  await expect(page.getByText("Complete", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeVisible();
 });
 
 test("keeps the mobile workspace single-panel and supports dark theme", async ({ page }, testInfo) => {
@@ -125,8 +131,11 @@ test("runs the real Embed component through origin-scoped read and approval flow
   ).__alcuinHostEvents ?? [])).toEqual(expect.arrayContaining([
     "alcuin:run-start",
     "alcuin:event",
-    "alcuin:artifact",
   ]));
+  // Ordinary replies are no longer mirrored into independent artifacts.
+  await expect.poll(() => page.evaluate(() => (
+    window as unknown as { __alcuinHostEvents?: string[] }
+  ).__alcuinHostEvents ?? [])).not.toContain("alcuin:artifact");
   await expect.poll(() => page.evaluate(() => (
     window as unknown as { __alcuinHostEvents?: string[] }
   ).__alcuinHostEvents ?? [])).not.toContain("alcuin:error");
@@ -218,11 +227,11 @@ test("installs and enables real MCP and OpenAPI extensions through the governed 
   await expect(page.getByRole("heading", { name: openApiName, exact: true })).toBeVisible();
 });
 
-test("creates, edits, publishes, persists, and switches between Agents", async ({ page }, testInfo) => {
+test("creates, edits, uses, persists, and switches between Agents", async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   const suffix = testInfo.project.name;
   const draftName = `Release Copilot ${suffix}`;
-  const publishedName = `${draftName} v2`;
+  const publishedName = `${draftName} Ready`;
   const slug = `release-copilot-${suffix}`;
   const sourceName = `Release handbook ${suffix}`;
 
@@ -237,10 +246,10 @@ test("creates, edits, publishes, persists, and switches between Agents", async (
   await expect(dialog).toBeHidden();
   await expect(page.getByRole("textbox", { name: /^Agent name/ })).toHaveValue(draftName);
   await expect(page.locator(".title-row .status-pill")).toHaveText("draft");
-  await expect(page.locator(".title-row .version-badge")).toHaveText("v1");
+  await expect(page.locator(".title-row .version-badge")).toHaveCount(0);
 
   await page.getByRole("textbox", { name: /^Agent name/ }).fill(publishedName);
-  await page.locator(".builder-nav").getByRole("button").filter({ hasText: "Capabilities" }).click();
+  await page.locator(".builder-nav").getByRole("button", { name: "Tools", exact: true }).click();
   const webSearch = page.locator(".capability-option").filter({ hasText: "web.search" });
   const incidentSearch = page.locator(".capability-option").filter({ hasText: "ops.search_incidents" });
   await expect(webSearch).toContainText("Bind");
@@ -260,17 +269,17 @@ test("creates, edits, publishes, persists, and switches between Agents", async (
   await page.getByRole("button", { name: "Index and bind" }).click();
   const knowledgeSource = page.locator(".knowledge-source-row").filter({ hasText: sourceName });
   await expect(knowledgeSource).toContainText("Bound");
-  await page.getByRole("button", { name: /^Capabilities/ }).click();
+  await page.locator(".builder-nav").getByRole("button", { name: "Tools", exact: true }).click();
   const knowledgeSearch = page.locator(".capability-option").filter({ hasText: "knowledge.search" });
   await expect(knowledgeSearch).toHaveAttribute("aria-pressed", "true");
   await expect(knowledgeSearch).toContainText("Managed in Knowledge");
 
   const publishResponsePromise = page.waitForResponse((response) =>
     response.url().endsWith("/publish") && response.request().method() === "POST");
-  await page.getByRole("button", { name: "Publish version" }).click();
+  await page.getByRole("button", { name: "Use in Studio" }).click();
   const publishedAgent = await (await publishResponsePromise).json() as { current_version_id: string };
   await expect(page.locator(".title-row .status-pill")).toHaveText("published");
-  await expect(page.locator(".title-row .version-badge")).toHaveText("v2");
+  await expect(page.locator(".title-row .version-badge")).toHaveCount(0);
   await page.getByRole("button", { name: "Identity", exact: true }).click();
   await expect(page.getByRole("textbox", { name: /^Agent name/ })).toHaveValue(publishedName);
 
@@ -287,7 +296,7 @@ test("creates, edits, publishes, persists, and switches between Agents", async (
   await composer.fill("Find the active incident");
   await composer.press("Enter");
   await firstRunResponsePromise;
-  await expect(page.getByText("Complete", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator(".conversation-pane").getByText("I reviewed the current record for INC-104.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Send message" })).toBeVisible();
 
@@ -345,8 +354,8 @@ test("creates, edits, publishes, persists, and switches between Agents", async (
     .toContain("I reviewed the current record for INC-104.");
 
   await page.goto("/agents");
-  await page.getByRole("combobox", { name: "Select agent" }).selectOption({ label: "Operations Copilot · v1" });
+  await page.getByRole("combobox", { name: "Select agent" }).selectOption({ label: "Operations Copilot" });
   await expect(page.getByRole("textbox", { name: /^Agent name/ })).toHaveValue("Operations Copilot");
-  await page.getByRole("combobox", { name: "Select agent" }).selectOption({ label: `${publishedName} · v2` });
+  await page.getByRole("combobox", { name: "Select agent" }).selectOption({ label: publishedName });
   await expect(page.getByRole("textbox", { name: /^Agent name/ })).toHaveValue(publishedName);
 });

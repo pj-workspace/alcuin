@@ -40,4 +40,6 @@ tmp/
 
 # Generated artifacts
 artifacts/
+!apps/web/features/studio/artifacts/
+!apps/web/features/studio/artifacts/**
 outputs/

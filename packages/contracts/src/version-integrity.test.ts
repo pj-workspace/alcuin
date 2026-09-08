@@ -16,6 +16,8 @@ const definition = {
   extensions: [],
   tools: [],
   knowledge: [],
+  skills: [],
+  rules: [],
   runtime: { adapter: "test", max_steps: 4 },
   policies: { mutating_tools: "ask", external_side_effects: "ask" },
   context_policy: {},

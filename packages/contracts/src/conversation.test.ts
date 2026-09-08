@@ -10,8 +10,10 @@ const parts = [
   {
     type: "attachment",
     attachment_id: "att_report",
+    kind: "document",
     name: "report.pdf",
     media_type: "application/pdf",
+    size_bytes: 48_120,
   },
 ] satisfies MessagePart[];
 

@@ -45,6 +45,8 @@ def reset_database() -> None:
     with psycopg.connect(DATABASE_URL) as connection:
         connection.execute(
             """TRUNCATE TABLE
+            artifact_versions, artifacts,
+            message_attachments, attachment_blobs, attachments,
             run_context_assemblies, thread_compactions, messages,
             knowledge_documents, knowledge_sources, extensions, approvals, events,
             runs, threads, agent_versions, agents, workspaces

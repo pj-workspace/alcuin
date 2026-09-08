@@ -138,7 +138,80 @@ def test_provider_status_never_returns_credentials() -> None:
         deepseek = next(item for item in response.json() if item["id"] == "deepseek")
         assert deepseek["default_model"] == "deepseek-v4-flash-vision-exp"
         assert deepseek["input_modalities"] == ["text", "image"]
+        assert [model["id"] for model in deepseek["models"]] == [
+            "deepseek-v4-flash-vision-exp",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+        ]
+        assert [model["tier"] for model in deepseek["models"]] == [
+            "vision",
+            "flash",
+            "pro",
+        ]
+        assert deepseek["models"][0]["input_modalities"] == ["text", "image"]
+        assert deepseek["models"][1]["input_modalities"] == ["text"]
+        assert deepseek["models"][2]["reasoning_efforts"] == [
+            "none",
+            "low",
+            "medium",
+            "high",
+        ]
+        generic = next(
+            item for item in response.json() if item["id"] == "openai-compatible"
+        )
+        assert [model["id"] for model in generic["models"]] == ["gpt-4.1-mini"]
+        assert generic["models"][0]["tier"] == "standard"
         assert "api_key" not in deepseek
+        assert "test-provider-key" not in response.text
+
+
+def test_run_model_override_is_provider_scoped_and_image_capability_is_enforced() -> (
+    None
+):
+    headers = {"X-Alcuin-Workspace": "ws_demo"}
+    with make_client() as client:
+        thread = client.post(
+            "/v1/threads",
+            headers=headers,
+            json={"agent_id": "agt_starter", "context": {}},
+        ).json()
+        cross_provider = client.post(
+            f"/v1/threads/{thread['id']}/runs",
+            headers=headers,
+            json={"input": "Hello", "model_override": "gpt-4.1-mini"},
+        )
+        assert cross_provider.status_code == 422
+        assert cross_provider.json()["detail"] == (
+            "model_override is unavailable for this Agent provider"
+        )
+
+        uploaded = client.post(
+            "/v1/attachments",
+            headers=headers,
+            data={"upload_id": "upload-model-capability"},
+            files={
+                "file": (
+                    "pixel.png",
+                    b"\x89PNG\r\n\x1a\n",
+                    "image/png",
+                )
+            },
+        )
+        assert uploaded.status_code == 201
+        text_only = client.post(
+            f"/v1/threads/{thread['id']}/runs",
+            headers=headers,
+            json={
+                "input": "Inspect this image",
+                "model_override": "deepseek-v4-flash",
+                "attachment_ids": [uploaded.json()["id"]],
+            },
+        )
+        assert text_only.status_code == 422
+        assert text_only.json()["detail"] == (
+            "selected model does not accept image attachments"
+        )
+        assert client.get("/v1/runs", headers=headers).json() == []
 
 
 def test_agent_creation_is_versioned_and_rejects_duplicate_workspace_slug() -> None:
@@ -472,7 +545,11 @@ def test_run_emits_ordered_terminal_events() -> None:
         run = client.post(
             f"/v1/threads/{thread['id']}/runs",
             headers=headers,
-            json={"input": "Summarize the checkout incident"},
+            json={
+                "input": "Summarize the checkout incident",
+                "model_override": "deepseek-v4-pro",
+                "reasoning_effort": "medium",
+            },
         ).json()
         deadline = time.time() + 3
         body = None
@@ -486,6 +563,12 @@ def test_run_emits_ordered_terminal_events() -> None:
         sequences = [event["sequence"] for event in body["events"]]
         assert sequences == sorted(sequences)
         assert body["events"][0]["type"] == "run.started"
+        assert body["events"][0]["payload"]["model"] == "deepseek-v4-pro"
+        assert body["events"][0]["payload"]["reasoning_effort"] == "medium"
+        assert body["events"][0]["payload"]["thinking"] is True
+        assert "api_key" not in body["events"][0]["payload"]
+        assert "base_url" not in body["events"][0]["payload"]
+        assert "test-provider-key" not in json.dumps(body["events"][0])
         assert body["events"][-1]["type"] == "run.completed"
         resumed = client.get(
             f"/v1/runs/{run['id']}/events?after=2",
@@ -536,11 +619,17 @@ def test_run_emits_ordered_terminal_events() -> None:
         assert tcm_ids == [frame["sequence"] for frame in tcm_frames]
         assert tcm_ids == sorted(set(tcm_ids))
         assert tcm_types[0] == "meta"
+        assert tcm_frames[0]["chatModel"] == "deepseek-v4-pro"
+        assert tcm_frames[0]["reasoningEffort"] == "medium"
+        assert "apiKey" not in tcm_frames[0]
+        assert "baseUrl" not in tcm_frames[0]
+        assert "test-provider-key" not in json.dumps(tcm_frames[0])
         assert tcm_types[-1] == "done"
         assert tcm_types.index("tool-call") < tcm_types.index("tool-result")
         assert tcm_types.index("tool-result") < tcm_types.index("text-delta")
         assert "source-registry" in tcm_types
-        assert "artifact-updated" in tcm_types
+        # A normal answer is not an independent generated document.
+        assert "artifact-updated" not in tcm_types
 
 
 def test_approved_tool_fails_truthfully_when_runtime_handler_is_unavailable() -> None:

@@ -2,9 +2,9 @@
 
 import type { RefObject } from "react";
 
+import { AgentPresenceOrb } from "@/features/studio/agent-presence-orb";
 import { ConversationTurn } from "@/features/studio/conversation-turn";
 import type { ConversationTurn as ConversationTurnModel } from "@/features/studio/thread-session-reducer";
-import { AlcuinMark } from "@/shared/components/alcuin-mark";
 import { useI18n } from "@/shared/lib/i18n";
 
 export function ConversationTimeline({
@@ -29,7 +29,7 @@ export function ConversationTimeline({
   anchorRef: RefObject<HTMLElement | null>;
   endRef: RefObject<HTMLElement | null>;
   spacerPx: number;
-  onCopy: (text: string) => void;
+  onCopy: (text: string) => void | Promise<void>;
   onDecision: (runId: string, approvalId: string, decision: "approved" | "denied") => void;
 }) {
   const { t } = useI18n();
@@ -39,7 +39,7 @@ export function ConversationTimeline({
       <div className="thread-meta"><span>{workspaceName}</span><i />{threadTitle}<i />{t("Now")}</div>
       {turns.length === 0 ? (
         <div className="conversation-empty">
-          <AlcuinMark size={34} />
+          <AgentPresenceOrb state="breathing" active size={58} className="empty-presence-orb" />
           <h2>{t("Start a conversation")}</h2>
           <p>{t("This thread will keep its context as you continue.")}</p>
         </div>

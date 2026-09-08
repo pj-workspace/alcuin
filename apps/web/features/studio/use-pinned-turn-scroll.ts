@@ -9,7 +9,7 @@ import {
 } from "react";
 
 const TOP_PAD_PX = 24;
-const COMPOSER_CLEARANCE_PX = 140;
+const BOTTOM_CLEARANCE_PX = 24;
 const NEAR_BOTTOM_PX = 88;
 
 type PinnedTurnScroll = {
@@ -23,6 +23,15 @@ function relativeTop(container: HTMLElement, element: HTMLElement): number {
   const containerRect = container.getBoundingClientRect();
   const elementRect = element.getBoundingClientRect();
   return elementRect.top - containerRect.top + container.scrollTop;
+}
+
+/**
+ * Adds only the clearance needed to pin a short active turn near the viewport top.
+ * The active turn's position in the full conversation must never contribute to the
+ * spacer: doing so duplicates the whole history height and leaves a blank viewport.
+ */
+export function pinnedTurnSpacerPx(visibleHeight: number, turnHeight: number): number {
+  return Math.max(0, Math.floor(visibleHeight - turnHeight - TOP_PAD_PX));
 }
 
 /** Pins the latest user turn near the viewport top and soft-follows long streams. */
@@ -56,9 +65,8 @@ export function usePinnedTurnScroll(
     const anchorTop = relativeTop(container, anchor);
     const endBottom = relativeTop(container, end) + end.offsetHeight;
     const turnHeight = Math.max(anchor.offsetHeight, endBottom - anchorTop);
-    const visibleHeight = Math.max(160, container.clientHeight - COMPOSER_CLEARANCE_PX);
-    const pinDistance = Math.max(0, anchorTop - TOP_PAD_PX);
-    updateSpacer(visibleHeight - turnHeight - TOP_PAD_PX + pinDistance);
+    const visibleHeight = Math.max(160, container.clientHeight - BOTTOM_CLEARANCE_PX);
+    updateSpacer(pinnedTurnSpacerPx(visibleHeight, turnHeight));
 
     if (mode === "pin" || (mode === "follow" && autoFollowRef.current)) {
       const target = turnHeight + TOP_PAD_PX <= visibleHeight
@@ -68,7 +76,10 @@ export function usePinnedTurnScroll(
         top: target,
         behavior: mode === "pin" && !reducedMotionRef.current ? "smooth" : "auto",
       });
-      previousScrollTopRef.current = target;
+      // `scrollTo({ behavior: "smooth" })` does not reach the target immediately.
+      // Tracking the future target makes its intermediate frames look like a user
+      // scrolling upward and disables stream following on the next scroll event.
+      previousScrollTopRef.current = container.scrollTop;
     }
   }, [updateSpacer]);
 
