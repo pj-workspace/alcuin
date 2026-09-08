@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${ALCUIN_POSTGRES_USER:-alcuin}
+      POSTGRES_PASSWORD: ${ALCUIN_POSTGRES_PASSWORD:-alcuin}
+      POSTGRES_DB: ${ALCUIN_POSTGRES_DB:-alcuin}
+    ports:
+      - "127.0.0.1:${ALCUIN_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    ports:
+      - "127.0.0.1:${ALCUIN_QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  searxng:
+    image: docker.io/searxng/searxng@sha256:37baac8380e1a31e022b8dda0c58dbd6ba0630e3fdaf2c522bda3d140f5ef111
+    ports:
+      - "127.0.0.1:${ALCUIN_SEARXNG_PORT:-9888}:8080"
+    volumes:
+      - ./infra/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --spider
+        - -q
+        - http://127.0.0.1:8080/
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres-data:
+  qdrant-data:

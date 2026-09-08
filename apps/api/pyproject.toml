@@ -1,0 +1,70 @@
+[project]
+name = "alcuin-api"
+version = "0.1.0"
+description = "Control plane and runtime gateway for Alcuin"
+requires-python = ">=3.11"
+dependencies = [
+  "alcuin-context",
+  "alcuin-core",
+  "alcuin-customization",
+  "alcuin-documents",
+  "alcuin-knowledge",
+  "alcuin-storage",
+  "alcuin-web-search",
+  "alembic>=1.16.0,<2.0",
+  "fastapi>=0.115.0,<1.0",
+  "httpx>=0.27.0,<1.0",
+  "jsonschema>=4.23.0,<5.0",
+  "langgraph>=0.2.0,<2.0",
+  "mcp>=1.0.0,<2.0",
+  "pydantic-settings>=2.5.0,<3.0",
+  "python-multipart>=0.0.20,<1.0",
+  "pyyaml>=6.0.0,<7.0",
+  "uvicorn[standard]>=0.30.0,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "alcuin-operations-copilot",
+  "pytest>=8.3.0,<9.0",
+  "pytest-asyncio>=0.24.0,<1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alcuin_api"]
+
+[tool.uv.sources]
+alcuin-context = { path = "../../packages/python/alcuin-context", editable = true }
+alcuin-core = { path = "../../packages/python/alcuin-core", editable = true }
+alcuin-customization = { path = "../../packages/python/alcuin-customization", editable = true }
+alcuin-documents = { path = "../../packages/python/alcuin-documents", editable = true }
+alcuin-knowledge = { path = "../../packages/python/alcuin-knowledge", editable = true }
+alcuin-storage = { path = "../../packages/python/alcuin-storage", editable = true }
+alcuin-web-search = { path = "../../packages/python/alcuin-web-search", editable = true }
+alcuin-operations-copilot = { path = "../../extensions/operations-copilot", editable = true }
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src", "tests"]
+testpaths = [
+  "tests",
+  "../../packages/python/alcuin-context/tests",
+  "../../packages/python/alcuin-core/tests",
+  "../../packages/python/alcuin-customization/tests",
+  "../../packages/python/alcuin-documents/tests",
+  "../../packages/python/alcuin-knowledge/tests",
+  "../../packages/python/alcuin-storage/tests",
+  "../../packages/python/alcuin-web-search/tests",
+]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+  "alcuin-operations-copilot",
+  "pytest>=8.3.0,<9.0",
+  "pytest-asyncio>=0.24.0,<1.0",
+]

@@ -1,0 +1,23 @@
+{
+  "name": "@alcuin/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "pnpm clean && tsc -p tsconfig.build.json",
+    "lint": "tsc --noEmit",
+    "test": "node --experimental-strip-types src/index.test.ts && tsc --noEmit"
+  },
+  "dependencies": {
+    "@alcuin/contracts": "workspace:*",
+    "@alcuin/sse-client": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}

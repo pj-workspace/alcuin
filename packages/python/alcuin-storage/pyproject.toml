@@ -1,0 +1,28 @@
+[project]
+name = "alcuin-storage"
+version = "0.1.0"
+description = "Workspace-scoped persistence ports and adapters for Alcuin"
+requires-python = ">=3.11"
+dependencies = [
+  "alcuin-core",
+  "psycopg[binary,pool]>=3.2.0,<4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alcuin_storage"]
+
+[tool.uv.sources]
+alcuin-core = { path = "../alcuin-core", editable = true }
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3.0,<9.0",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
