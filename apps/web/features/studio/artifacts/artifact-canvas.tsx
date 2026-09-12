@@ -35,6 +35,7 @@ export function ArtifactCanvas({
   citationEvents,
   activeRunId,
   running,
+  refreshKey,
   onNotify,
 }: {
   enabled: boolean;
@@ -43,21 +44,22 @@ export function ArtifactCanvas({
   citationEvents: readonly ExecutionEvent[];
   activeRunId: string | null;
   running: boolean;
+  refreshKey?: string | null;
   onNotify: (message: string) => void;
 }) {
   const { t, locale } = useI18n();
-  const workspace = useArtifactWorkspace({ threadId, eventArtifacts, running });
+  const workspace = useArtifactWorkspace({ threadId, eventArtifacts, running, refreshKey });
   const { state, displayedArtifact } = workspace;
   const status = artifactStatus(state.phase, running, t);
   const [downloading, setDownloading] = useState(false);
   const [copying, setCopying] = useState(false);
 
   if (!enabled) return <ArtifactEmpty title={t("Artifact canvas")} message={t("This Agent is configured for conversational output.")} />;
-  if (!displayedArtifact && state.phase === "loading") {
+  if (!displayedArtifact && state.phase === "loading" && !workspace.refreshError) {
     return <div className="artifact-loading" role="status"><span className="micro-loader" />{t("Loading artifact…")}</div>;
   }
-  if (!displayedArtifact && state.phase === "error") {
-    return <ArtifactEmpty title={t("Artifact unavailable")} message={state.message ?? t("Unable to load artifact")} action={<button className="button secondary" onClick={workspace.reload}><RefreshCw size={13} />{t("Try again")}</button>} />;
+  if (!displayedArtifact && (state.phase === "error" || workspace.refreshError)) {
+    return <ArtifactEmpty title={t("Artifact unavailable")} message={workspace.refreshError ?? state.message ?? t("Unable to load artifact")} action={<button className="button secondary" onClick={workspace.reload}><RefreshCw size={13} />{t("Try again")}</button>} />;
   }
   if (!displayedArtifact) {
     return <ArtifactEmpty title={t("Artifact canvas")} message={t("Structured output will appear here as the agent works.")} />;
@@ -96,6 +98,7 @@ export function ArtifactCanvas({
 
   return (
     <section className="artifact-workspace" data-phase={state.phase}>
+      {workspace.refreshError && <div className="artifact-editor-notice error" role="alert"><AlertTriangle size={15} /><p>{workspace.refreshError}</p><button className="button secondary" onClick={workspace.reload}><RefreshCw size={13} />{t("Try again")}</button></div>}
       <div className="artifact-workspace-toolbar">
         <div className="artifact-resource-switcher" role="tablist" aria-label={t("Artifacts in this thread")} onKeyDown={(event) => {
           if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || workspace.editorOpen) return;

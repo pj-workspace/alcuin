@@ -1,4 +1,15 @@
-import type { ArtifactResource } from "@alcuin/contracts";
+import type { ArtifactResource, Task, TaskEvidence } from "@alcuin/contracts";
+
+/** Task evidence is an invalidation hint, never an artifact body. */
+export function taskArtifactRefreshKey(task: (Task & { evidence?: TaskEvidence[] }) | null, threadId: string | null): string | null {
+  if (!task || task.thread_id !== threadId) return null;
+  const evidenceIds = [...new Set([
+    ...(task.evidence ?? []),
+    ...task.plan.steps.flatMap((step) => step.evidence),
+  ].filter((item) => item.kind === "artifact").map((item) => item.id))].sort();
+  const terminal = ["completed", "failed", "cancelled"].includes(task.status) ? task.status : "";
+  return JSON.stringify([task.id, task.latest_checkpoint?.id ?? "", terminal, evidenceIds]);
+}
 
 export type ArtifactWorkspacePhase =
   | "idle"

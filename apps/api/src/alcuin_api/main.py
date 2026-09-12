@@ -127,12 +127,14 @@ from .tasks import (
     RuntimeTaskStepRunner,
     TaskCoordinator,
     TaskService,
+    TaskPlanner,
     create_task_router,
 )
 from .skill_wiring import skill_tool_definitions
 from .web_search_wiring import web_search_config, web_search_tool_definition
 from .run_profile import resolve_run_model_controls
 from .artifact_downloads import export_artifact
+from .thread_titles import ThreadTitleService
 
 
 ScopeDependency = Annotated[RequestScope, Depends(resolve_scope)]
@@ -214,6 +216,7 @@ def create_app(
         application.state.recovered_tasks = application.state.task_coordinator.recover()
         yield
         await application.state.task_coordinator.close()
+        await application.state.thread_titles.close()
         for task in application.state.tasks:
             task.cancel()
         if web_search_service:
@@ -248,6 +251,10 @@ def create_app(
         tool_executor,
         provider_transport=provider_transport,
     )
+    app.state.thread_titles = ThreadTitleService(
+        repository, settings, transport=provider_transport,
+        sensitive_values=app.state.runtime.sensitive_values,
+    )
     app.state.task_coordinator = TaskCoordinator(
         repository,
         RuntimeTaskStepRunner(repository, settings, app.state.runtime),
@@ -256,6 +263,11 @@ def create_app(
         repository,
         dispatch=app.state.task_coordinator.schedule,
         settings=settings,
+        name_thread=app.state.thread_titles.schedule,
+        planner=TaskPlanner(
+            repository, settings,
+            tool_executor=tool_executor, transport=provider_transport,
+        ),
     )
     app.include_router(create_task_router(app.state.task_service))
 
@@ -1114,6 +1126,24 @@ def create_app(
         except RepositoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.post("/v1/threads/{thread_id}/title/ensure")
+    async def ensure_thread_title(thread_id: str, scope: ScopeDependency) -> dict:
+        require_workspace_operator(scope)
+        scope.require("run:create")
+        try:
+            return app.state.thread_titles.ensure(scope.workspace_id, thread_id)
+        except LookupError as exc:
+            raise missing("Thread") from exc
+
+    @app.get("/v1/threads/{thread_id}/title")
+    async def get_thread_title(thread_id: str, scope: ScopeDependency) -> dict:
+        scope.require("run:read")
+        thread = repository.get_thread(scope.workspace_id, thread_id)
+        if thread is None:
+            raise missing("Thread")
+        require_thread_agent(scope, thread)
+        return thread
+
     @app.get("/v1/threads/{thread_id}", response_model=ThreadDetail)
     async def get_thread(thread_id: str, scope: ScopeDependency) -> dict:
         scope.require("run:read")
@@ -1314,6 +1344,8 @@ def create_app(
             ) from exc
         except RepositoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not payload.requested_tool:
+            app.state.thread_titles.schedule(scope.workspace_id, thread_id)
         runtime_attachments = tuple(
             RuntimeAttachmentRef.from_record(
                 attachment,

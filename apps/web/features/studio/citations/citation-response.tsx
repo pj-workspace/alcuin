@@ -2,7 +2,7 @@
 
 import type { ExecutionEvent } from "@alcuin/contracts";
 import { BookOpen, ChevronDown, Copy as CopyIcon, ExternalLink, FileText, Globe2, Link2, X } from "lucide-react";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { defaultUrlTransform } from "react-markdown";
 
@@ -12,20 +12,24 @@ import { hasCitationReferences } from "./citation-cache";
 import { loadRunCitations } from "./citation-access";
 import { portableRunMarkdown } from "./portable-run-markdown";
 import { citationCopy } from "./citation-copy";
-import { citationIdFromHref, collectCitationSources, remarkCitationMarkers, resolveCitationSource, type CitationSource } from "./citation-model";
+import { citationIdFromHref, createCitationSourceSelector, remarkCitationMarkers, resolveCitationSource, type CitationSource } from "./citation-model";
 import "./citation-evidence.css";
 
 type Copy = ReturnType<typeof citationCopy>;
 type Preview = { source: CitationSource | null; href: string; anchor: HTMLElement; pinned: boolean };
 type HistoryStatus = "idle" | "loading" | "ready" | "error";
+const citationPlugins = [remarkCitationMarkers];
+const noEvents: ExecutionEvent[] = [];
+const citationUrlTransform = (url: string) => citationIdFromHref(url) || url.startsWith("knowledge://") ? url : defaultUrlTransform(url);
 
-export function CitationResponse({ content, events, runId, running = false, variant = "answer", onCopy }: { content: string; events: ExecutionEvent[]; runId?: string | null; running?: boolean; variant?: "answer" | "thinking" | "artifact"; onCopy?: (content: string) => void | Promise<void> }) {
+export const CitationResponse = memo(function CitationResponse({ content, events, runId, running = false, variant = "answer", onCopy }: { content: string; events: ExecutionEvent[]; runId?: string | null; running?: boolean; variant?: "answer" | "thinking" | "artifact"; onCopy?: (content: string) => void | Promise<void> }) {
   const { locale, t } = useI18n();
-  const copy = citationCopy(locale);
+  const copy = useMemo(() => citationCopy(locale), [locale]);
   const [history, setHistory] = useState<{ runId?: string | null; status: HistoryStatus; events: ExecutionEvent[] }>({ status: "idle", events: [] });
   const historyStatus = history.runId === runId ? history.status : "idle";
   const historyPending = Boolean(runId && !running && historyStatus !== "ready");
-  const sources = useMemo(() => collectCitationSources([...events, ...(history.runId === runId ? history.events : [])]), [events, history.events, history.runId, runId]);
+  const selectSources = useMemo(() => createCitationSourceSelector(), []);
+  const sources = useMemo(() => selectSources(events, history.runId === runId ? history.events : noEvents), [events, history.events, history.runId, runId, selectSources]);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [copying, setCopying] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
@@ -48,14 +52,14 @@ export function CitationResponse({ content, events, runId, running = false, vari
   }, [cancelClose]);
   useEffect(() => () => cancelClose(), [cancelClose]);
 
-  const loadHistory = () => {
+  const loadHistory = useCallback(() => {
     if (!runId || running || historyStatus === "loading") return;
     setHistory({ runId, status: "loading", events: [] });
     void loadRunCitations(runId).then(
       (loaded) => setHistory({ runId, status: "ready", events: loaded }),
       () => setHistory({ runId, status: "error", events: [] }),
     );
-  };
+  }, [runId, running, historyStatus]);
 
   const copyResponse = async () => {
     if (!onCopy || copying) return;
@@ -66,38 +70,41 @@ export function CitationResponse({ content, events, runId, running = false, vari
     finally { setCopying(false); }
   };
 
-  const showPreview = (source: CitationSource | null, href: string, anchor: HTMLElement, pinned: boolean) => {
+  const showPreview = useCallback((source: CitationSource | null, href: string, anchor: HTMLElement, pinned: boolean) => {
     cancelClose();
     setPreview((current) => !pinned && current?.pinned ? current : { source, href, anchor, pinned });
     if (pinned && !source) loadHistory();
-  };
+  }, [cancelClose, loadHistory]);
+
+  const previewHref = preview?.href;
+  const renderLink = useCallback(({ href = "", children }: { href?: string; children: ReactNode }) => {
+    const source = resolveCitationSource(href, sources);
+    const explicit = citationIdFromHref(href);
+    if (!source && !explicit && !href.startsWith("knowledge://")) return undefined;
+    return <button
+      type="button"
+      className={`citation-inline ${source || historyPending ? "" : "citation-unmatched"}`}
+      data-citation-number={source?.number}
+      aria-label={source ? `${copy.open} ${source.number}: ${source.title || copy.unknownTitle}` : historyPending ? copy.loadSources : copy.missing}
+      aria-haspopup="dialog"
+      aria-controls={previewHref === href ? previewId : undefined}
+      data-preview-id={`${previewId}-${href}`}
+      onPointerEnter={(event) => { if (event.pointerType !== "touch") showPreview(source, href, event.currentTarget, false); }}
+      onPointerLeave={scheduleClose}
+      onClick={(event) => showPreview(source, href, event.currentTarget, true)}
+    >
+      {!explicit && <span className="citation-link-label">{children}</span>}
+      <span className="citation-reference-number">{source?.number ?? "?"}</span>
+    </button>;
+  }, [sources, historyPending, copy, previewHref, previewId, showPreview, scheduleClose]);
 
   return <div className="citation-response">
     {content && <MarkdownContent
       content={content}
       variant={variant}
-      remarkPlugins={[remarkCitationMarkers]}
-      urlTransform={(url) => citationIdFromHref(url) || url.startsWith("knowledge://") ? url : defaultUrlTransform(url)}
-      renderLink={({ href = "", children }) => {
-        const source = resolveCitationSource(href, sources);
-        const explicit = citationIdFromHref(href);
-        if (!source && !explicit && !href.startsWith("knowledge://")) return undefined;
-        return <button
-          type="button"
-          className={`citation-inline ${source || historyPending ? "" : "citation-unmatched"}`}
-          data-citation-number={source?.number}
-          aria-label={source ? `${copy.open} ${source.number}: ${source.title || copy.unknownTitle}` : historyPending ? copy.loadSources : copy.missing}
-          aria-haspopup="dialog"
-          aria-controls={preview?.anchor.dataset.previewId === `${previewId}-${href}` ? previewId : undefined}
-          data-preview-id={`${previewId}-${href}`}
-          onPointerEnter={(event) => { if (event.pointerType !== "touch") showPreview(source, href, event.currentTarget, false); }}
-          onPointerLeave={scheduleClose}
-          onClick={(event) => showPreview(source, href, event.currentTarget, true)}
-        >
-          {!explicit && <span className="citation-link-label">{children}</span>}
-          <span className="citation-reference-number">{source?.number ?? "?"}</span>
-        </button>;
-      }}
+      remarkPlugins={citationPlugins}
+      urlTransform={citationUrlTransform}
+      renderLink={renderLink}
     />}
     {sources.length > 0 && <CitationSourceList sources={sources} copy={copy} locale={locale} defaultExpanded={historyStatus === "ready"} />}
     {sources.length === 0 && runId && !running && hasCitationReferences(content) && <div className="citation-history">
@@ -119,9 +126,9 @@ export function CitationResponse({ content, events, runId, running = false, vari
       onRetry={loadHistory}
     />}
   </div>;
-}
+});
 
-export function CitationSourceList({ sources, copy, locale, defaultExpanded = false }: { sources: CitationSource[]; copy: Copy; locale: "en" | "zh"; defaultExpanded?: boolean }) {
+export const CitationSourceList = memo(function CitationSourceList({ sources, copy, locale, defaultExpanded = false }: { sources: CitationSource[]; copy: Copy; locale: "en" | "zh"; defaultExpanded?: boolean }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [selected, setSelected] = useState<string | null>(null);
   const listId = useId();
@@ -157,7 +164,7 @@ export function CitationSourceList({ sources, copy, locale, defaultExpanded = fa
       </div>
     </div>
   </section>;
-}
+});
 
 function CitationPreview({ id, preview, copy, locale, onClose, onPointerEnter, onPointerLeave, historyStatus, historyPending, onRetry }: {
   id: string;

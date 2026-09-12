@@ -7,6 +7,7 @@ import {
   useState,
   type RefObject,
 } from "react";
+import { createScrollMeasureScheduler, type ScrollMeasureMode } from "./scroll-measure-scheduler.ts";
 
 const TOP_PAD_PX = 24;
 const BOTTOM_CLEARANCE_PX = 24;
@@ -18,12 +19,6 @@ type PinnedTurnScroll = {
   scrollRef: RefObject<HTMLDivElement | null>;
   spacerPx: number;
 };
-
-function relativeTop(container: HTMLElement, element: HTMLElement): number {
-  const containerRect = container.getBoundingClientRect();
-  const elementRect = element.getBoundingClientRect();
-  return elementRect.top - containerRect.top + container.scrollTop;
-}
 
 /**
  * Adds only the clearance needed to pin a short active turn near the viewport top.
@@ -47,6 +42,7 @@ export function usePinnedTurnScroll(
   const reducedMotionRef = useRef(false);
   const previousScrollTopRef = useRef(0);
   const spacerValueRef = useRef(0);
+  const schedulerRef = useRef<ReturnType<typeof createScrollMeasureScheduler> | null>(null);
   const [spacerPx, setSpacerPx] = useState(0);
 
   const updateSpacer = useCallback((value: number) => {
@@ -62,9 +58,14 @@ export function usePinnedTurnScroll(
     const end = endRef.current;
     if (!container || !anchor || !end) return;
 
-    const anchorTop = relativeTop(container, anchor);
-    const endBottom = relativeTop(container, end) + end.offsetHeight;
-    const turnHeight = Math.max(anchor.offsetHeight, endBottom - anchorTop);
+    // Read geometry together, before updating the spacer or scrolling.
+    const containerRect = container.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    const endRect = end.getBoundingClientRect();
+    const scrollTop = container.scrollTop;
+    const anchorTop = anchorRect.top - containerRect.top + scrollTop;
+    const endBottom = endRect.bottom - containerRect.top + scrollTop;
+    const turnHeight = Math.max(anchorRect.height, endBottom - anchorTop);
     const visibleHeight = Math.max(160, container.clientHeight - BOTTOM_CLEARANCE_PX);
     updateSpacer(pinnedTurnSpacerPx(visibleHeight, turnHeight));
 
@@ -83,16 +84,29 @@ export function usePinnedTurnScroll(
     }
   }, [updateSpacer]);
 
+  const scheduleMeasure = useCallback((mode: ScrollMeasureMode) => {
+    schedulerRef.current ??= createScrollMeasureScheduler(
+      measure,
+      (callback) => window.requestAnimationFrame(callback),
+      (handle) => window.cancelAnimationFrame(handle),
+    );
+    schedulerRef.current.schedule(mode);
+  }, [measure]);
+
+  useLayoutEffect(() => () => {
+    schedulerRef.current?.cancel();
+  }, [turnKey]);
+
   useLayoutEffect(() => {
     const isNewTurn = activeTurnRef.current !== turnKey;
     if (isNewTurn) {
       activeTurnRef.current = turnKey;
       autoFollowRef.current = true;
-      measure("pin");
+      scheduleMeasure("pin");
       return;
     }
-    measure("follow");
-  }, [measure, streamVersion, turnKey]);
+    scheduleMeasure("follow");
+  }, [scheduleMeasure, streamVersion, turnKey]);
 
   useLayoutEffect(() => {
     const container = scrollRef.current;
@@ -122,17 +136,17 @@ export function usePinnedTurnScroll(
     const end = endRef.current;
     if (!container || !anchor || !end || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      if (autoFollowRef.current) measure("follow");
+      if (autoFollowRef.current) scheduleMeasure("follow");
     });
     observer.observe(container);
     observer.observe(anchor);
     observer.observe(end);
     return () => observer.disconnect();
-  }, [measure, turnKey]);
+  }, [scheduleMeasure, turnKey]);
 
   useLayoutEffect(() => {
-    if (autoFollowRef.current) measure("follow");
-  }, [measure, spacerPx]);
+    if (autoFollowRef.current) scheduleMeasure("follow");
+  }, [scheduleMeasure, spacerPx]);
 
   return { anchorRef, endRef, scrollRef, spacerPx };
 }

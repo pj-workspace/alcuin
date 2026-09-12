@@ -479,6 +479,8 @@ export interface Thread {
   /** Immutable Agent version selected when the Thread is created. */
   agent_version_id: string;
   title: string;
+  /** Optional for older servers; ready includes manually assigned titles. */
+  title_status?: "pending" | "generating" | "ready";
   context: Record<string, unknown>;
   /** Optional while pre-kernel Threads are migrated. */
   context_revision?: number;

@@ -7,11 +7,13 @@ import json
 from typing import Annotated
 
 from alcuin_core.tasks import Task, TaskCommand, TaskCreate, TaskPlanUpdate, TaskStatus
+from alcuin_core.tasks import TaskPlanProposal, TaskPlanProposalRequest
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
 from ..security import RequestScope, resolve_scope
 from .service import TaskNotFound, TaskService, TaskStateConflict
+from .planning import PlanningError
 
 
 ScopeDependency = Annotated[RequestScope, Depends(resolve_scope)]
@@ -50,6 +52,23 @@ def _event_cursor(after: int, last_event_id: str | None) -> int:
 
 def create_task_router(service: TaskService) -> APIRouter:
     router = APIRouter(tags=["tasks"])
+
+    @router.post(
+        "/v1/threads/{thread_id}/task-plan-proposals", response_model=TaskPlanProposal
+    )
+    async def propose_task_plan(
+        thread_id: str,
+        payload: TaskPlanProposalRequest,
+        scope: ScopeDependency,
+    ) -> TaskPlanProposal:
+        _ensure_operator(scope)
+        scope.require("run:create")
+        try:
+            return await service.propose_plan(scope.workspace_id, thread_id, payload)
+        except TaskNotFound as exc:
+            raise _task_error(exc) from exc
+        except PlanningError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     @router.post(
         "/v1/threads/{thread_id}/tasks",

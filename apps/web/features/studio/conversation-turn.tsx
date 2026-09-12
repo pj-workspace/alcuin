@@ -1,13 +1,14 @@
 "use client";
 
 import { Check, ShieldCheck, X } from "lucide-react";
+import { memo } from "react";
 
 import { MessageAttachments } from "@/features/studio/attachments";
 import { RunOutput } from "@/features/studio/run-output";
 import type { ConversationTurn as ConversationTurnModel } from "@/features/studio/thread-session-reducer";
 import { useI18n } from "@/shared/lib/i18n";
 
-export function ConversationTurn({
+export const ConversationTurn = memo(function ConversationTurn({
   turn,
   active,
   running,
@@ -68,4 +69,4 @@ export function ConversationTurn({
       </article>
     </section>
   );
-}
+});

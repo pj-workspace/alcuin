@@ -14,11 +14,14 @@ from alcuin_core.tasks import (
     TaskCommand,
     TaskCreate,
     TaskPlanUpdate,
+    TaskPlanProposal,
+    TaskPlanProposalRequest,
 )
 from alcuin_storage import ControlPlaneRepository, RepositoryConflict
 
 from ..config import Settings
 from ..run_profile import resolve_run_model_controls
+from .planning import TaskPlanner
 
 
 class TaskNotFound(LookupError):
@@ -41,10 +44,35 @@ class TaskService:
         *,
         settings: Settings | None = None,
         dispatch: DispatchCallback | None = None,
+        planner: TaskPlanner | None = None,
+        name_thread: DispatchCallback | None = None,
     ) -> None:
         self.repository = repository
         self.settings = settings if settings is not None else Settings()
         self._dispatch = dispatch
+        self.planner = planner or TaskPlanner(repository, self.settings)
+        self._name_thread = name_thread
+
+    async def propose_plan(
+        self,
+        workspace_id: str,
+        thread_id: str,
+        payload: TaskPlanProposalRequest,
+    ) -> TaskPlanProposal:
+        thread = self.repository.get_thread(workspace_id, thread_id)
+        if thread is None:
+            raise TaskNotFound("Thread not found")
+        record = self.repository.get_agent_version(
+            workspace_id, str(thread["agent_version_id"])
+        )
+        if record is None:
+            raise TaskNotFound("Task Agent definition not found")
+        return await self.planner.propose(
+            workspace_id,
+            thread,
+            AgentDefinition.model_validate(record["definition"]),
+            payload,
+        )
 
     def set_dispatch(self, dispatch: DispatchCallback) -> None:
         self._dispatch = dispatch
@@ -95,6 +123,8 @@ class TaskService:
                 )
         except RepositoryConflict as exc:
             raise TaskStateConflict(str(exc)) from exc
+        if self._name_thread is not None:
+            self._name_thread(workspace_id, thread_id)
         return task
 
     def get(self, workspace_id: str, task_id: str) -> dict[str, Any]:

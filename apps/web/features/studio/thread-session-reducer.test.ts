@@ -169,3 +169,61 @@ test("switching threads clears the previous timeline while the requested history
   assert.equal(state.thread, null);
   assert.deepEqual(state.turns, []);
 });
+
+function delta(sequence: number, text: string): ExecutionEvent {
+  return {
+    id: `evt_${sequence}`, run_id: "run_1", sequence,
+    type: "message.delta", timestamp: "2026-08-29T00:00:04Z",
+    payload: { delta: text },
+  };
+}
+
+test("ordered streaming only projects new delta payloads and preserves untouched turns", () => {
+  let reads = 0;
+  const first = delta(1, "Hello");
+  Object.defineProperty(first.payload, "delta", { get: () => { reads += 1; return "Hello"; } });
+  let state = threadSessionReducer(initialThreadSessionState, { type: "hydrate.completed", detail });
+  state = threadSessionReducer(state, { type: "turn.submitted", turn: optimisticTurn("other", "Next", []) });
+  const untouched = state.turns[1];
+  state = threadSessionReducer(state, { type: "events.appended", runId: "run_1", events: [first] });
+  const previous = state;
+  const readsBefore = reads;
+  state = threadSessionReducer(state, { type: "events.appended", runId: "run_1", events: [delta(2, " world")] });
+  assert.equal(state.turns[0]?.assistantText, "Hello world");
+  assert.equal(previous.turns[0]?.assistantText, "Hello");
+  assert.equal(previous.turns[0]?.events.length, 1);
+  assert.equal(state.turns[1], untouched);
+  assert.equal(reads, readsBefore, "historical answer deltas should not be projected again");
+});
+
+test("empty, foreign and identical replay batches retain the entire session identity", () => {
+  const first = delta(1, "Hello");
+  let state = threadSessionReducer(initialThreadSessionState, { type: "hydrate.completed", detail });
+  state = threadSessionReducer(state, { type: "events.appended", runId: "run_1", events: [first] });
+  for (const events of [[], [first], [{ ...first, run_id: "foreign" }]]) {
+    assert.equal(threadSessionReducer(state, { type: "events.appended", runId: "run_1", events }), state);
+  }
+  assert.equal(threadSessionReducer(state, { type: "events.appended", runId: "missing", events: [first] }), state);
+});
+
+test("out-of-order replay and corrections retain sequence ordering and last-write-wins behavior", () => {
+  let state = threadSessionReducer(initialThreadSessionState, { type: "hydrate.completed", detail });
+  state = threadSessionReducer(state, { type: "events.appended", runId: "run_1", events: [delta(3, "C"), delta(1, "A")] });
+  state = threadSessionReducer(state, { type: "events.appended", runId: "run_1", events: [delta(2, "B"), delta(1, "Corrected")] });
+  assert.equal(state.turns[0]?.assistantText, "CorrectedBC");
+  assert.deepEqual(state.turns[0]?.events.map((event) => event.sequence), [1, 2, 3]);
+  state = threadSessionReducer(state, { type: "events.appended", runId: "run_1", events: [delta(4, "D"), delta(4, "Latest")] });
+  assert.equal(state.turns[0]?.assistantText, "CorrectedBCLatest");
+});
+
+test("non-answer events preserve hydrated text until the first answer delta", () => {
+  let state = threadSessionReducer(initialThreadSessionState, { type: "hydrate.completed", detail });
+  const reasoning: ExecutionEvent = { ...delta(1, "Thinking"), type: "reasoning.delta" };
+  const tool: ExecutionEvent = { ...delta(2, ""), type: "tool.requested", payload: { tool: "search", arguments: { query: "test" } } };
+  const citation: ExecutionEvent = { ...delta(3, ""), type: "citation.created", payload: { citation_id: "s1", locator: "https://example.com" } };
+  state = threadSessionReducer(state, { type: "events.appended", runId: "run_1", events: [reasoning, tool, citation] });
+  assert.equal(state.turns[0]?.assistantText, "Persisted response");
+  assert.deepEqual(state.turns[0]?.events, [reasoning, tool, citation]);
+  state = threadSessionReducer(state, { type: "events.appended", runId: "run_1", events: [delta(4, "New response")] });
+  assert.equal(state.turns[0]?.assistantText, "New response");
+});

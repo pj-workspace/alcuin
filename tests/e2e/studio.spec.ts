@@ -4,7 +4,7 @@ test("runs an approval-gated operation through its real adapter", async ({ page 
   test.skip(testInfo.project.name === "mobile", "Covered by the focused mobile workspace test");
   test.setTimeout(60_000);
   await page.goto("/studio?thread=new");
-  await expect(page.getByText("Operations Copilot", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Operations Copilot", level: 1, exact: true })).toBeVisible();
 
   const composer = page.getByPlaceholder("Message Operations Copilot…");
   await composer.fill("Update this incident to monitoring");
@@ -19,7 +19,7 @@ test("runs an approval-gated operation through its real adapter", async ({ page 
 test("renders declarative extension blocks and routes forms through approval", async ({ page }, testInfo) => {
   test.setTimeout(60_000);
   await page.goto("/studio?thread=new");
-  await expect(page.getByText("Operations Copilot", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Operations Copilot", level: 1, exact: true })).toBeVisible();
 
   const composer = page.getByPlaceholder("Message Operations Copilot…");
   await composer.fill("Find the active incident");
@@ -51,7 +51,7 @@ test("renders declarative extension blocks and routes forms through approval", a
 test("keeps the mobile workspace single-panel and supports dark theme", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "mobile", "Mobile-only responsive assertion");
   await page.goto("/studio");
-  await expect(page.getByText("Operations Copilot", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Operations Copilot", level: 1, exact: true })).toBeVisible();
 
   await expect(page.locator(".sidebar")).toHaveClass(/sidebar-collapsed/);
   await expect(page.locator(".context-canvas")).toBeHidden();

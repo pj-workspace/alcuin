@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ArtifactResource } from "@alcuin/contracts";
+import type { ArtifactResource, Task } from "@alcuin/contracts";
 
 import {
   artifactDraftHasChanges,
   artifactWorkspaceReducer,
   initialArtifactWorkspaceState,
   selectedArtifact,
+  taskArtifactRefreshKey,
 } from "./artifact-workspace-model.ts";
 import { resolveDisplayedArtifact } from "./live-artifact-model.ts";
 import { ARTIFACT_SANDBOX, artifactDownloadName, artifactPreviewPolicy } from "./artifact-html.ts";
@@ -147,4 +148,22 @@ test("a late list response merges resources without resetting an active editor",
   assert.equal(state.phase, "editing");
   assert.equal(state.selectedId, "art_1");
   assert.equal(state.draftContent, "Unsaved while loading");
+  assert.equal(state.resources.length, 2);
+  assert.equal(state.baseVersion, 2);
+});
+
+test("Task artifact refresh hints are thread-scoped and stable across unrelated progress", () => {
+  const task: Task = {
+    id: "task_1", workspace_id: "ws_1", thread_id: "thr_1", goal: "Create a document", status: "running", revision: 1,
+    created_at: "2026-09-12T00:00:00Z", updated_at: "2026-09-12T00:00:00Z",
+    plan: { id: "plan_1", task_id: "task_1", updated_at: "2026-09-12T00:00:00Z", steps: [] },
+  };
+  const initial = taskArtifactRefreshKey(task, "thr_1");
+  assert.equal(taskArtifactRefreshKey(task, "thr_other"), null);
+  assert.equal(taskArtifactRefreshKey({ ...task, revision: 2, status: "paused" }, "thr_1"), initial);
+  assert.notEqual(taskArtifactRefreshKey({ ...task, status: "completed" }, "thr_1"), initial);
+  const evidence = { id: "ev_1", task_id: task.id, step_id: "step_1", kind: "artifact" as const, label: "Document", summary: "Summary only", resource_id: "art_1", created_at: task.created_at };
+  const withArtifact = taskArtifactRefreshKey({ ...task, evidence: [evidence] }, "thr_1");
+  assert.notEqual(withArtifact, initial);
+  assert.equal(taskArtifactRefreshKey({ ...task, evidence: [evidence, evidence] }, "thr_1"), withArtifact);
 });

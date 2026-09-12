@@ -22,6 +22,8 @@ import type {
   TaskCreate,
   TaskEvent,
   TaskPlanUpdate,
+  TaskPlanProposal,
+  TaskPlanProposalRequest,
   Thread,
   ThreadConfiguration,
   ThreadDetail,
@@ -151,6 +153,12 @@ export function createAlcuinClient(options: AlcuinClientOptions) {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  proposeTaskPlan: (threadId: string, payload: TaskPlanProposalRequest, signal?: AbortSignal) =>
+    request<TaskPlanProposal>(`/v1/threads/${resourceId(threadId)}/task-plan-proposals`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal,
+    }),
   updateTaskPlan: (taskId: string, payload: TaskPlanUpdate) =>
     request<Task>(`/v1/tasks/${resourceId(taskId)}/plan`, {
       method: "PATCH",
@@ -161,8 +169,12 @@ export function createAlcuinClient(options: AlcuinClientOptions) {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  getThread: (threadId: string) =>
-    request<ThreadDetail>(`/v1/threads/${resourceId(threadId)}`),
+  getThread: (threadId: string, signal?: AbortSignal) =>
+    request<ThreadDetail>(`/v1/threads/${resourceId(threadId)}`, { signal }),
+  ensureThreadTitle: (threadId: string, signal?: AbortSignal) =>
+    request<Thread>(`/v1/threads/${resourceId(threadId)}/title/ensure`, { method: "POST", signal }),
+  getThreadTitle: (threadId: string, signal?: AbortSignal) =>
+    request<Thread>(`/v1/threads/${resourceId(threadId)}/title`, { signal }),
   listThreadMessages: (
     threadId: string,
     options: ListThreadMessagesOptions = {},
@@ -178,7 +190,6 @@ export function createAlcuinClient(options: AlcuinClientOptions) {
       method: "POST",
       body: JSON.stringify({
         agent_id: agentId,
-        title: "Working session",
         context,
         ...(agentVersionId === undefined ? {} : { agent_version_id: agentVersionId }),
       }),

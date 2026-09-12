@@ -2,7 +2,7 @@
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- react-markdown's node prop must not reach DOM elements. */
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -41,24 +41,31 @@ const thinkingComponents: Components = {
   hr: () => <hr className="thinking-md-hr" />,
 };
 
-export function ThinkingMarkdown({ content }: { content: string }) {
+export const ThinkingMarkdown = memo(function ThinkingMarkdown({ content }: { content: string }) {
   const contentRef = useRef<HTMLDivElement>(null);
-  const [needsClamp, setNeedsClamp] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [contentHeight, setContentHeight] = useState(SOFT_MAX_HEIGHT_PX);
+  const heightRef = useRef(SOFT_MAX_HEIGHT_PX);
   const rendered = preprocessMarkdown(content);
+  const needsClamp = contentHeight > SOFT_MAX_HEIGHT_PX + SOFT_OVERFLOW_BUFFER_PX;
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     const element = contentRef.current;
-    if (!element) return;
-    const previousMaxHeight = element.style.maxHeight;
-    element.style.maxHeight = "none";
-    const measuredHeight = Math.ceil(element.scrollHeight);
-    const overflows = measuredHeight > SOFT_MAX_HEIGHT_PX + SOFT_OVERFLOW_BUFFER_PX;
-    element.style.maxHeight = previousMaxHeight;
-    setContentHeight(measuredHeight);
-    setNeedsClamp(overflows);
-  }, [rendered]);
+    if (!element || typeof ResizeObserver === "undefined") return;
+    // Observe the natural-height inner content, never the animated clamp.
+    // Observer entries already contain layout results; no style-write/read cycle.
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries.find((item) => item.target === element);
+      // A hidden mobile panel reports zero width; keep its expansion preference.
+      if (!entry || entry.contentRect.width === 0) return;
+      const nextHeight = Math.ceil(entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height);
+      if (nextHeight === heightRef.current) return;
+      heightRef.current = nextHeight;
+      setContentHeight(nextHeight);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     if (!needsClamp && expanded) setExpanded(false);
@@ -69,7 +76,6 @@ export function ThinkingMarkdown({ content }: { content: string }) {
   return (
     <div className="thinking-md-shell">
       <div
-        ref={contentRef}
         className="thinking-md"
         style={needsClamp ? {
           maxHeight: clamped ? SOFT_MAX_HEIGHT_PX : contentHeight,
@@ -78,9 +84,11 @@ export function ThinkingMarkdown({ content }: { content: string }) {
           maskImage: clamped ? "linear-gradient(to bottom, #000 70%, transparent)" : "none",
         } : undefined}
       >
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={thinkingComponents}>
-          {rendered}
-        </ReactMarkdown>
+        <div ref={contentRef} className="thinking-md-content">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={thinkingComponents}>
+            {rendered}
+          </ReactMarkdown>
+        </div>
       </div>
       {needsClamp && (
         <button
@@ -94,4 +102,4 @@ export function ThinkingMarkdown({ content }: { content: string }) {
       )}
     </div>
   );
-}
+});

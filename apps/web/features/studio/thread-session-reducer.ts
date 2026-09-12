@@ -125,11 +125,16 @@ export function threadSessionReducer(
         phase: "streaming",
         activeRunId: action.run.id,
       };
-    case "events.appended":
-      return {
-        ...state,
-        turns: state.turns.map((turn) => turn.runId === action.runId ? appendEvents(turn, action.events) : turn),
-      };
+    case "events.appended": {
+      let changed = false;
+      const turns = state.turns.map((turn) => {
+        if (turn.runId !== action.runId) return turn;
+        const next = appendEvents(turn, action.events);
+        changed ||= next !== turn;
+        return next;
+      });
+      return changed ? { ...state, turns } : state;
+    }
     case "run.settled": {
       const isActiveRun = state.activeRunId === action.runId;
       return {
@@ -302,11 +307,31 @@ function attachmentsFromMessage(message: ThreadMessageShape | undefined): Conver
 
 function appendEvents(turn: ConversationTurn, nextEvents: ExecutionEvent[]): ConversationTurn {
   if (nextEvents.length === 0) return turn;
-  const events = mergeRunEvents(turn.runId, turn.events, nextEvents);
+  const incoming = nextEvents.filter((event) => event.run_id === turn.runId);
+  if (incoming.length === 0) return turn;
+
+  // The live stream is normally already ordered. Replay and corrections still
+  // use the sequence merge below, including its last-write-wins semantics.
+  let lastSequence = turn.events.at(-1)?.sequence ?? -Infinity;
+  const orderedAppend = incoming.every((event) => {
+    const follows = event.sequence > lastSequence;
+    lastSequence = event.sequence;
+    return follows;
+  });
+  const events = orderedAppend
+    ? [...turn.events, ...incoming]
+    : mergeRunEvents(turn.runId, turn.events, incoming);
+  if (events.length === turn.events.length && events.every((event, index) => event === turn.events[index])) {
+    return turn;
+  }
+  const assistantText = orderedAppend
+    ? assistantTextFromEvents(turn.events) + assistantTextFromEvents(incoming)
+    : assistantTextFromEvents(events);
+  assistantTextCache.set(events, assistantText);
   return {
     ...turn,
     events,
-    assistantText: assistantTextFromEvents(events) || turn.assistantText,
+    assistantText: assistantText || turn.assistantText,
   };
 }
 
@@ -318,9 +343,17 @@ function mergeRunEvents(runId: string | null, ...batches: ExecutionEvent[][]): E
   return [...bySequence.values()].sort((left, right) => left.sequence - right.sequence);
 }
 
+// Event arrays are immutable reducer snapshots; weak keys let old snapshots
+// be collected while avoiding a full answer projection on every streamed delta.
+const assistantTextCache = new WeakMap<ExecutionEvent[], string>();
+
 function assistantTextFromEvents(events: ExecutionEvent[]): string {
-  return events
+  const cached = assistantTextCache.get(events);
+  if (cached !== undefined) return cached;
+  const text = events
     .filter((event) => event.type === "message.delta")
     .map((event) => String(event.payload.delta ?? ""))
     .join("");
+  assistantTextCache.set(events, text);
+  return text;
 }

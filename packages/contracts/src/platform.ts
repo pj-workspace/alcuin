@@ -124,6 +124,16 @@ export interface TaskCreate {
   reasoning_effort?: ReasoningEffort | null;
 }
 
+/** Planning is read-only: a proposal does not create or start a Task. */
+export type TaskPlanProposalRequest = Pick<TaskCreate, "goal" | "model_override" | "reasoning_effort">;
+
+export interface TaskPlanProposal {
+  goal: string;
+  steps: Array<{ title: string; description: string }>;
+  model: string;
+  reasoning_effort: ReasoningEffort | null;
+}
+
 export interface TaskPlanUpdate {
   /** Internal compare-and-swap guard, not a product version. */
   expected_revision: number;

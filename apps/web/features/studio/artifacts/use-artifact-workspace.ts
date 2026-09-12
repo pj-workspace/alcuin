@@ -2,7 +2,7 @@
 
 import { AlcuinApiError } from "@alcuin/sdk";
 import type { ArtifactResource } from "@alcuin/contracts";
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { alcuinApi } from "@/shared/lib/api";
 import {
@@ -17,27 +17,32 @@ export function useArtifactWorkspace({
   threadId,
   eventArtifacts,
   running,
+  refreshKey,
 }: {
   threadId: string | null;
   eventArtifacts: readonly unknown[];
   running: boolean;
+  refreshKey?: string | null;
 }) {
   const [state, dispatch] = useReducer(artifactWorkspaceReducer, initialArtifactWorkspaceState);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const generationRef = useRef(0);
+  const loadedThreadRef = useRef<string | null>(null);
   const latestEventIdRef = useRef<string | null>(null);
   const receivedEventsRef = useRef(new Map<string, ArtifactResource>());
 
-  const load = useCallback(async (requestedThreadId: string) => {
+  const load = useCallback(async (requestedThreadId: string, background = false) => {
     const generation = ++generationRef.current;
-    dispatch({ type: "resources.loading" });
+    setRefreshError(null);
+    if (!background) dispatch({ type: "resources.loading" });
     try {
       const resources = await alcuinApi.listArtifacts(requestedThreadId);
       if (generation === generationRef.current) dispatch({ type: "resources.loaded", resources });
     } catch (error) {
-      if (generation === generationRef.current) dispatch({
-        type: "resources.failed",
-        message: error instanceof Error ? error.message : "Unable to load artifacts",
-      });
+      if (generation !== generationRef.current) return;
+      const message = error instanceof Error ? error.message : "Unable to load artifacts";
+      if (background) setRefreshError(message);
+      else dispatch({ type: "resources.failed", message });
     }
   }, []);
 
@@ -49,8 +54,14 @@ export function useArtifactWorkspace({
       dispatch({ type: "thread.reset" });
       return;
     }
-    void load(threadId);
-  }, [load, threadId]);
+  }, [threadId]);
+
+  useEffect(() => {
+    const background = loadedThreadRef.current === threadId;
+    loadedThreadRef.current = threadId;
+    if (threadId) void load(threadId, background);
+    return () => { generationRef.current += 1; };
+  }, [load, threadId, refreshKey]);
 
   useEffect(() => {
     const resources = eventArtifacts.filter(isArtifactResource).filter((item) => item.thread_id === threadId);
@@ -113,12 +124,13 @@ export function useArtifactWorkspace({
 
   return {
     state,
+    refreshError,
     displayedArtifact,
     selected,
     editorOpen,
     canEdit: Boolean(selected && displayedArtifact?.id === selected.id && !running && state.phase !== "loading"),
     canSave: artifactDraftHasChanges(state) && Boolean(state.draftTitle.trim()) && state.phase !== "saving" && state.phase !== "conflict",
-    reload: () => { if (threadId) void load(threadId); },
+    reload: () => { if (threadId) void load(threadId, true); },
     select: (id: string) => dispatch({ type: "resource.selected", id }),
     beginEdit: () => dispatch({ type: "edit.started" }),
     changeTitle: (title: string) => dispatch({ type: "draft.changed", title }),
