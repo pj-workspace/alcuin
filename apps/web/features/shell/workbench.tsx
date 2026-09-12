@@ -13,14 +13,12 @@ import type { ProviderStatus } from "@alcuin/sdk";
 import {
   Blocks,
   Bot,
-  ChevronDown,
   Command,
   GalleryVerticalEnd,
   Languages,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  Play,
   Plus,
   Search,
   Settings2,
@@ -41,6 +39,9 @@ import { RunsView } from "@/features/runs";
 import { StudioView } from "@/features/studio";
 import { alcuinApi } from "@/shared/lib/api";
 import { statusLabel, useI18n, type MessageKey } from "@/shared/lib/i18n";
+import { ThreadTitle } from "./thread-title";
+import { mergeThreadTitle, threadTitleStatus, threadTitleText } from "./thread-title-model";
+import { useThreadTitle } from "./use-thread-title";
 
 export type Surface = "studio" | "agents" | "extensions" | "runs" | "embed";
 
@@ -118,10 +119,36 @@ export function Workbench({ surface }: { surface: Surface }) {
     instructions: DEFAULT_AGENT_INSTRUCTIONS as string,
   });
 
+  const acceptThreadTitle = useCallback((thread: Thread) => {
+    setData((current) => {
+      if (!current || current.workspace.id !== thread.workspace_id) return current;
+      let changed = false;
+      const threads = current.threads.map((item) => {
+        const updated = mergeThreadTitle(item, thread);
+        if (updated !== item) changed = true;
+        return updated;
+      });
+      return changed ? { ...current, threads } : current;
+    });
+  }, []);
+  const activeThread = data?.threads.find((thread) => thread.id === activeThreadId);
+  const refreshThreadTitle = useThreadTitle({
+    workspaceId: data?.workspace.id,
+    threadId: surface === "studio" ? activeThreadId : null,
+    needsTitle: Boolean(activeThread && threadTitleStatus(activeThread) !== "ready"),
+    onUpdated: acceptThreadTitle,
+  });
+
   const refresh = useCallback(async (preferredRunId?: string) => {
     try {
       const bootstrap = await alcuinApi.bootstrap();
-      setData(bootstrap);
+      setData((current) => current?.workspace.id === bootstrap.workspace.id ? {
+        ...bootstrap,
+        threads: bootstrap.threads.map((thread) => {
+          const previous = current.threads.find((item) => item.id === thread.id);
+          return previous ? mergeThreadTitle(thread, previous) : thread;
+        }),
+      } : bootstrap);
       setSelectedAgentId((current) => {
         const saved = window.localStorage.getItem("alcuin-agent-id");
         const candidate = current ?? saved;
@@ -231,6 +258,7 @@ export function Workbench({ surface }: { surface: Surface }) {
         setCommandOpen(false);
         setCreateAgentOpen(false);
         setSettingsOpen(false);
+        if (window.matchMedia("(max-width: 820px)").matches) setSidebarOpen(false);
       }
     };
     window.addEventListener("keydown", handler);
@@ -279,11 +307,13 @@ export function Workbench({ surface }: { surface: Surface }) {
     router.push(`/${target}`);
   };
   const selectAgent = useCallback((agentId: string) => {
+    if (window.matchMedia("(max-width: 820px)").matches) setSidebarOpen(false);
     setSelectedAgentId(agentId);
     window.localStorage.setItem("alcuin-agent-id", agentId);
     router.push("/agents");
   }, [router]);
   const selectThread = useCallback((thread: Thread) => {
+    if (window.matchMedia("(max-width: 820px)").matches) setSidebarOpen(false);
     setSelectedAgentId(thread.agent_id);
     setActiveThreadId(thread.id);
     window.localStorage.setItem("alcuin-agent-id", thread.agent_id);
@@ -292,6 +322,7 @@ export function Workbench({ surface }: { surface: Surface }) {
     router.push(`/studio?thread=${encodeURIComponent(thread.id)}`);
   }, [router]);
   const startNewThread = useCallback(() => {
+    if (window.matchMedia("(max-width: 820px)").matches) setSidebarOpen(false);
     if (activeAgent) window.localStorage.removeItem(`alcuin-thread-id:${activeAgent.id}`);
     setActiveThreadId(null);
     setRequestedThread("new");
@@ -372,38 +403,40 @@ export function Workbench({ surface }: { surface: Surface }) {
           providerCatalogError={providerCatalogError}
           customizationError={customizationError}
           activeThreadId={activeThreadId}
+          activeThreadTitle={activeThread ? threadTitleText(activeThread, locale) : undefined}
+          onThreadActivity={refreshThreadTitle}
           onThreadCreated={acceptCreatedThread}
           onRunCreated={refresh}
         />
       );
     }
-  }, [acceptCreatedThread, activeAgent, activeThreadId, customizationError, data, events, openCreateAgent, providerCatalogError, providers, refresh, refreshCustomization, rules, selectAgent, skills, surface]);
+  }, [acceptCreatedThread, activeAgent, activeThread, activeThreadId, customizationError, data, events, locale, openCreateAgent, providerCatalogError, providers, refresh, refreshCustomization, refreshThreadTitle, rules, selectAgent, skills, surface]);
 
   return (
     <main className="app-frame">
       <header className="topbar">
         <div className="topbar-left">
-          <button className="icon-button quiet" onClick={() => setSidebarOpen((open) => !open)} aria-label={t("Toggle sidebar")}>
+          <button className="icon-button quiet" onClick={() => setSidebarOpen((open) => !open)} aria-label={t("Toggle sidebar")} aria-expanded={sidebarOpen} aria-controls="workbench-sidebar">
             {sidebarOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}
           </button>
           <Link className="brand" href="/studio"><AlcuinMark size={28} /><span>Alcuin</span></Link>
           <span className="topbar-separator" />
-          <button className="workspace-switcher"><span className="workspace-glyph">N</span>{data?.workspace.name ?? t("Workspace")}<ChevronDown size={13} /></button>
+          <span className="workspace-name">{data?.workspace.name ?? t("Workspace")}</span>
         </div>
         <div className="topbar-actions">
           <button className="command-trigger" onClick={() => setCommandOpen(true)}><Search size={14} /><span>{t("Search or jump to")}</span><kbd>⌘ K</kbd></button>
           <button className="language-switch" onClick={toggleLocale} aria-label={t(locale === "en" ? "Switch to Chinese" : "Switch to English")} title={t(locale === "en" ? "Switch to Chinese" : "Switch to English")}><Languages size={14} /><span>{locale === "en" ? "中文" : "EN"}</span></button>
           <button className="icon-button quiet" onClick={switchTheme} aria-label={t("Toggle theme")}>{theme === "light" ? <Moon size={16} /> : <Sun size={16} />}</button>
           <button className="icon-button quiet settings-button" aria-label={t("Settings")} onClick={() => void openSettings()}><Settings2 size={16} /></button>
-          <div className="avatar">PJ</div>
         </div>
       </header>
 
       <div className="workspace-frame">
-        <aside className={clsx("sidebar", !sidebarOpen && "sidebar-collapsed")}>
+        {sidebarOpen && <button type="button" className="sidebar-backdrop" aria-label={t("Toggle sidebar")} onClick={() => setSidebarOpen(false)} />}
+        <aside id="workbench-sidebar" className={clsx("sidebar", !sidebarOpen && "sidebar-collapsed")}>
           <nav className="primary-nav" aria-label={t("Primary")}>
             {nav.map((item) => (
-              <Link key={item.id} href={`/${item.id}`} className={clsx("nav-item", pathname === `/${item.id}` && "active")} title={item.label}>
+              <Link key={item.id} href={`/${item.id}`} className={clsx("nav-item", pathname === `/${item.id}` && "active")} aria-current={pathname === `/${item.id}` ? "page" : undefined} title={t(item.label)} onClick={() => { if (window.matchMedia("(max-width: 820px)").matches) setSidebarOpen(false); }}>
                 <item.icon size={16} /><span>{t(item.label)}</span>
               </Link>
             ))}
@@ -421,8 +454,8 @@ export function Workbench({ surface }: { surface: Surface }) {
             <div className="sidebar-heading"><span>{t("Recent threads")}</span></div>
             <button
               type="button"
-              className={clsx("thread-row", "new-thread-row", activeThreadId === null && "active")}
-              aria-current={activeThreadId === null ? "page" : undefined}
+              className={clsx("thread-row", "new-thread-row", surface === "studio" && activeThreadId === null && "active")}
+              aria-current={surface === "studio" && activeThreadId === null ? "page" : undefined}
               onClick={startNewThread}
             >
               <Plus size={12} /><span>{t("New thread")}</span>
@@ -430,16 +463,16 @@ export function Workbench({ surface }: { surface: Surface }) {
             {data?.threads.slice(0, 6).map((thread) => (
               <button
                 type="button"
-                className={clsx("thread-row", thread.id === activeThreadId && "active")}
+                className={clsx("thread-row", surface === "studio" && thread.id === activeThreadId && "active")}
                 key={thread.id}
-                aria-current={thread.id === activeThreadId ? "page" : undefined}
+                aria-current={surface === "studio" && thread.id === activeThreadId ? "page" : undefined}
                 onClick={() => selectThread(thread)}
               >
-                <Play size={11} fill="currentColor" /><span>{thread.title}</span>
+                <ThreadTitle thread={thread} />
               </button>
             ))}
           </div>
-          <div className="sidebar-footer"><span className="runtime-dot" />{t("API connected")}</div>
+          <div className="sidebar-footer" role="status" data-state={loading ? "loading" : error ? "error" : "connected"}><span className="runtime-dot" />{loading ? (locale === "zh" ? "连接工作区…" : "Connecting workspace…") : error ? (locale === "zh" ? "工作区连接失败" : "Workspace unavailable") : t("API connected")}</div>
         </aside>
 
         <section className="surface">

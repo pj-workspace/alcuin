@@ -122,6 +122,90 @@ def test_postgres_adapter_satisfies_task_port_and_scopes_projection(
         TaskEvent.model_validate(event)
 
 
+def test_plan_events_preserve_complete_text_snapshots_across_edits(
+    store: PostgresStore,
+) -> None:
+    created = create_task(store)
+    first = store.replace_task_plan(
+        "ws_demo",
+        created["id"],
+        expected_revision=created["revision"],
+        goal="  Review the original evidence  ",
+        steps=[
+            {"title": "Read sources", "description": "Compare source A with source B."}
+        ],
+    )
+    first_events = store.list_task_events("ws_demo", created["id"])
+    second = store.replace_task_plan(
+        "ws_demo",
+        created["id"],
+        expected_revision=first["revision"],
+        goal="Produce the revised report",
+        steps=[
+            {"title": "Verify sources", "description": "Check source C before writing."}
+        ],
+    )
+    # A description-only edit must still record the canonical, unchanged goal.
+    store.replace_task_plan(
+        "ws_demo",
+        created["id"],
+        expected_revision=second["revision"],
+        steps=[
+            {"title": "Verify sources", "description": "Check source C and its date."}
+        ],
+    )
+    events = store.list_task_events("ws_demo", created["id"])
+    assert events[:2] == first_events
+    snapshots = [
+        {
+            "goal": event["payload"]["goal"],
+            "steps": [
+                {key: step[key] for key in ("title", "description", "position")}
+                for step in event["payload"]["steps"]
+            ],
+        }
+        for event in events
+        if event["type"] in {"task.created", "task.plan.updated"}
+    ]
+    assert snapshots == [
+        {"goal": created["goal"], "steps": []},
+        {
+            "goal": "Review the original evidence",
+            "steps": [
+                {
+                    "title": "Read sources",
+                    "description": "Compare source A with source B.",
+                    "position": 0,
+                }
+            ],
+        },
+        {
+            "goal": "Produce the revised report",
+            "steps": [
+                {
+                    "title": "Verify sources",
+                    "description": "Check source C before writing.",
+                    "position": 0,
+                }
+            ],
+        },
+        {
+            "goal": "Produce the revised report",
+            "steps": [
+                {
+                    "title": "Verify sources",
+                    "description": "Check source C and its date.",
+                    "position": 0,
+                }
+            ],
+        },
+    ]
+    assert [event["payload"]["generation"] for event in events] == [1, 2, 3, 4]
+    assert store.list_task_events("ws_other", created["id"]) == []
+    for event in events:
+        TaskEvent.model_validate(event)
+
+
 def test_task_revision_cas_and_transition_guards_are_canonical(
     store: PostgresStore,
 ) -> None:

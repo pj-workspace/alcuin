@@ -216,6 +216,8 @@ class SqlRepository:
         result = dict(row)
         result["context"] = cls._decoded_json(result.pop("context_json"))
         result["last_message_sequence"] = int(result["next_message_sequence"])
+        result.pop("title_claim", None)
+        result.pop("title_claim_until", None)
         return result
 
     @staticmethod
@@ -808,8 +810,8 @@ class SqlRepository:
             self.connection.execute(
                 """INSERT INTO threads
                 (id, workspace_id, agent_id, agent_version_id, title, context_json,
-                 created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                 created_at, updated_at, title_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     thread_id,
                     workspace_id,
@@ -819,6 +821,7 @@ class SqlRepository:
                     self._json(context),
                     created_at,
                     created_at,
+                    "pending" if title.strip() in {"", "Working session", "New agent thread"} else "ready",
                 ),
             )
             self.connection.execute(
@@ -850,6 +853,55 @@ class SqlRepository:
             (workspace_id,),
         )
         return [self._thread(row) for row in rows]
+
+    def thread_title_candidates(self, workspace_id: str, thread_id: str) -> list[dict[str, Any]]:
+        """Read only accepted user text parts and confirmed Task goals, oldest first."""
+        if self.get_thread(workspace_id, thread_id) is None:
+            return []
+        messages = self.list_messages(workspace_id, thread_id, limit=50)
+        candidates = [
+            {"created_at": message["created_at"], "text": "\n".join(
+                str(part.get("text") or "") for part in message.get("parts", [])
+                if part.get("type") == "text"
+            )}
+            for message in messages if message.get("role") == "user"
+        ]
+        goals = self._all(
+            "SELECT goal, created_at FROM tasks WHERE workspace_id = ? AND thread_id = ? ORDER BY created_at LIMIT 50",
+            (workspace_id, thread_id),
+        )
+        candidates.extend({"created_at": row["created_at"], "text": row["goal"]} for row in goals)
+        return sorted(candidates, key=lambda item: item["created_at"])
+
+    def claim_thread_title(self, workspace_id: str, thread_id: str, expected_title: str, claim: str) -> bool:
+        now = utc_now()
+        until = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
+        with self.lock, self.connection:
+            row = self._one(
+                """UPDATE threads SET title_status = 'generating', title_claim = ?, title_claim_until = ?
+                WHERE workspace_id = ? AND id = ? AND title = ?
+                  AND trim(title) IN ('', 'Working session', 'New agent thread')
+                  AND (title_status = 'pending' OR (title_status = 'generating' AND title_claim_until < ?))
+                RETURNING id""",
+                (claim, until, workspace_id, thread_id, expected_title, now),
+            )
+        return row is not None
+
+    def finish_thread_title(self, workspace_id: str, thread_id: str, expected_title: str, claim: str, title: str | None) -> bool:
+        """CAS protects custom edits and newer claims; cancellation releases only its own claim."""
+        if title is not None and (not title.strip() or len(title) > 120):
+            raise ValueError("Thread title must contain between 1 and 120 characters")
+        with self.lock, self.connection:
+            row = self._one(
+                """UPDATE threads SET title = ?, title_status = ?, title_claim = NULL,
+                title_claim_until = NULL, updated_at = ?
+                WHERE workspace_id = ? AND id = ? AND title = ? AND title_claim = ?
+                  AND title_status = 'generating' RETURNING id""",
+                (title if title is not None else expected_title,
+                 "ready" if title is not None else "pending", utc_now(),
+                 workspace_id, thread_id, expected_title, claim),
+            )
+        return row is not None
 
     def _customization_run_snapshot_locked(
         self,
@@ -4606,6 +4658,8 @@ class SqlRepository:
                     "title": normalized_title,
                     "goal": normalized_goal,
                     "plan_id": plan_id,
+                    "generation": 1,
+                    "steps": [],
                     "model_override": model_override,
                     "reasoning_effort": reasoning_effort,
                 },
@@ -5074,12 +5128,14 @@ class SqlRepository:
                 payload={
                     "plan_id": plan_id,
                     "generation": generation,
+                    "goal": normalized_goal if normalized_goal is not None else task["goal"],
                     "steps": [
                         {
                             "id": step["id"],
                             "key": step["step_key"],
                             "position": step["position"],
                             "title": step["title"],
+                            "description": step["description"],
                         }
                         for step in normalized_steps
                     ],
@@ -5652,6 +5708,7 @@ class SqlRepository:
                         event_type="task.plan.updated",
                         payload={
                             "plan_id": task["current_plan_id"],
+                            "goal": task["goal"],
                             "reason": "pending_intervention_continuation",
                             "intervention_id": pending_intervention["id"],
                             "steps": [

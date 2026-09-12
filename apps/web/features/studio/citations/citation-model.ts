@@ -88,6 +88,22 @@ export function collectCitationSources(events: ExecutionEvent[]): CitationSource
   return sources;
 }
 
+/** Per-view cache for immutable event snapshots; unrelated deltas never change sources. */
+export function createCitationSourceSelector() {
+  let previous: ExecutionEvent[] = [];
+  let sources: CitationSource[] = [];
+  return (...batches: readonly ExecutionEvent[][]): CitationSource[] => {
+    const citations: ExecutionEvent[] = [];
+    for (const events of batches) {
+      for (const event of events) if (event.type === "citation.created") citations.push(event);
+    }
+    if (citations.length === previous.length && citations.every((event, index) => event === previous[index])) return sources;
+    previous = citations;
+    sources = collectCitationSources(citations);
+    return sources;
+  };
+}
+
 export function citationIdFromHref(href: string): string | null {
   const match = /^(?:alcuin-citation:|#alcuin-citation-)([a-zA-Z0-9_-]{1,128})$/.exec(href);
   return match?.[1] ?? null;

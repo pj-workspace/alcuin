@@ -143,6 +143,32 @@ class TaskCreate(StrictModel):
         return self
 
 
+class TaskPlanProposalRequest(StrictModel):
+    """Request an ephemeral plan; creating or starting a Task is a separate action."""
+
+    goal: str = Field(min_length=1, max_length=4_000)
+    model_override: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+    )
+    reasoning_effort: ReasoningEffort | None = None
+
+    @model_validator(mode="after")
+    def validate_goal(self) -> "TaskPlanProposalRequest":
+        if not self.goal.strip():
+            raise ValueError("Task goal cannot be blank")
+        return self
+
+
+class TaskPlanProposal(StrictModel):
+    goal: str = Field(min_length=1, max_length=4_000)
+    steps: list[TaskStepDraft] = Field(min_length=1, max_length=8)
+    model: str = Field(min_length=1, max_length=200)
+    reasoning_effort: ReasoningEffort
+
+
 class TaskPlanUpdate(StrictModel):
     """Compare-and-swap replacement for the editable Task plan."""
 

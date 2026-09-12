@@ -12,16 +12,22 @@ export function TaskPlanEditor({
   onChange,
   onSave,
   onCancel,
+  submitLabel,
+  maxSteps = 32,
+  proposal = false,
 }: {
   draft: TaskPlanDraft;
   busy?: boolean;
   onChange: (draft: TaskPlanDraft) => void;
   onSave: () => void;
   onCancel: () => void;
+  submitLabel?: string;
+  maxSteps?: number;
+  proposal?: boolean;
 }) {
   const { locale } = useI18n();
   const copy = taskCopy(locale);
-  const valid = draft.goal.trim().length > 0 && draft.steps.length > 0 && draft.steps.every((step) => step.title.trim().length > 0);
+  const valid = draft.goal.trim().length > 0 && draft.steps.length > 0 && draft.steps.length <= maxSteps && draft.steps.every((step) => step.title.trim().length > 0);
 
   const updateStep = (index: number, patch: Partial<TaskPlanDraft["steps"][number]>) => {
     const steps = draft.steps.map((step, stepIndex) => stepIndex === index ? { ...step, ...patch } : step);
@@ -49,7 +55,7 @@ export function TaskPlanEditor({
 
   return (
     <form className="task-plan-editor" onSubmit={(event) => { event.preventDefault(); if (valid && !busy) onSave(); }}>
-      <header><div><small>{copy.plan}</small><h3>{copy.editPlan}</h3></div><p>{copy.editHint}</p></header>
+      {!proposal && <header><div><small>{copy.plan}</small><h3>{copy.editPlan}</h3></div><p>{copy.editHint}</p></header>}
       <label className="task-plan-goal">
         <span>{copy.task}</span>
         <textarea rows={2} value={draft.goal} disabled={busy} onChange={(event) => onChange({ ...draft, goal: event.target.value })} />
@@ -84,11 +90,11 @@ export function TaskPlanEditor({
           </li>
         ))}
       </ol>
-      <button type="button" className="task-add-step" onClick={addStep} disabled={busy}><Plus size={13} />{copy.addStep}</button>
+      <button type="button" className="task-add-step" onClick={addStep} disabled={busy || draft.steps.length >= maxSteps}><Plus size={13} />{copy.addStep}</button>
       <footer>
         <button type="button" className="task-editor-cancel" onClick={onCancel} disabled={busy}>{copy.cancel}</button>
         <button type="submit" className="task-editor-save" disabled={busy || !valid}>
-          {busy ? <LoaderCircle className="task-control-spinner" size={13} /> : <Save size={13} />}{copy.savePlan}
+          {busy ? <LoaderCircle className="task-control-spinner" size={13} /> : <Save size={13} />}{submitLabel ?? copy.savePlan}
         </button>
       </footer>
     </form>

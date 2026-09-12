@@ -1,0 +1,6 @@
+.thread-title { min-width: 0; max-width: 100%; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-title[data-title-status="generating"] { color: var(--muted); background: linear-gradient(110deg, var(--muted) 25%, var(--ultramarine) 48%, var(--muted) 72%); background-size: 230% 100%; background-clip: text; -webkit-text-fill-color: transparent; animation: thread-title-shimmer 2.2s ease-in-out infinite; }
+.thread-title[data-arrived] { background: linear-gradient(110deg, var(--ink) 30%, var(--ultramarine) 49%, var(--ink) 68%); background-size: 240% 100%; background-clip: text; -webkit-text-fill-color: transparent; animation: thread-title-arrive 850ms cubic-bezier(.2,.72,.2,1) both; }
+@keyframes thread-title-shimmer { from { background-position: 130% 0; } to { background-position: -90% 0; } }
+@keyframes thread-title-arrive { 0% { opacity: .35; background-position: 120% 0; } 28% { opacity: 1; } 100% { opacity: 1; background-position: -80% 0; } }
+@media (prefers-reduced-motion: reduce) { .thread-title[data-title-status="generating"], .thread-title[data-arrived] { animation: none; background: none; -webkit-text-fill-color: currentColor; } }

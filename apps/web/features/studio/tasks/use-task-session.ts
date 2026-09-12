@@ -34,11 +34,16 @@ export function useTaskSession({
   const stateRef = useRef(state);
   const generationRef = useRef(0);
   const mountedRef = useRef(false);
+  const scopeRef = useRef({ threadId, revision: 0 });
+  const creatingRef = useRef(false);
   const streamRef = useRef<{ taskId: string; controller: AbortController } | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const connectRef = useRef<(task: Task, after?: number) => void>(() => undefined);
 
   useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => {
+    if (scopeRef.current.threadId !== threadId) scopeRef.current = { threadId, revision: scopeRef.current.revision + 1 };
+  }, [threadId]);
 
   const commit = useCallback((action: TaskSessionAction) => {
     stateRef.current = taskSessionReducer(stateRef.current, action);
@@ -75,6 +80,7 @@ export function useTaskSession({
         );
         if (!mountedRef.current || generation !== generationRef.current || controller.signal.aborted) return;
         const snapshot = await alcuinApi.getTask(task.id);
+        if (!mountedRef.current || generation !== generationRef.current || controller.signal.aborted) return;
         commit({ type: "snapshot.received", task: snapshot });
       } catch (error) {
         if (!mountedRef.current || generation !== generationRef.current || controller.signal.aborted || isAbortError(error)) return;
@@ -82,7 +88,7 @@ export function useTaskSession({
         commit({ type: "stream.disconnected", message });
         try {
           const snapshot = await alcuinApi.getTask(task.id);
-          if (!mountedRef.current || generation !== generationRef.current) return;
+          if (!mountedRef.current || generation !== generationRef.current || controller.signal.aborted) return;
           commit({ type: "snapshot.received", task: snapshot });
           if (!isTaskTerminal(snapshot.status)) {
             const cursor = stateRef.current.projection.lastSequence;
@@ -150,9 +156,14 @@ export function useTaskSession({
     command: TaskControlCommand,
     stepId?: string,
     message?: string,
+    expectedTaskId?: string,
   ) => {
     const task = stateRef.current.projection.task;
     if (!task) throw new Error("Task is unavailable");
+    if (expectedTaskId && task.id !== expectedTaskId) throw new DOMException("Task changed", "AbortError");
+    const generation = generationRef.current;
+    const isCurrent = () => mountedRef.current && generation === generationRef.current && stateRef.current.projection.task?.id === task.id;
+    const assertCurrent = () => { if (!isCurrent()) throw new DOMException("Task changed", "AbortError"); };
     if (stateRef.current.pendingCommands.length > 0) throw new Error("A Task command is already in progress");
     const commandId = `task:${task.id}:${command}:${crypto.randomUUID()}`;
     commit({ type: "command.requested", pending: { id: commandId, command } });
@@ -161,6 +172,7 @@ export function useTaskSession({
       // canonical resource at the command boundary so a long-running Task does
       // not issue controls with the revision from its initial snapshot.
       const canonical = await alcuinApi.getTask(task.id);
+      assertCurrent();
       commit({ type: "snapshot.received", task: canonical });
       const snapshot = await alcuinApi.commandTask(canonical.id, {
         command,
@@ -170,17 +182,21 @@ export function useTaskSession({
         ...(stepId ? { step_id: stepId } : {}),
         ...(message?.trim() ? { message: message.trim() } : {}),
       });
+      assertCurrent();
       commit({ type: "snapshot.received", task: snapshot });
       commit({ type: "command.acknowledged", commandId });
       if (!isTaskTerminal(snapshot.status)) connect(snapshot, stateRef.current.projection.lastSequence);
       return snapshot;
     } catch (error) {
+      if (!isCurrent()) throw error;
       try {
         const latest = await alcuinApi.getTask(task.id);
+        assertCurrent();
         commit({ type: "snapshot.received", task: latest });
       } catch {
         // The command error remains the most actionable message.
       }
+      if (!isCurrent()) throw error;
       commit({
         type: "command.failed",
         commandId,
@@ -194,6 +210,9 @@ export function useTaskSession({
     const task = stateRef.current.projection.task;
     const value = message.trim();
     if (!task || !value) return null;
+    const generation = generationRef.current;
+    const isCurrent = () => mountedRef.current && generation === generationRef.current && stateRef.current.projection.task?.id === task.id;
+    const assertCurrent = () => { if (!isCurrent()) throw new DOMException("Task changed", "AbortError"); };
     if (stateRef.current.pendingCommands.length > 0) throw new Error("A Task command is already in progress");
     const command = interventionCommandForStatus(task.status);
     if (!command) throw new Error("This Task cannot accept guidance at its current boundary");
@@ -201,6 +220,7 @@ export function useTaskSession({
     commit({ type: "command.requested", pending: { id: commandId, command, label: value } });
     try {
       const canonical = await alcuinApi.getTask(task.id);
+      assertCurrent();
       commit({ type: "snapshot.received", task: canonical });
       const canonicalCommand = interventionCommandForStatus(canonical.status);
       if (!canonicalCommand) throw new Error("This Task cannot accept guidance at its current boundary");
@@ -211,15 +231,20 @@ export function useTaskSession({
         expected_status: canonical.status,
         message: value,
       });
+      assertCurrent();
       commit({ type: "snapshot.received", task: snapshot });
       commit({ type: "command.acknowledged", commandId });
       return snapshot;
     } catch (error) {
+      if (!isCurrent()) throw error;
       try {
-        commit({ type: "snapshot.received", task: await alcuinApi.getTask(task.id) });
+        const latest = await alcuinApi.getTask(task.id);
+        assertCurrent();
+        commit({ type: "snapshot.received", task: latest });
       } catch {
         // Preserve the original intervention failure.
       }
+      if (!isCurrent()) throw error;
       commit({
         type: "command.failed",
         commandId,
@@ -233,22 +258,36 @@ export function useTaskSession({
     goal: string,
     autoStart = true,
     profile: Pick<TaskCreate, "model_override" | "reasoning_effort"> = {},
+    steps?: TaskCreate["steps"],
   ) => {
     const value = goal.trim();
     if (!value) throw new Error("Task goal is required");
-    const thread = await ensureThread();
-    const title = value.split(/\r?\n/, 1)[0]!.slice(0, 160);
-    const created = await alcuinApi.createTask(thread.id, {
-      goal: value,
-      steps: [{ title, description: value }],
-      ...profile,
-    });
-    generationRef.current += 1;
-    stopStream();
-    commit({ type: "hydrate.completed", task: created });
-    connect(created, 0);
-    if (!autoStart) return created;
-    return sendCommand("start");
+    if (creatingRef.current) throw new Error("A Task is already being created");
+    creatingRef.current = true;
+    const origin = scopeRef.current;
+    try {
+      const thread = await ensureThread();
+      const assertCurrent = () => {
+        const current = scopeRef.current;
+        const sameScope = current === origin && (origin.threadId === null || origin.threadId === thread.id);
+        const createdThreadHandoff = origin.threadId === null && current.revision === origin.revision + 1 && current.threadId === thread.id;
+        if (!mountedRef.current || (!sameScope && !createdThreadHandoff)) throw new DOMException("Conversation changed", "AbortError");
+      };
+      assertCurrent();
+      const title = value.split(/\r?\n/, 1)[0]!.slice(0, 160);
+      const created = await alcuinApi.createTask(thread.id, {
+        goal: value,
+        steps: steps ?? [{ title, description: value }],
+        ...profile,
+      });
+      assertCurrent();
+      generationRef.current += 1;
+      stopStream();
+      commit({ type: "hydrate.completed", task: created });
+      connect(created, 0);
+      if (!autoStart) return created;
+      return await sendCommand("start", undefined, undefined, created.id);
+    } finally { creatingRef.current = false; }
   }, [commit, connect, ensureThread, sendCommand, stopStream]);
 
   const beginPlanEdit = useCallback(() => commit({ type: "plan.edit.started" }), [commit]);
@@ -258,9 +297,13 @@ export function useTaskSession({
     const task = stateRef.current.projection.task;
     const draft = stateRef.current.planDraft;
     if (!task || !draft) return null;
+    const generation = generationRef.current;
+    const isCurrent = () => mountedRef.current && generation === generationRef.current && stateRef.current.projection.task?.id === task.id;
+    const assertCurrent = () => { if (!isCurrent()) throw new DOMException("Task changed", "AbortError"); };
     commit({ type: "plan.save.started" });
     try {
       const canonical = await alcuinApi.getTask(task.id);
+      assertCurrent();
       commit({ type: "snapshot.received", task: canonical });
       const snapshot = await alcuinApi.updateTaskPlan(canonical.id, {
         expected_revision: canonical.revision,
@@ -270,14 +313,19 @@ export function useTaskSession({
           ...(step.description.trim() ? { description: step.description.trim() } : {}),
         })),
       });
+      assertCurrent();
       commit({ type: "plan.save.completed", task: snapshot });
       return snapshot;
     } catch (error) {
+      if (!isCurrent()) throw error;
       try {
-        commit({ type: "snapshot.received", task: await alcuinApi.getTask(task.id) });
+        const latest = await alcuinApi.getTask(task.id);
+        assertCurrent();
+        commit({ type: "snapshot.received", task: latest });
       } catch {
         // Keep the draft intact when refresh also fails.
       }
+      if (!isCurrent()) throw error;
       commit({
         type: "plan.save.failed",
         message: error instanceof Error ? error.message : "Unable to save Task plan",

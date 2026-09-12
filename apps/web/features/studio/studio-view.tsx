@@ -13,17 +13,22 @@ import {
   PanelRightOpen,
   Paperclip,
   ListChecks,
+  MessageSquare,
   Save,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { clsx } from "clsx";
 
 import { alcuinApi } from "@/shared/lib/api";
 import { ConversationTimeline } from "@/features/studio/conversation-timeline";
+import { StudioWelcome } from "@/features/studio/studio-welcome";
+import { useTaskProposal } from "@/features/studio/tasks/use-task-proposal";
+import { TaskProposalPanel } from "@/features/studio/tasks/task-proposal-panel";
 import { ATTACHMENT_ACCEPT, ComposerAttachmentTray, useComposerAttachments, type AttachmentValidationIssue } from "@/features/studio/attachments";
 import { ArtifactCanvas, isArtifactResource } from "@/features/studio/artifacts";
+import { taskArtifactRefreshKey } from "@/features/studio/artifacts/artifact-workspace-model";
 import { ExtensionUIBlocks } from "@/features/studio/extension-ui-blocks";
 import { Toast } from "@/shared/components/ui";
 import { skillDisplayName } from "@/shared/lib/customization";
@@ -48,6 +53,8 @@ export function StudioView({
   providerCatalogError = null,
   customizationError,
   activeThreadId,
+  activeThreadTitle,
+  onThreadActivity,
   onThreadCreated,
   onRunCreated,
 }: {
@@ -60,6 +67,8 @@ export function StudioView({
   providerCatalogError?: string | null;
   customizationError: string | null;
   activeThreadId: string | null;
+  activeThreadTitle?: string;
+  onThreadActivity?: (threadId: string) => void;
   onThreadCreated: (thread: Thread) => void;
   onRunCreated: (runId: string) => Promise<void>;
 }) {
@@ -68,6 +77,11 @@ export function StudioView({
   const [canvasOpen, setCanvasOpen] = useState(false);
   const [mobileSurface, setMobileSurface] = useState<MobileSurface>("conversation");
   const [prompt, setPrompt] = useState("");
+  const [composerMode, setComposerMode] = useState<"chat" | "plan">("chat");
+  const [confirmingPlan, setConfirmingPlan] = useState(false);
+  const confirmationRef = useRef(false);
+  const viewScopeRef = useRef({ agentId: agent?.id, threadId: activeThreadId });
+  const promptRef = useRef<HTMLTextAreaElement>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [composerFocused, setComposerFocused] = useState(false);
   const [modelOverride, setModelOverride] = useState<string | null>(null);
@@ -87,16 +101,29 @@ export function StudioView({
     onRunCreated,
   });
   const { state } = session;
+  const refreshThread = session.refresh;
+  const proposal = useTaskProposal({ agentId: agent?.id, threadId: state.thread?.id ?? activeThreadId, ensureThread: session.ensureThread });
+  const hasProposal = proposal.phase !== "idle"
+    && proposal.scope?.agentId === agent?.id
+    && proposal.scope?.threadId === activeThreadId;
+  const planning = proposal.phase === "generating";
   const taskSession = useTaskSession({
     threadId: state.thread?.id ?? activeThreadId,
     ensureThread: session.ensureThread,
   });
   const activeTask = taskSession.activeTask;
+  const threadWithInput = state.turns.length > 0 ? state.thread?.id : undefined;
+  const taskThreadId = taskSession.task?.thread_id;
+  const taskId = taskSession.task?.id;
+  useEffect(() => {
+    const changedThreadId = taskThreadId ?? threadWithInput;
+    if (changedThreadId) onThreadActivity?.(changedThreadId);
+  }, [threadWithInput, state.activeRunId, taskId, taskThreadId, onThreadActivity]);
   const taskCanAcceptGuidance = Boolean(activeTask && interventionCommandForStatus(activeTask.status));
   const running = session.running;
   const blocked = session.blocked;
   const taskHydrating = taskSession.state.phase === "loading";
-  const composerBlocked = activeTask ? taskSession.busy : blocked || taskHydrating;
+  const composerBlocked = (activeTask ? taskSession.busy : blocked || taskHydrating) || planning || confirmingPlan;
   const taskAttachmentConflict = Boolean(activeTask && attachmentController.items.length > 0);
   const taskAttachmentMessage = locale === "zh"
     ? "任务引导暂不支持附件；附件仍保留在输入框，请移除后发送引导，或先停止任务再作为普通消息发送。"
@@ -106,6 +133,8 @@ export function StudioView({
     ? (locale === "zh" ? "引导当前任务" : "Guide current Task")
     : state.phase === "waiting_for_approval"
     ? t("Resolve approval before sending another message")
+    : composerMode === "plan"
+    ? (locale === "zh" ? "生成任务计划" : "Generate task plan")
     : t(blocked ? "Agent is running" : "Send message");
   const activeEvents = latestTurn?.events ?? [];
   const effectiveRunProfile = runProfileFromEvents(activeEvents);
@@ -177,6 +206,12 @@ export function StudioView({
   const artifactEnabled = String(agent?.definition.output_schema.type ?? "artifact") === "artifact";
 
   useEffect(() => {
+    viewScopeRef.current = { agentId: agent?.id, threadId: activeThreadId };
+    confirmationRef.current = false;
+    setConfirmingPlan(false);
+  }, [agent?.id, activeThreadId]);
+
+  useEffect(() => {
     userSelectedCanvasRef.current = false;
     setCanvasOpen(false);
     setCanvasTab("artifact");
@@ -197,9 +232,23 @@ export function StudioView({
   }, [artifactEnabled, artifactBelongsToLatestTurn]);
 
   useEffect(() => {
-    if (taskSession.task || canvasTab !== "task") return;
+    if (taskSession.task || hasProposal || canvasTab !== "task") return;
     setCanvasTab("artifact");
-  }, [canvasTab, taskSession.task]);
+  }, [canvasTab, taskSession.task, hasProposal]);
+
+  useEffect(() => {
+    if (!hasProposal) return;
+    setCanvasTab("task");
+    setCanvasOpen(true);
+    setMobileSurface("canvas");
+  }, [hasProposal, activeThreadId]);
+
+  useEffect(() => {
+    const input = promptRef.current;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+  }, [prompt]);
   const extensionBlocks = useMemo(
     () => agent ? resolveExtensionUIBlocks(agent, extensions) : [],
     [agent, extensions],
@@ -240,14 +289,17 @@ export function StudioView({
     setMobileSurface("conversation");
   };
 
-  const showToast = (message: string) => {
+  const showToast = useCallback((message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(null), 2200);
-  };
+  }, []);
+  const copyResponse = useCallback(async (text: string) => { await navigator.clipboard.writeText(text); showToast(t("Response copied")); }, [showToast, t]);
 
   async function submit(input = prompt) {
     const value = input.trim();
     if ((!value && attachmentController.items.length === 0) || !agent) return;
+    if (planning || confirmingPlan) return;
+    if (!activeTask && composerMode === "plan") { await createTaskFromPrompt(); return; }
     if (activeTask) {
       if (!value || taskSession.busy) return;
       if (attachmentController.items.length > 0) {
@@ -287,21 +339,39 @@ export function StudioView({
 
   async function createTaskFromPrompt() {
     const value = prompt.trim();
-    if (!value || activeTask || taskSession.busy || blocked) return;
+    if (!value || activeTask || taskSession.busy || blocked || planning || confirmingPlan) return;
     if (attachmentController.items.length > 0) {
       showToast(locale === "zh" ? "创建任务前请先移除附件；附件仍保留在输入框中。" : "Remove attachments before creating a Task. They remain in the composer.");
       return;
     }
     try {
-      await taskSession.createTask(value, true, {
+      openTaskCanvas();
+      await proposal.generate(value, {
         model_override: modelOverride,
         reasoning_effort: reasoningEffort,
       });
-      setPrompt("");
-      openTaskCanvas();
     } catch (error) {
       showToast(error instanceof Error ? error.message : (locale === "zh" ? "创建任务失败" : "Unable to create Task"));
     }
+  }
+
+  async function confirmPlan() {
+    if (!proposal.draft || confirmationRef.current || activeTask || blocked || taskSession.busy) return;
+    const viewScope = viewScopeRef.current;
+    confirmationRef.current = true;
+    setConfirmingPlan(true);
+    try {
+      const created = await taskSession.createTask(proposal.draft.goal, false, proposal.profile, proposal.draft.steps.map(({ title, description }) => ({ title, description })));
+      if (viewScopeRef.current !== viewScope) return;
+      proposal.cancel();
+      setPrompt("");
+      setComposerMode("chat");
+      openTaskCanvas();
+      await taskSession.sendCommand("start", undefined, undefined, created.id);
+    } catch (error) {
+      if (viewScopeRef.current !== viewScope || (error instanceof DOMException && error.name === "AbortError")) return;
+      showToast(error instanceof Error ? error.message : (locale === "zh" ? "启动任务失败，计划已保留" : "Couldn’t start the Task. Your plan is preserved."));
+    } finally { if (viewScopeRef.current === viewScope) { confirmationRef.current = false; setConfirmingPlan(false); } }
   }
 
   function controlTask(command: "start" | "pause" | "resume" | "cancel" | "retry", stepId?: string) {
@@ -362,19 +432,20 @@ export function StudioView({
     addFiles(event.dataTransfer.files);
   };
 
-  async function decide(runId: string, approvalId: string, decision: "approved" | "denied") {
+  const decide = useCallback(async (runId: string, approvalId: string, decision: "approved" | "denied") => {
     setApprovalBusy(true);
     try {
       await alcuinApi.decideApproval(runId, approvalId, decision);
       await onRunCreated(runId);
-      await session.refresh();
+      await refreshThread();
       showToast(t(decision === "approved" ? "Operation approved and completed" : "Operation denied — no changes made"));
     } catch (error) {
       showToast(error instanceof Error ? error.message : t("Approval failed"));
     } finally {
       setApprovalBusy(false);
     }
-  }
+  }, [onRunCreated, refreshThread, showToast, t]);
+  const onDecision = useCallback((runId: string, approvalId: string, decision: "approved" | "denied") => { void decide(runId, approvalId, decision); }, [decide]);
 
   if (!agent) return null;
 
@@ -400,15 +471,16 @@ export function StudioView({
           <ConversationTimeline
             turns={state.turns}
             workspaceName={workspace.name}
-            threadTitle={state.thread?.title ?? t("New thread")}
+            threadTitle={activeThreadTitle ?? state.thread?.title ?? t("New thread")}
             activeRunId={state.activeRunId}
             running={running}
             busy={approvalBusy}
             anchorRef={anchorRef}
             endRef={endRef}
             spacerPx={spacerPx}
-            onCopy={async (text) => { await navigator.clipboard.writeText(text); showToast(t("Response copied")); }}
-            onDecision={(runId, approvalId, decision) => void decide(runId, approvalId, decision)}
+            onCopy={copyResponse}
+            onDecision={onDecision}
+            emptyState={<StudioWelcome starterPrompts={agent.definition.starter_prompts} disabled={composerBlocked} onSelectPrompt={(value) => { setPrompt(value); promptRef.current?.focus(); }} />}
           />
         </div>
 
@@ -422,13 +494,13 @@ export function StudioView({
           />
           <div className={clsx("composer", composerFocused && "focused", running && "running", activeTask && "task-guidance", dragActive && "drag-active")} onDragEnter={handleDragEnter} onDragOver={(event) => { if (!composerBlocked && event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDragLeave={handleDragLeave} onDrop={handleDrop}>
             <ComposerAttachmentTray items={attachmentController.items} onRetry={attachmentController.retry} onRemove={attachmentController.remove} />
-            <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)} onPaste={(event) => { const files = Array.from(event.clipboardData.files); if (files.length > 0) { event.preventDefault(); addFiles(files); } }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); } }} placeholder={activeTask ? (locale === "zh" ? "引导当前任务…" : "Guide the current Task…") : t("Message {name}…", { name: agent.name })} />
+            <textarea ref={promptRef} rows={2} value={prompt} aria-label={locale === "zh" ? "消息输入" : "Message input"} onChange={(event) => setPrompt(event.target.value)} onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)} onPaste={(event) => { const files = Array.from(event.clipboardData.files); if (files.length > 0) { event.preventDefault(); addFiles(files); } }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); void submit(); } }} placeholder={activeTask ? (locale === "zh" ? "引导当前任务…" : "Guide the current Task…") : composerMode === "plan" ? (locale === "zh" ? "描述目标，先生成计划再执行…" : "Describe a goal. Review a plan before it runs…") : t("Message {name}…", { name: agent.name })} />
             {attachmentBlockReason && <div className="composer-inline-notice" role="status">{attachmentBlockReason}</div>}
             <div className="composer-footer">
               <div className="composer-tools">
                 <button className="composer-tool" aria-label={activeTask ? taskAttachmentMessage : t("Attach files")} disabled={composerBlocked || Boolean(activeTask)} onClick={() => attachmentInputRef.current?.click()}><Paperclip size={15} /></button>
                 <input ref={attachmentInputRef} className="visually-hidden" type="file" accept={ATTACHMENT_ACCEPT} multiple onChange={(event) => addFiles(event.target.files)} />
-                {!activeTask && <button className="task-create-button" aria-label={locale === "zh" ? "将当前输入作为任务执行" : "Run the current prompt as a Task"} title={locale === "zh" ? "作为任务执行" : "Run as Task"} disabled={!prompt.trim() || taskSession.busy || blocked || attachmentController.items.length > 0} onClick={() => void createTaskFromPrompt()}><ListChecks size={13} /><span>{locale === "zh" ? "任务" : "Task"}</span></button>}
+                {!activeTask && <div className="composer-mode-switch" role="group" aria-label={locale === "zh" ? "工作模式" : "Work mode"}><button type="button" className={clsx(composerMode === "chat" && "active")} aria-pressed={composerMode === "chat"} disabled={composerBlocked} onClick={() => setComposerMode("chat")}><MessageSquare size={12} />{locale === "zh" ? "对话" : "Chat"}</button><button type="button" className={clsx(composerMode === "plan" && "active")} aria-pressed={composerMode === "plan"} disabled={composerBlocked || attachmentController.items.length > 0} onClick={() => setComposerMode("plan")}><ListChecks size={12} />{locale === "zh" ? "计划" : "Plan"}</button></div>}
                 <button className={clsx("context-chip", running && "live")} aria-label={running ? t("Agent is working") : t("Context · {skills} skills · {rules} rules", { skills: contextSkillCount, rules: contextRuleCount })} onClick={openContextLedger}><span className="context-dot" /><span className="context-chip-label">{running ? t("Agent is working") : t("Context · {skills} skills · {rules} rules", { skills: contextSkillCount, rules: contextRuleCount })}</span><ChevronDown size={11} /></button>
                 <span className="composer-control-divider" aria-hidden="true" />
                 <div className={clsx("run-profile-controls", running && "locked")} aria-label={t("Run profile")} title={providerCatalogError ?? undefined}>
@@ -442,11 +514,11 @@ export function StudioView({
                   <RunProfileMenu ariaLabel={t("Thinking effort")} icon={<Brain size={12} />} value={displayedReasoningValue} options={reasoningControlOptions} disabled={composerBlocked || Boolean(activeTask)} onChange={(value) => setReasoningEffort((value || null) as ReasoningEffort | null)} align="right" />
                 </div>
               </div>
-              <div className="composer-send-group"><span>↵</span><button className="send-button" aria-label={attachmentBlockReason ?? sendButtonLabel} disabled={activeTask ? !prompt.trim() || taskSession.busy || !taskCanAcceptGuidance || Boolean(attachmentBlockReason) : ((!prompt.trim() && attachmentController.items.length === 0) || composerBlocked || Boolean(attachmentBlockReason))} onClick={() => void submit()}>{(activeTask && taskSession.busy) || (!activeTask && running) ? <span className="send-spinner" /> : <ArrowUp size={17} />}</button></div>
+              <div className="composer-send-group"><span>↵</span><button className="send-button" aria-label={attachmentBlockReason ?? sendButtonLabel} disabled={activeTask ? !prompt.trim() || composerBlocked || !taskCanAcceptGuidance || Boolean(attachmentBlockReason) : ((!prompt.trim() && attachmentController.items.length === 0) || composerBlocked || Boolean(attachmentBlockReason))} onClick={() => void submit()}>{planning || confirmingPlan || (activeTask && taskSession.busy) || (!activeTask && running) ? <span className="send-spinner" /> : composerMode === "plan" ? <ListChecks size={17} /> : <ArrowUp size={17} />}</button></div>
             </div>
             {dragActive && <div className="composer-drop-overlay"><Paperclip size={18} /><span>{t("Drop files to attach")}</span></div>}
           </div>
-          {state.turns.length === 0 && !activeTask && <div className="starter-row">{agent.definition.starter_prompts.slice(0, 2).map((starter) => <button key={starter} onClick={() => void submit(starter)}>{starter}</button>)}</div>}
+          <p className="composer-hint">{composerMode === "plan" && !activeTask ? (locale === "zh" ? "生成计划不会执行操作；确认后才开始。" : "Planning takes no action. You decide when to start.") : (locale === "zh" ? "Enter 发送 · Shift + Enter 换行" : "Enter to send · Shift + Enter for a new line")}</p>
         </div>
       </section>
 
@@ -454,7 +526,7 @@ export function StudioView({
         <header className="canvas-header">
           <div className="canvas-tabs" role="tablist" aria-label={t("Canvas")}>
             <button id="canvas-tab-artifact" role="tab" aria-controls="canvas-panel-artifact" aria-selected={canvasTab === "artifact"} className={clsx(canvasTab === "artifact" && "active")} onClick={() => selectCanvasTab("artifact")}>{t("Artifact")}</button>
-            {taskSession.task && <button id="canvas-tab-task" role="tab" aria-controls="canvas-panel-task" aria-selected={canvasTab === "task"} className={clsx(canvasTab === "task" && "active")} onClick={() => selectCanvasTab("task")}>{locale === "zh" ? "任务" : "Task"} <span>{taskSession.state.projection.progress.completed}/{taskSession.state.projection.progress.total}</span></button>}
+            {(taskSession.task || hasProposal) && <button id="canvas-tab-task" role="tab" aria-controls="canvas-panel-task" aria-selected={canvasTab === "task"} className={clsx(canvasTab === "task" && "active")} onClick={() => selectCanvasTab("task")}>{locale === "zh" ? "任务" : "Task"} {!hasProposal && <span>{taskSession.state.projection.progress.completed}/{taskSession.state.projection.progress.total}</span>}</button>}
             <button id="canvas-tab-trace" role="tab" aria-controls="canvas-panel-trace" aria-selected={canvasTab === "trace"} className={clsx(canvasTab === "trace" && "active")} onClick={() => selectCanvasTab("trace")}>{t("Trace")} <span>{activeEvents.length}</span></button>
             <button id="canvas-tab-extensions" role="tab" aria-controls="canvas-panel-extensions" aria-selected={canvasTab === "extensions"} className={clsx(canvasTab === "extensions" && "active")} onClick={() => selectCanvasTab("extensions")}>{t("Blocks")} <span>{extensionBlocks.length}</span></button>
             <button id="canvas-tab-context" role="tab" aria-controls="canvas-panel-context" aria-selected={canvasTab === "context"} className={clsx(canvasTab === "context" && "active")} onClick={() => selectCanvasTab("context")}>{t("Context")}</button>
@@ -463,10 +535,10 @@ export function StudioView({
         </header>
         <div className="canvas-content">
           <div id="canvas-panel-artifact" role="tabpanel" aria-labelledby="canvas-tab-artifact" aria-hidden={canvasTab !== "artifact"} className={clsx("canvas-panel", canvasTab === "artifact" && "active")}>
-            <ArtifactCanvas key={state.thread?.id ?? activeThreadId ?? "new-thread"} enabled={artifactEnabled} threadId={state.thread?.id ?? activeThreadId} eventArtifacts={eventArtifacts} citationEvents={artifactCitationEvents} activeRunId={state.activeRunId} running={running && artifactBelongsToLatestTurn && artifactEvent?.payload.streaming !== false} onNotify={showToast} />
+            <ArtifactCanvas key={state.thread?.id ?? activeThreadId ?? "new-thread"} enabled={artifactEnabled} threadId={state.thread?.id ?? activeThreadId} refreshKey={taskArtifactRefreshKey(taskSession.task, state.thread?.id ?? activeThreadId)} eventArtifacts={eventArtifacts} citationEvents={artifactCitationEvents} activeRunId={state.activeRunId} running={running && artifactBelongsToLatestTurn && artifactEvent?.payload.streaming !== false} onNotify={showToast} />
           </div>
-          {taskSession.task && <div id="canvas-panel-task" role="tabpanel" aria-labelledby="canvas-tab-task" aria-hidden={canvasTab !== "task"} className={clsx("canvas-panel", "task-canvas-panel", canvasTab === "task" && "active")}>
-            <TaskCanvas
+          {(taskSession.task || hasProposal) && <div id="canvas-panel-task" role="tabpanel" aria-labelledby="canvas-tab-task" aria-hidden={canvasTab !== "task"} className={clsx("canvas-panel", "task-canvas-panel", canvasTab === "task" && "active")}>
+            {hasProposal ? <TaskProposalPanel proposal={proposal} confirming={confirmingPlan} onConfirm={() => void confirmPlan()} /> : <TaskCanvas
               session={taskSession.state}
               onSelectStep={taskSession.selectStep}
               onBeginPlanEdit={taskSession.beginPlanEdit}
@@ -475,7 +547,7 @@ export function StudioView({
               onCancelPlanEdit={taskSession.cancelPlanEdit}
               onCommand={controlTask}
               onDismissError={taskSession.clearError}
-            />
+            />}
           </div>}
           <div id="canvas-panel-trace" role="tabpanel" aria-labelledby="canvas-tab-trace" aria-hidden={canvasTab !== "trace"} className={clsx("canvas-panel", canvasTab === "trace" && "active")}>
             <TraceTimeline events={activeEvents} />

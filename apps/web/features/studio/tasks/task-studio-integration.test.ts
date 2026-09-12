@@ -9,9 +9,9 @@ const globals = readFileSync(new URL("../../../app/globals.css", import.meta.url
 
 test("Task surfaces are state-driven and absent from ordinary conversation DOM", () => {
   assert.match(inlineStatus, /if \(!task\) return null/);
-  assert.match(studio, /\{taskSession\.task && <button id="canvas-tab-task"/);
-  assert.match(studio, /\{taskSession\.task && <div id="canvas-panel-task"/);
-  assert.match(studio, /state\.turns\.length === 0 && !activeTask/);
+  assert.match(studio, /\{\(taskSession\.task \|\| hasProposal\) && <button id="canvas-tab-task"/);
+  assert.match(studio, /\{\(taskSession\.task \|\| hasProposal\) && <div id="canvas-panel-task"/);
+  assert.match(studio, /hasProposal \? <TaskProposalPanel/);
 });
 
 test("Task commands refresh canonical CAS state and use unique idempotency keys", () => {
@@ -25,7 +25,7 @@ test("Task commands refresh canonical CAS state and use unique idempotency keys"
 });
 
 test("Task create and plan update strip client-only step identity", () => {
-  assert.match(hook, /steps: \[\{ title, description: value \}\]/);
+  assert.match(hook, /steps: steps \?\? \[\{ title, description: value \}\]/);
   assert.match(hook, /steps: draft\.steps\.map\(\(step\) => \(\{\s*title: step\.title\.trim\(\),\s*\.\.\.\(step\.description\.trim\(\) \? \{ description: step\.description\.trim\(\) \} : \{\}\),\s*\}\)\)/);
 
   const updatePayload = hook.slice(

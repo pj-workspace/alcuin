@@ -5,11 +5,41 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown from "react-markdown";
 
-import { collectCitationSources, remarkCitationMarkers, resolveCitationSource, safeSourceUrl, type CitationMarkdownNode } from "./citation-model.ts";
+import { collectCitationSources, createCitationSourceSelector, remarkCitationMarkers, resolveCitationSource, safeSourceUrl, type CitationMarkdownNode } from "./citation-model.ts";
 
 function citation(sequence: number, payload: Record<string, unknown>): ExecutionEvent {
   return { id: `event-${sequence}`, type: "citation.created", run_id: "run-sources", sequence, timestamp: "2026-09-08T08:00:00Z", payload } as ExecutionEvent;
 }
+
+test("citation projection retains source identity while unrelated stream events grow", () => {
+  const select = createCitationSourceSelector();
+  const source = citation(1, { citation_id: "s1", label: "Source", locator: "https://example.com" });
+  const initial = select([source]);
+  const reasoning: ExecutionEvent = { ...source, id: "reasoning", sequence: 2, type: "reasoning.delta", payload: { delta: "Thinking" } };
+  const message: ExecutionEvent = { ...reasoning, id: "message", sequence: 3, type: "message.delta", payload: { delta: "Answer" } };
+  assert.equal(select([source, reasoning]), initial);
+  assert.equal(select([source, reasoning, message], []), initial);
+  assert.equal(select([source, reasoning, message])[0], initial[0]);
+});
+
+test("late citation metadata and event replacements invalidate the projection without mutating prior sources", () => {
+  const select = createCitationSourceSelector();
+  const first = citation(1, { citation_id: "s1", label: "Original", locator: "https://example.com" });
+  const initial = select([first]);
+  const corrected = { ...first, payload: { ...first.payload, label: "Corrected" } };
+  const correction = select([corrected]);
+  assert.equal(correction[0].title, "Corrected");
+  assert.equal(initial[0].title, "Original");
+  const history = citation(2, { citation_id: "s2", label: "History", locator: "https://example.com/history" });
+  const enriched = select([corrected], [history]);
+  assert.deepEqual(enriched, collectCitationSources([corrected, history]));
+  assert.equal(resolveCitationSource("#alcuin-citation-s2", enriched)?.title, "History");
+  assert.equal(select([corrected], [history]), enriched);
+  assert.equal(select([corrected]).length, 1, "history from an earlier Run must be removable");
+  const nextRun = { ...first, run_id: "another-run", payload: { ...first.payload, locator: "https://example.com/next" } };
+  assert.equal(select([nextRun])[0].locator, "https://example.com/next");
+  assert.deepEqual(select([]), []);
+});
 
 test("sources replay in persisted order with stable numbers, URL deduplication and explicit ID aliases", () => {
   const first = citation(3, { citation_id: "s1", label: "Official source", locator: "https://EXAMPLE.com/report#section", snippet: "The actual source text." });

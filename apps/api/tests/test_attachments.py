@@ -23,9 +23,15 @@ def attachment_client(
     **setting_overrides: Any,
 ) -> Iterator[tuple[TestClient, PostgresStore, list[dict[str, Any]]]]:
     payloads: list[dict[str, Any]] = []
+    naming_payloads: list[dict[str, Any]] = []
 
     async def provider_handler(request: httpx.Request) -> httpx.Response:
-        payloads.append(json.loads(request.content))
+        payload = json.loads(request.content)
+        messages = payload.get("messages") or []
+        is_naming = bool(messages) and "Generate a short descriptive conversation title" in str(
+            messages[0].get("content") or ""
+        )
+        (naming_payloads if is_naming else payloads).append(payload)
         return httpx.Response(
             200,
             text=(
@@ -47,6 +53,7 @@ def attachment_client(
         store=store,
         provider_transport=httpx.MockTransport(provider_handler),
     )
+    app.state.attachment_test_naming_payloads = naming_payloads
     try:
         with TestClient(app) as client:
             yield client, store, payloads
@@ -62,6 +69,16 @@ def create_thread(client: TestClient) -> dict[str, Any]:
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def assert_naming_did_not_receive_attachments(client: TestClient, *forbidden: str) -> None:
+    naming_payloads = client.app.state.attachment_test_naming_payloads
+    assert len(naming_payloads) == 1
+    payload = naming_payloads[0]
+    assert "tools" not in payload
+    serialized = json.dumps(payload, ensure_ascii=False)
+    for text in ("<untrusted_document_attachment", "data:image/", "attachment-test-provider-key", *forbidden):
+        assert text not in serialized
 
 
 def wait_for_terminal_run(client: TestClient, run_id: str) -> dict[str, Any]:
@@ -186,6 +203,9 @@ def test_document_attachment_public_contract_content_auth_and_later_turn_context
         assert second.status_code == 202, second.text
         assert wait_for_terminal_run(client, second.json()["id"])["status"] == "completed"
         assert len(provider_payloads) == 2
+        assert_naming_did_not_receive_attachments(
+            client, "Tungsten supply pressure is elevated.", "risk-note.md",
+        )
         for payload in provider_payloads:
             serialized_payload = json.dumps(payload, ensure_ascii=False)
             assert "<untrusted_document_attachment" in serialized_payload
@@ -253,6 +273,7 @@ def test_image_is_inline_for_content_but_data_url_exists_only_in_provider_payloa
         assert wait_for_terminal_run(client, vision.json()["id"])["status"] == "completed"
         first_payload = json.dumps(provider_payloads[0], ensure_ascii=False)
         assert "data:image/png;base64," in first_payload
+        assert_naming_did_not_receive_attachments(client, "sample.png")
 
         text_only = client.post(
             f"/v1/threads/{thread['id']}/runs",

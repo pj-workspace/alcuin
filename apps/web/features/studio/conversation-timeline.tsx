@@ -1,6 +1,6 @@
 "use client";
 
-import type { RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 
 import { AgentPresenceOrb } from "@/features/studio/agent-presence-orb";
 import { ConversationTurn } from "@/features/studio/conversation-turn";
@@ -19,6 +19,7 @@ export function ConversationTimeline({
   spacerPx,
   onCopy,
   onDecision,
+  emptyState,
 }: {
   turns: ConversationTurnModel[];
   workspaceName: string;
@@ -31,19 +32,20 @@ export function ConversationTimeline({
   spacerPx: number;
   onCopy: (text: string) => void | Promise<void>;
   onDecision: (runId: string, approvalId: string, decision: "approved" | "denied") => void;
+  emptyState?: ReactNode;
 }) {
   const { t } = useI18n();
   const latestIndex = turns.length - 1;
   return (
     <div className="conversation-inner" role="log" aria-label={t("Conversation history")} aria-busy={running}>
-      <div className="thread-meta"><span>{workspaceName}</span><i />{threadTitle}<i />{t("Now")}</div>
-      {turns.length === 0 ? (
+      {turns.length > 0 && <div className="thread-meta"><span>{workspaceName}</span><i />{threadTitle}<i />{t("Now")}</div>}
+      {turns.length === 0 ? (emptyState ?? (
         <div className="conversation-empty">
           <AgentPresenceOrb state="breathing" active size={58} className="empty-presence-orb" />
           <h2>{t("Start a conversation")}</h2>
           <p>{t("This thread will keep its context as you continue.")}</p>
         </div>
-      ) : turns.map((turn, index) => (
+      )) : turns.map((turn, index) => (
         <ConversationTurn
           key={turn.id}
           turn={turn}

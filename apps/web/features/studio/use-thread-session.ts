@@ -46,11 +46,14 @@ export function useThreadSession({
   const connectedRunRef = useRef<string | null>(null);
   const contextRunRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
+  const scopeRef = useRef({ agentId: agent?.id, threadId });
+  const pendingThreadRef = useRef<{ scope: typeof scopeRef.current; promise: Promise<Thread> } | null>(null);
   const resumeRunRef = useRef<(run: Run, after: number) => void>(() => undefined);
   const eventQueueRef = useRef(new Map<string, ExecutionEvent[]>());
   const frameRef = useRef<number | null>(null);
 
   useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => { scopeRef.current = { agentId: agent?.id, threadId }; }, [agent?.id, threadId]);
 
   const flushEvents = useCallback(() => {
     if (frameRef.current !== null) {
@@ -136,6 +139,7 @@ export function useThreadSession({
       loadGenerationRef.current += 1;
       contextRunRef.current = null;
       setContextAssembly(null);
+      stateRef.current = initialThreadSessionState;
       dispatch({ type: "reset" });
       return;
     }
@@ -156,14 +160,23 @@ export function useThreadSession({
   }, []);
 
   const ensureThread = useCallback(async (): Promise<Thread> => {
+    const scope = scopeRef.current;
     const existing = stateRef.current.thread;
-    if (existing && existing.agent_id === agent?.id) return existing;
+    if (existing && existing.agent_id === agent?.id && (!scope.threadId || scope.threadId === existing.id)) return existing;
     if (!agent) throw new Error("Agent is unavailable");
-    const thread = await alcuinApi.createThread(agent.id, hostContext);
-    dispatch({ type: "thread.created", thread });
-    stateRef.current = { ...stateRef.current, thread };
-    onThreadCreated(thread);
-    return thread;
+    if (scope.threadId) throw new Error("Wait for the conversation to finish loading");
+    if (pendingThreadRef.current?.scope === scope) return pendingThreadRef.current.promise;
+    const promise = (async () => {
+      const thread = await alcuinApi.createThread(agent.id, hostContext);
+      if (!mountedRef.current || scopeRef.current !== scope) throw new DOMException("Conversation changed", "AbortError");
+      dispatch({ type: "thread.created", thread });
+      stateRef.current = { ...stateRef.current, thread };
+      onThreadCreated(thread);
+      return thread;
+    })();
+    pendingThreadRef.current = { scope, promise };
+    try { return await promise; }
+    finally { if (pendingThreadRef.current?.promise === promise) pendingThreadRef.current = null; }
   }, [agent, hostContext, onThreadCreated]);
 
   const finishRun = useCallback(async (run: Run) => {

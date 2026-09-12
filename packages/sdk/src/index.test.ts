@@ -9,6 +9,44 @@ import {
   taskEventFromCanonicalFrame,
 } from "./index.ts";
 
+test("thread naming is explicit, scoped, abortable, and never starts a Run", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const controller = new AbortController();
+  const thread = { id: "thread/1", title: "A useful title", title_status: "ready" };
+  const client = createAlcuinClient({ baseUrl: "https://agents.example.test", workspaceId: "ws_titles", fetch: async (input, init) => {
+    calls.push({ url: String(input), init });
+    return Response.json(thread);
+  } });
+  assert.deepEqual(await client.ensureThreadTitle("thread/1", controller.signal), thread);
+  assert.equal((await client.getThreadTitle("thread/1", controller.signal)).title, thread.title);
+  assert.deepEqual(calls.map((call) => [call.url, call.init?.method ?? "GET"]), [
+    ["https://agents.example.test/v1/threads/thread%2F1/title/ensure", "POST"],
+    ["https://agents.example.test/v1/threads/thread%2F1/title", "GET"],
+  ]);
+  for (const call of calls) {
+    assert.equal(call.init?.signal, controller.signal);
+    assert.equal(new Headers(call.init?.headers).get("X-Alcuin-Workspace"), "ws_titles");
+    assert.equal(call.init?.body, undefined);
+  }
+});
+
+test("task proposals preserve workspace, model controls and abort without executing a Task", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const controller = new AbortController();
+  const proposal = { goal: "Inspect a report", steps: [{ title: "Read", description: "Read the supplied report" }], model: "model-a", reasoning_effort: "low" };
+  const client = createAlcuinClient({ baseUrl: "https://agents.example.test", workspaceId: "ws_planning", fetch: async (input, init) => {
+    calls.push({ url: String(input), init });
+    return Response.json(proposal);
+  } });
+  const result = await client.proposeTaskPlan("thread/1", { goal: proposal.goal, model_override: "model-a", reasoning_effort: "low" }, controller.signal);
+  assert.deepEqual(result, proposal);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, "https://agents.example.test/v1/threads/thread%2F1/task-plan-proposals");
+  assert.equal(calls[0]!.init?.signal, controller.signal);
+  assert.equal(new Headers(calls[0]!.init?.headers).get("X-Alcuin-Workspace"), "ws_planning");
+  assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), { goal: proposal.goal, model_override: "model-a", reasoning_effort: "low" });
+});
+
 test("client creates and controls durable Tasks without exposing revision UI", async () => {
   const seen: Array<{ url: string; method: string; body: unknown }> = [];
   const task = { id: "task_test", revision: 2, status: "running" };
@@ -524,13 +562,11 @@ test("client can pin a new Thread to an explicit Agent version", async () => {
   assert.deepEqual(bodies, [
     {
       agent_id: "agt_test",
-      title: "Working session",
       context: { record_id: "rec_1" },
       agent_version_id: "agv_test_v1",
     },
     {
       agent_id: "agt_test",
-      title: "Working session",
       context: {},
     },
   ]);
