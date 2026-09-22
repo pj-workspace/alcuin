@@ -9,8 +9,8 @@ test("runs an approval-gated operation through its real adapter", async ({ page 
   const composer = page.getByPlaceholder("Message Operations Copilot…");
   await composer.fill("Update this incident to monitoring");
   await composer.press("Enter");
-  await expect(page.getByRole("button", { name: "Approve once" })).toBeVisible({ timeout: 15_000 });
-  await page.getByRole("button", { name: "Approve once" }).click();
+  await expect(page.getByRole("button", { name: "Allow once", exact: true })).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Allow once", exact: true }).click();
 
   await expect(page.getByText("The approved ops.update_ticket operation completed successfully.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeVisible();
@@ -41,8 +41,8 @@ test("renders declarative extension blocks and routes forms through approval", a
 
   await page.getByLabel("New status").selectOption("resolved");
   await page.getByRole("button", { name: "Request update" }).click();
-  await expect(page.getByRole("button", { name: "Approve once" })).toBeVisible();
-  await page.getByRole("button", { name: "Approve once" }).click();
+  await expect(page.getByRole("button", { name: "Allow once", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Allow once", exact: true }).click();
 
   await expect(page.getByText("The approved ops.update_ticket operation completed successfully.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeVisible();

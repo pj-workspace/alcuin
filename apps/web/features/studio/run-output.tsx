@@ -2,7 +2,7 @@
 
 import type { ExecutionEvent } from "@alcuin/contracts";
 import { Check, ChevronRight, CircleAlert, Clock3, Database, Search, Wrench } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { clsx } from "clsx";
 import type { OrbState } from "thinking-orbs";
 
@@ -10,6 +10,7 @@ import { AgentPresenceOrb } from "@/features/studio/agent-presence-orb";
 import { CitationResponse } from "@/features/studio/citations";
 import { ThinkingMarkdown } from "@/shared/components/thinking-markdown";
 import { useI18n } from "@/shared/lib/i18n";
+import { activeRunDuration } from "@/features/studio/run-duration";
 
 type ReasoningTrace = {
   kind: "reasoning";
@@ -37,17 +38,19 @@ export function RunOutput({
   assistantText,
   onCopy,
   runId,
+  interaction,
 }: {
   events: ExecutionEvent[];
   running: boolean;
   assistantText: string;
   onCopy: (text: string) => void | Promise<void>;
   runId?: string | null;
+  interaction?: ReactNode;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
   const [tracePinned, setTracePinned] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
+  const [clock, setClock] = useState<number | undefined>(undefined);
   const steps = useMemo(() => collectTraceSteps(events), [events]);
   const tools = steps.filter((step): step is ToolTrace => step.kind === "tool");
   const startedEvent = events.find((event) => event.type === "run.started");
@@ -73,20 +76,13 @@ export function RunOutput({
 
   useEffect(() => {
     if (!running || !startedAt) return;
-    const update = () => setElapsed(Math.max(0, (Date.now() - Date.parse(startedAt)) / 1000));
+    const update = () => setClock(Date.now());
     update();
     const timer = window.setInterval(update, 250);
     return () => window.clearInterval(timer);
   }, [running, startedAt]);
 
-  const terminalAt = [...events]
-    .reverse()
-    .find((event) => event.type === "run.completed" || event.type === "run.failed")?.timestamp;
-  const duration = startedAt
-    ? terminalAt
-      ? Math.max(0, (Date.parse(terminalAt) - Date.parse(startedAt)) / 1000)
-      : elapsed
-    : 0;
+  const duration = activeRunDuration(events, running ? clock : undefined);
   const errorMessage = [...events]
     .reverse()
     .find((event) => event.type === "run.failed")?.payload.message;
@@ -113,6 +109,7 @@ export function RunOutput({
         <div
           className={clsx("brainstorm-collapse", collapsed && "collapsed")}
           aria-hidden={collapsed}
+          inert={collapsed}
         >
           <div className="brainstorm-collapse-inner">
             <div className="brainstorm-steps">
@@ -129,7 +126,7 @@ export function RunOutput({
               ) : (
                 <div className="brainstorm-step tool-step" key={step.key}>
                   <span className={clsx("brainstorm-node", "tool", step.status)}>
-                    <ToolNodeIcon step={step} />
+                    <ToolNodeIcon step={step} active={running} />
                   </span>
                   <span className="tool-step-label">{toolStepLabel(step, t)}</span>
                 </div>
@@ -151,6 +148,7 @@ export function RunOutput({
         </div>
       </section>
     )}
+    {interaction}
     {(assistantText || events.some((event) => event.type === "citation.created")) && (
       <div className={clsx("assistant-output", running && "streaming")}>
         <CitationResponse content={assistantText} events={events} runId={runId ?? startedEvent?.run_id} running={running} onCopy={onCopy} />
@@ -169,6 +167,8 @@ function derivePresence(
   duration: number,
   t: ReturnType<typeof useI18n>["t"],
 ): Presence {
+  const lastInput = events.filter((event) => event.type === "input.required" || event.type === "input.answered").at(-1);
+  if (!failed && lastInput?.type === "input.required") return { label: t("Waiting for your answer"), state: "breathing" };
   if (!running) {
     return {
       label: failed ? t("Thought process interrupted") : t("Thought process · {duration}", { duration: formatDuration(duration) }),
@@ -223,8 +223,8 @@ function collectTraceSteps(events: ExecutionEvent[]): TraceStep[] {
   return steps;
 }
 
-function ToolNodeIcon({ step }: { step: ToolTrace }) {
-  if (step.status === "running") return <span className="micro-loader" />;
+function ToolNodeIcon({ step, active }: { step: ToolTrace; active: boolean }) {
+  if (step.status === "running") return active ? <span className="micro-loader" /> : <Clock3 size={11} />;
   if (step.status === "error") return <CircleAlert size={11} />;
   if (isKnowledgeTool(step.name)) return <Database size={11} />;
   if (isSearchTool(step.name)) return <Search size={11} />;
@@ -232,6 +232,7 @@ function ToolNodeIcon({ step }: { step: ToolTrace }) {
 }
 
 function toolStepLabel(step: ToolTrace, t: ReturnType<typeof useI18n>["t"]): string {
+  if (step.name === "human.ask") return t(step.status === "running" ? "Waiting for your answer" : step.status === "error" ? "This question is closed" : "Your answer was recorded");
   const query = step.query?.trim();
   const prefix = isKnowledgeTool(step.name) ? t("Retrieve") : isSearchTool(step.name) ? t("Search") : formatToolName(step.name);
   if (step.status === "error") return `${t("{prefix} interrupted", { prefix })}${query ? ` · ${query}` : ""}`;

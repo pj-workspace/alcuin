@@ -34,7 +34,7 @@ export type ConversationTurn = {
   optimistic: boolean;
 };
 
-export type ThreadSessionPhase = "idle" | "loading" | "submitting" | "streaming" | "waiting_for_approval" | "error";
+export type ThreadSessionPhase = "idle" | "loading" | "submitting" | "streaming" | "waiting_for_approval" | "waiting_for_input" | "error";
 
 export type ThreadSessionState = {
   thread: Thread | null;
@@ -93,10 +93,13 @@ export function threadSessionReducer(
           ? "streaming"
           : action.latestRunStatus === "waiting_for_approval"
             ? "waiting_for_approval"
+            : action.latestRunStatus === "waiting_for_input"
+              ? "waiting_for_input"
             : "idle",
         activeRunId: action.latestRunStatus === "queued"
           || action.latestRunStatus === "running"
           || action.latestRunStatus === "waiting_for_approval"
+          || action.latestRunStatus === "waiting_for_input"
           ? action.latestRunId ?? null
           : null,
         error: null,
@@ -149,6 +152,8 @@ export function threadSessionReducer(
             ? "error"
             : action.status === "waiting_for_approval"
               ? "waiting_for_approval"
+              : action.status === "waiting_for_input"
+                ? "waiting_for_input"
               : action.status === "queued" || action.status === "running"
                 ? "streaming"
                 : "idle"
@@ -157,6 +162,7 @@ export function threadSessionReducer(
           ? action.status === "queued"
             || action.status === "running"
             || action.status === "waiting_for_approval"
+            || action.status === "waiting_for_input"
             ? action.runId
             : null
           : state.activeRunId,
@@ -229,7 +235,19 @@ export function turnsFromThreadDetail(
     citations.push(event);
     citationsByRun.set(event.run_id, citations);
   }
+  for (const event of detail.approval_events ?? []) {
+    if (!["approval.required", "approval.decided", "tool.completed"].includes(event.type) || !knownRunIds.has(event.run_id)) continue;
+    const records = citationsByRun.get(event.run_id) ?? [];
+    records.push(event);
+    citationsByRun.set(event.run_id, records);
+  }
   const latestRunId = orderedRuns.at(-1)?.id;
+  for (const event of detail.input_events ?? []) {
+    if (!["input.required", "input.answered"].includes(event.type) || !knownRunIds.has(event.run_id)) continue;
+    const records = citationsByRun.get(event.run_id) ?? [];
+    records.push(event);
+    citationsByRun.set(event.run_id, records);
+  }
   const turns = orderedRuns.map((run) => {
     const runMessages = messagesByRun.get(run.id) ?? [];
     const inputMessageId = (run as Run & { input_message_id?: string | null }).input_message_id;

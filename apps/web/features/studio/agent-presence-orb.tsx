@@ -5,7 +5,8 @@ import { useEffect, useRef, useState } from "react";
 import { ThinkingOrb, type OrbSize, type OrbState } from "thinking-orbs";
 
 // State changes stay perceptible without making the Agent feel sluggish. The orb's
-// own continuous motion remains calm; only the crossfade follows the 180 ms UI token.
+// own continuous motion runs only while active; completed/waiting runs keep a
+// static mark. The library also suspends offscreen/hidden-page canvas work.
 const ORB_CROSSFADE_MS = 180;
 
 export function AgentPresenceOrb({
@@ -98,6 +99,7 @@ export function AgentPresenceOrb({
             size={preset}
             theme="auto"
             speed={orbSpeed(leaving, active)}
+            paused={reducedMotion || !active}
             style={canvasStyle}
           />
         </span>
@@ -114,7 +116,7 @@ export function AgentPresenceOrb({
           size={preset}
           theme="auto"
           speed={orbSpeed(shown, active)}
-          paused={reducedMotion}
+          paused={reducedMotion || !active}
           style={canvasStyle}
         />
       </span>

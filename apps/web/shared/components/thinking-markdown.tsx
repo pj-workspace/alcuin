@@ -2,11 +2,12 @@
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- react-markdown's node prop must not reach DOM elements. */
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useId, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { preprocessMarkdown } from "@/shared/lib/markdown";
+import { useI18n } from "@/shared/lib/i18n";
 
 const SOFT_MAX_HEIGHT_PX = 144;
 const SOFT_OVERFLOW_BUFFER_PX = 24;
@@ -42,6 +43,8 @@ const thinkingComponents: Components = {
 };
 
 export const ThinkingMarkdown = memo(function ThinkingMarkdown({ content }: { content: string }) {
+  const { t } = useI18n();
+  const contentId = useId();
   const contentRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [contentHeight, setContentHeight] = useState(SOFT_MAX_HEIGHT_PX);
@@ -77,6 +80,7 @@ export const ThinkingMarkdown = memo(function ThinkingMarkdown({ content }: { co
     <div className="thinking-md-shell">
       <div
         className="thinking-md"
+        id={contentId}
         style={needsClamp ? {
           maxHeight: clamped ? SOFT_MAX_HEIGHT_PX : contentHeight,
           overflow: "hidden",
@@ -96,8 +100,9 @@ export const ThinkingMarkdown = memo(function ThinkingMarkdown({ content }: { co
           className="thinking-md-more"
           onClick={() => setExpanded((value) => !value)}
           aria-expanded={expanded}
+          aria-controls={contentId}
         >
-          {expanded ? "Show less" : "Show more"}
+          {t(expanded ? "Show less" : "Show more")}
         </button>
       )}
     </div>

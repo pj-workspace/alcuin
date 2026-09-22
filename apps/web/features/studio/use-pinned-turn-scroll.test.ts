@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { pinnedTurnSpacerPx } from "./use-pinned-turn-scroll.ts";
+import { pinnedTurnSpacerPx, latestContentDistance } from "./use-pinned-turn-scroll.ts";
 import { createScrollMeasureScheduler, type ScrollMeasureMode } from "./scroll-measure-scheduler.ts";
 
 test("short active turns receive only viewport clearance", () => {
   assert.equal(pinnedTurnSpacerPx(760, 260), 476);
+});
+
+test("pinning clearance is not mistaken for unseen content", () => {
+  assert.equal(latestContentDistance(1100, 500, 0, 600), 0);
+  assert.equal(latestContentDistance(1800, 0, 400, 600), 800);
+  assert.equal(latestContentDistance(1800, 0, 1200, 600), 0);
+  assert.equal(latestContentDistance(1800, 0, 1300, 600), 0);
 });
 
 test("long active turns do not create trailing blank space", () => {

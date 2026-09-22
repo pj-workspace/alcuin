@@ -7,12 +7,58 @@ const fixture = readFileSync(resolve(process.cwd(), "tests/fixtures/streaming-pe
 declare global {
   interface Window {
     __benchmarkCopied?: string;
+    __orbPaintCount?: (canvas: HTMLCanvasElement) => number;
     __streamingBenchmark: {
       expected: { reasoning: string; answer: string; fragments: number };
       snapshot(): Record<string, number>;
     };
   }
 }
+
+test("presence motion runs only for active visible work and respects reduced motion", async ({ page }) => {
+  // Count actual canvas paints, not CSS classes or a production-only test hook.
+  await page.addInitScript(() => {
+    const counts = new WeakMap<HTMLCanvasElement, number>();
+    const clear = CanvasRenderingContext2D.prototype.clearRect;
+    CanvasRenderingContext2D.prototype.clearRect = function (...args) {
+      if (this.canvas instanceof HTMLCanvasElement) counts.set(this.canvas, (counts.get(this.canvas) ?? 0) + 1);
+      return clear.apply(this, args);
+    };
+    window.__orbPaintCount = (canvas) => counts.get(canvas) ?? 0;
+  });
+  const escapedWrites = await openBenchmark(page, 12_000);
+  const trace = page.locator(".brainstorm-toggle").last();
+  const canvas = trace.locator(".presence-orb-layer:not(.presence-orb-layer-out) canvas");
+  const count = () => canvas.evaluate((node) => window.__orbPaintCount!(node as HTMLCanvasElement));
+  await expect(page.locator(".thinking-md-content").last()).toContainText("检查固定的合成材料");
+  await expect(trace).toHaveAttribute("aria-expanded", "true");
+  const activePaints = await count();
+  await expect.poll(count).toBeGreaterThan(activePaints + 2);
+  const pulse = page.locator(".brainstorm-node.live").last();
+  await trace.click();
+  await expect(trace).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".brainstorm-collapse").last()).toHaveAttribute("inert", "");
+  await expect(pulse).toHaveCSS("animation-play-state", "paused");
+  await trace.click();
+  await expect(pulse).toHaveCSS("animation-play-state", "running");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  // Wait for effects/media listeners to settle, then sample a bounded window.
+  await page.waitForTimeout(100);
+  const reducedPaints = await count();
+  await page.waitForTimeout(350);
+  expect(await count()).toBe(reducedPaints);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await expect.poll(count).toBeGreaterThan(reducedPaints + 2);
+  await completedMetrics(page);
+  await expect(page.locator(".run-brainstorm.streaming")).toHaveCount(0);
+  await trace.scrollIntoViewIfNeeded();
+  await expect(trace.locator(".presence-orb-layer-out")).toHaveCount(0);
+  await page.waitForTimeout(100);
+  const finishedPaints = await count();
+  await page.waitForTimeout(500);
+  expect(await count()).toBe(finishedPaints);
+  expect(escapedWrites).toEqual([]);
+});
 
 async function openBenchmark(page: Page, durationMs: number) {
   // The init script intercepts all writes before the application boots. Only
@@ -75,7 +121,7 @@ test("fragmented SSE progressively renders, preserves Markdown, and copies every
 });
 
 test("trace toggles remain usable and upward scrolling is preserved while tokens arrive", async ({ page }, testInfo) => {
-  const escapedWrites = await openBenchmark(page, 12_000);
+  const escapedWrites = await openBenchmark(page, 16_000);
   const trace = page.locator(".brainstorm-toggle").last();
   const reasoning = page.locator(".thinking-md-content").last();
   await expect(trace).toBeVisible();
@@ -103,11 +149,34 @@ test("trace toggles remain usable and upward scrolling is preserved while tokens
   await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeLessThan(5);
   const before = await page.evaluate(() => window.__streamingBenchmark.snapshot());
   expect(before.finalDeltaMs).toBe(-1);
+  const latest = page.getByRole("button", { name: "Back to latest", exact: true });
+  await expect(latest).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__streamingBenchmark.snapshot().emittedFragments)).toBeGreaterThan(before.emittedFragments);
   await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeLessThan(5);
 
+  // Keyboard activation restores following without moving focus to the composer.
+  await latest.focus();
+  await page.keyboard.press("Enter");
+  await expect(latest).toBeHidden();
+  await expect(scroller).toBeFocused();
+  const resumed = await page.evaluate(() => window.__streamingBenchmark.snapshot().emittedFragments);
+  await expect.poll(() => page.evaluate(() => window.__streamingBenchmark.snapshot().emittedFragments)).toBeGreaterThan(resumed);
+  await expect.poll(() => scroller.evaluate((node) => node.scrollHeight - node.scrollTop - node.clientHeight)).toBeLessThan(100);
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.wheel(0, -10_000);
+  await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeLessThan(5);
+  await expect(latest).toBeVisible();
+
   const { metrics, expected } = await completedMetrics(page);
   expect(await scroller.evaluate((node) => node.scrollTop)).toBeLessThan(5);
+  if (testInfo.project.name === "mobile") {
+    await page.getByRole("tab", { name: /^Canvas/ }).click();
+    await expect(scroller).toBeHidden();
+    await page.getByRole("tab", { name: "Chat", exact: true }).click();
+    await expect(scroller).toBeVisible();
+    await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeLessThan(5);
+    await expect(latest).toBeVisible();
+  }
   const renderedReasoning = (await reasoning.textContent())!.replace(/\s+/g, "");
   expect(renderedReasoning).toBe(expected.reasoning.replace(/\s+/g, ""));
   const thinkingBody = page.locator(".thinking-md").last();
@@ -123,6 +192,16 @@ test("trace toggles remain usable and upward scrolling is preserved while tokens
   await showLess.click();
   await expect(showMore).toHaveAttribute("aria-expanded", "false");
   await expect.poll(() => thinkingBody.evaluate((node) => node.clientHeight)).toBeLessThanOrEqual(clampedHeight + 1);
+  await page.getByRole("button", { name: "Switch to Chinese", exact: true }).click();
+  await expect(page.getByRole("button", { name: "展开更多", exact: true })).toHaveAttribute("aria-expanded", "false");
+  await page.getByRole("button", { name: "展开更多", exact: true }).click();
+  await expect(page.getByRole("button", { name: "收起内容", exact: true })).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("button", { name: "回到最新", exact: true })).toBeVisible();
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  expect(await page.locator(".jump-to-latest").evaluate((node) => parseFloat(getComputedStyle(node).transitionDuration))).toBeLessThan(0.001);
+  await page.getByRole("button", { name: "回到最新", exact: true }).click();
+  await expect(page.getByRole("button", { name: "回到最新", exact: true })).toBeHidden();
+  await expect.poll(() => scroller.evaluate((node) => node.scrollHeight - node.scrollTop - node.clientHeight)).toBeLessThan(100);
   expect(escapedWrites).toEqual([]);
   await testInfo.attach("streaming-interaction-metrics.json", { body: JSON.stringify(metrics), contentType: "application/json" });
 });
