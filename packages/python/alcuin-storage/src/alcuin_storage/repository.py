@@ -37,13 +37,14 @@ from .errors import (
     TaskRevisionConflict,
     TaskTransitionConflict,
 )
+from .human_inputs import HumanInputStorage
 
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:20]}"
 
 
-class SqlRepository:
+class SqlRepository(HumanInputStorage):
     """Shared SQL behavior; concrete adapters own connections and migrations."""
 
     _SUMMARY_DEFAULT_LIMIT = 50
@@ -1557,7 +1558,7 @@ class SqlRepository:
                 )
             active = self._one(
                 """SELECT id FROM runs WHERE workspace_id = ? AND thread_id = ?
-                AND status IN ('queued', 'running', 'waiting_for_approval') LIMIT 1""",
+                AND status IN ('queued', 'running', 'waiting_for_approval', 'waiting_for_input') LIMIT 1""",
                 (workspace_id, thread_id),
             )
             if active is not None:
@@ -2529,31 +2530,28 @@ class SqlRepository:
         self, workspace_id: str, run_id: str, event_type: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         with self.lock, self.connection:
-            row = self._one(
-                """UPDATE runs
-                SET next_event_sequence = next_event_sequence + 1
-                WHERE workspace_id = ? AND id = ?
-                RETURNING next_event_sequence AS value""",
-                (workspace_id, run_id),
-            )
-            if row is None:
-                raise RepositoryConflict("Run does not exist in this Workspace")
-            sequence = int(row["value"])
-            event_id, created_at = new_id("evt"), utc_now()
-            self.connection.execute(
-                """INSERT INTO events
-                (id, workspace_id, run_id, sequence, type, payload_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    event_id,
-                    workspace_id,
-                    run_id,
-                    sequence,
-                    event_type,
-                    self._json(payload),
-                    created_at,
-                ),
-            )
+            return self._append_event_locked(workspace_id, run_id, event_type, payload)
+
+    def _append_event_locked(
+        self, workspace_id: str, run_id: str, event_type: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Append within an existing transaction, including an approval decision."""
+        row = self._one(
+            """UPDATE runs SET next_event_sequence = next_event_sequence + 1
+            WHERE workspace_id = ? AND id = ?
+            RETURNING next_event_sequence AS value""",
+            (workspace_id, run_id),
+        )
+        if row is None:
+            raise RepositoryConflict("Run does not exist in this Workspace")
+        sequence = int(row["value"])
+        event_id, created_at = new_id("evt"), utc_now()
+        self.connection.execute(
+            """INSERT INTO events
+            (id, workspace_id, run_id, sequence, type, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, workspace_id, run_id, sequence, event_type, self._json(payload), created_at),
+        )
         return {
             "id": event_id,
             "run_id": run_id,
@@ -2619,6 +2617,42 @@ class SqlRepository:
         )
         return [self._citation_event_projection(row) for row in rows]
 
+    def list_thread_approval_events(
+        self, workspace_id: str, thread_id: str, run_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Restore human decisions without loading reasoning or tool result bodies."""
+        selected_ids = list(dict.fromkeys(run_ids))
+        if len(selected_ids) > 50:
+            raise ValueError("At most 50 Runs may be projected per Thread page")
+        if not selected_ids:
+            return []
+        placeholders = ",".join("?" for _ in selected_ids)
+        rows = self._all(
+            f"""SELECT * FROM (
+                SELECT e.id, e.run_id, e.sequence, e.type, e.created_at,
+                  CASE WHEN e.type = 'tool.completed' THEN jsonb_build_object(
+                    'tool', e.payload_json::jsonb->'tool',
+                    'call_id', e.payload_json::jsonb->'call_id',
+                    'status', e.payload_json::jsonb->'status'
+                  )::text ELSE e.payload_json END AS payload_json,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY e.run_id ORDER BY e.sequence
+                ) AS approval_rank
+                FROM events e JOIN runs r
+                  ON r.id = e.run_id AND r.workspace_id = e.workspace_id
+                WHERE e.workspace_id = ? AND r.thread_id = ?
+                  AND e.run_id IN ({placeholders})
+                  AND (e.type IN ('approval.required', 'approval.decided') OR
+                    (e.type = 'tool.completed' AND EXISTS (
+                        SELECT 1 FROM approvals a WHERE a.workspace_id = e.workspace_id
+                          AND a.run_id = e.run_id
+                          AND a.request_json::jsonb->>'call_id' = e.payload_json::jsonb->>'call_id'
+                    )))
+            ) selected WHERE approval_rank <= 128 ORDER BY run_id, sequence""",
+            (workspace_id, thread_id, *selected_ids),
+        )
+        return [self._citation_event_projection(row) for row in rows]
+
     @staticmethod
     def _citation_event_projection(row: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -2666,13 +2700,53 @@ class SqlRepository:
     def decide_approval(
         self, workspace_id: str, approval_id: str, decision: str, note: str | None
     ) -> dict[str, Any] | None:
+        if decision not in {"approved", "denied"}:
+            raise ValueError("Approval decision must be approved or denied")
+        self._validate_no_raw_secrets(note)
+        decided_at = utc_now()
         with self.lock, self.connection:
+            approval = self._one(
+                "SELECT * FROM approvals WHERE workspace_id = ? AND id = ? FOR UPDATE",
+                (workspace_id, approval_id),
+            )
+            if not approval or approval["status"] != "pending":
+                return None
+            run = self._one(
+                "SELECT status FROM runs WHERE workspace_id = ? AND id = ? FOR UPDATE",
+                (workspace_id, approval["run_id"]),
+            )
+            if not run or run["status"] != "waiting_for_approval":
+                raise RepositoryConflict("Run is no longer waiting for approval")
             cursor = self.connection.execute(
                 """UPDATE approvals SET status = ?, note = ?, decided_at = ?
                 WHERE workspace_id = ? AND id = ? AND status = 'pending'""",
-                (decision, note, utc_now(), workspace_id, approval_id),
+                (decision, note, decided_at, workspace_id, approval_id),
             )
+            self._record_approval_decision_locked(approval, decision, note, decided_at)
         return self.get_approval(workspace_id, approval_id) if cursor.rowcount else None
+
+    def _record_approval_decision_locked(
+        self, approval: Mapping[str, Any], decision: str, note: str | None, decided_at: str
+    ) -> None:
+        request = self._decoded_json(approval["request_json"])
+        self._append_event_locked(
+            str(approval["workspace_id"]), str(approval["run_id"]), "approval.decided",
+            {
+                "approval_id": approval["id"], "decision": decision,
+                "note": note, "decided_at": decided_at,
+                "tool": request.get("tool"), "call_id": request.get("call_id"),
+            },
+        )
+        # Close the decision/restart gap. A crash after authorization must be
+        # recovered as interrupted, never silently replay a possible mutation.
+        run = self._one(
+            """UPDATE runs SET status = 'running'
+            WHERE workspace_id = ? AND id = ? AND status = 'waiting_for_approval'
+            RETURNING id""",
+            (approval["workspace_id"], approval["run_id"]),
+        )
+        if run is None:
+            raise RepositoryConflict("Run is no longer waiting for approval")
 
     def decide_task_approval(
         self,
@@ -2691,6 +2765,7 @@ class SqlRepository:
         """
         if decision not in {"approved", "denied"}:
             raise ValueError("Approval decision must be approved or denied")
+        self._validate_no_raw_secrets(note)
         decided_at = utc_now()
         with self.lock, self.connection:
             approval = self._one(
@@ -2777,6 +2852,7 @@ class SqlRepository:
                 checkpoint_attempt_id=attempt_id,
             )
             approval_result = dict(approval)
+            self._record_approval_decision_locked(approval, decision, note, decided_at)
             approval_result["status"] = decision
             approval_result["note"] = note
             approval_result["decided_at"] = decided_at

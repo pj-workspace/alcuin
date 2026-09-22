@@ -45,6 +45,7 @@ class ToolDefinition:
     timeout_seconds: float = 15.0
     max_calls_per_run: int = 4
     available: bool = True
+    interaction: str | None = None
 
     @property
     def provider_name(self) -> str:

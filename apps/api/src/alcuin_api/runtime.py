@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import base64
 import hashlib
 import json
-import os
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Protocol, TypedDict
 
 import httpx
@@ -25,10 +25,11 @@ from .context_composition import (
     RunContextComposer,
     public_context_assembly,
 )
-from .security import redact_sensitive, redact_text
+from .security import configured_secrets, redact_sensitive, redact_text
 from .tools import ToolContext, ToolError, ToolExecutor
 from .artifact_stream import ArtifactStream, OUTPUT_PROTOCOL, final_answer_committed
 from .evidence import RunCitationRegistry
+from alcuin_core.human_input import HumanQuestion
 
 
 SKILL_RUNTIME_TOOL_IDS = ("skill.load", "skill.read_resource")
@@ -72,6 +73,8 @@ class RuntimeRequest:
     reasoning_effort: ReasoningEffort | str | None = None
     requested_tool: dict[str, Any] | None = None
     include_workspace_preferences: bool = True
+    interactive: bool = False
+    continuation: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         model = (self.effective_model or self.definition.model.model).strip()
@@ -131,6 +134,8 @@ class AttachmentResolver(Protocol):
 class RuntimeEmission:
     type: EventType
     payload: dict[str, Any]
+    # Adapter-private state; never serialized into an ExecutionEvent.
+    continuation: dict[str, Any] | None = None
 
 
 def _provider_failure(reason: str) -> RuntimeEmission:
@@ -193,11 +198,13 @@ def _conversation(request: RuntimeRequest) -> list[dict[str, Any]]:
 
 
 def _runtime_tool_names(request: RuntimeRequest) -> tuple[str, ...]:
-    """Add platform Skill loaders only when this exact Agent binds Skills.
+    """Gate platform questions on the host's interaction boundary and Skill loaders on bindings.
 
     Skill metadata never participates in this decision and therefore cannot expand access.
     """
-    names = list(request.definition.tools)
+    names = [name for name in request.definition.tools if name != "human.ask"]
+    if request.interactive:
+        names.append("human.ask")
     if request.definition.skills:
         names.extend(SKILL_RUNTIME_TOOL_IDS)
     return tuple(dict.fromkeys(names))
@@ -332,6 +339,7 @@ class OpenAICompatibleRuntime:
         conversation: list[dict[str, Any]],
         *,
         responses_protocol: bool,
+        references_only: bool = False,
     ) -> None:
         images = [
             attachment
@@ -359,7 +367,7 @@ class OpenAICompatibleRuntime:
                         "text": text,
                     }
                 ]
-            data_url = self._image_data_url(request, attachment)
+            data_url = f"alcuin-attachment://{attachment.id}" if references_only else self._image_data_url(request, attachment)
             if responses_protocol:
                 message["content"].append(
                     {"type": "input_image", "image_url": data_url}
@@ -384,10 +392,10 @@ class OpenAICompatibleRuntime:
         ):
             provider = replace(provider, protocol="chat_completions")
         runtime_tool_names = _runtime_tool_names(request)
-        if runtime_tool_names and self.tool_executor.provider_schemas(
+        if request.continuation or (runtime_tool_names and self.tool_executor.provider_schemas(
             runtime_tool_names,
             workspace_id=request.workspace_id,
-        ):
+        )):
             provider = replace(provider, protocol="chat_completions")
         if provider.protocol == "chat_completions":
             async for emission in self._chat_completions(request, provider):
@@ -494,13 +502,16 @@ class OpenAICompatibleRuntime:
         url = f"{provider.base_url.rstrip('/')}/chat/completions"
         conversation = _conversation(request)
         if any(attachment.kind == "image" for attachment in request.attachments):
-            self._inject_images(request, conversation, responses_protocol=False)
+            self._inject_images(request, conversation, responses_protocol=False, references_only=True)
         for message in conversation:
             message.pop("id", None)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": _system_prompt(request)},
             *conversation,
         ]
+        continuation = request.continuation or {}
+        if continuation:
+            messages = copy.deepcopy(continuation["messages"])
         runtime_tool_names = _runtime_tool_names(request)
         tool_definitions = self.tool_executor.definitions(
             runtime_tool_names,
@@ -512,14 +523,36 @@ class OpenAICompatibleRuntime:
             thread_context=request.thread_context,
             knowledge_source_ids=tuple(request.definition.knowledge),
         )
-        tool_call_counts: dict[str, int] = {}
-        citations = RunCitationRegistry(request.run_id)
+        tool_call_counts: dict[str, int] = dict(continuation.get("tool_call_counts") or {})
+        citations = RunCitationRegistry(request.run_id, events=continuation.get("citation_events") or [])
+        image_refs = {attachment.id: attachment for attachment in request.attachments}
+        image_urls: dict[str, str] = {}
+
+        def provider_messages() -> list[dict[str, Any]]:
+            resolved = copy.deepcopy(messages)
+            for message in resolved:
+                if not isinstance(message.get("content"), list):
+                    continue
+                for part in message["content"]:
+                    if part.get("type") != "image_url":
+                        continue
+                    url = part.get("image_url", {}).get("url", "")
+                    if not url.startswith("alcuin-attachment://"):
+                        continue
+                    attachment_id = url.removeprefix("alcuin-attachment://")
+                    attachment = image_refs.get(attachment_id)
+                    if attachment is None:
+                        raise RuntimeError("Continuation attachment is unavailable")
+                    if attachment_id not in image_urls:
+                        image_urls[attachment_id] = self._image_data_url(request, attachment)
+                    part["image_url"]["url"] = image_urls[attachment_id]
+            return resolved
         headers = {"Authorization": f"Bearer {provider.api_key}"}
         async with httpx.AsyncClient(timeout=90, transport=self.transport) as client:
-            for _step in range(request.definition.runtime.max_steps):
+            for _step in range(int(continuation.get("next_step", 0)), request.definition.runtime.max_steps):
                 payload: dict[str, Any] = {
                     "model": request.effective_model or provider.default_model,
-                    "messages": messages,
+                    "messages": provider_messages(),
                     "stream": True,
                     "max_tokens": self.settings.context_reserved_output_tokens,
                 }
@@ -694,7 +727,7 @@ class OpenAICompatibleRuntime:
                     }
                 )
 
-                for call in normalized_calls:
+                for call_index, call in enumerate(normalized_calls):
                     call_id = str(call["id"])
                     function = call["function"]
                     provider_name = str(function["name"])
@@ -808,6 +841,27 @@ class OpenAICompatibleRuntime:
                             )
                             continue
                         tool_call_counts[name] = previous_calls + 1
+
+                    if definition and definition.interaction == "question" and request.interactive:
+                        try:
+                            question = HumanQuestion.model_validate(arguments).model_dump()
+                            if _step + 1 >= request.definition.runtime.max_steps:
+                                raise ValueError("No remaining steps to continue after a question")
+                        except ValueError:
+                            error_message = "Question is invalid or there is no remaining step to continue."
+                            yield RuntimeEmission(EventType.TOOL_COMPLETED, {"tool": name, "call_id": call_id, "status": "failed", "error": {"code": "invalid_question", "message": error_message}, "duration_ms": 0})
+                            messages.append({"role": "tool", "tool_call_id": call_id, "content": json.dumps({"error": error_message})})
+                            continue
+                        # Siblings are not executed while user intent is unknown.
+                        # Preserve a valid transcript and let the model request
+                        # them again, without ever replaying completed operations.
+                        for sibling in normalized_calls[call_index + 1:]:
+                            messages.append({"role": "tool", "tool_call_id": sibling["id"], "content": json.dumps({"status": "deferred", "message": "Not executed. Request again after the user's answer if still needed."})})
+                        yield RuntimeEmission(EventType.INPUT_REQUIRED, {**question, "call_id": call_id}, continuation={
+                            "adapter": "openai-chat-v1", "messages": messages,
+                            "next_step": _step + 1, "tool_call_counts": tool_call_counts,
+                        })
+                        return
 
                     if definition and definition.mutating:
                         policy = request.definition.policies.mutating_tools
@@ -945,17 +999,7 @@ class RuntimeOrchestrator:
         self.store = store
         self.settings = settings
         self.tool_executor = tool_executor or ToolExecutor()
-        self.sensitive_values = (
-            settings.openai_api_key,
-            settings.deepseek_api_key,
-            settings.dashscope_api_key,
-            settings.qdrant_api_key,
-            *(
-                value
-                for key, value in os.environ.items()
-                if key.startswith("ALCUIN_SECRET_")
-            ),
-        )
+        self.sensitive_values = configured_secrets(settings)
         self.provider_runtime: AgentRuntime = OpenAICompatibleRuntime(
             settings,
             transport=provider_transport,
@@ -1118,7 +1162,7 @@ class RuntimeOrchestrator:
             attachments=tuple(selected_images),
         )
 
-    async def execute(self, request: RuntimeRequest) -> None:
+    def _start_run(self, request: RuntimeRequest) -> None:
         self.store.set_run_status(request.workspace_id, request.run_id, "running")
         self.store.append_event(
             request.workspace_id,
@@ -1157,9 +1201,19 @@ class RuntimeOrchestrator:
                 "invocation": "requested_tool" if request.requested_tool else "agent",
             },
         )
-        visible_text: list[str] = []
+    async def execute(self, request: RuntimeRequest) -> None:
+        if request.continuation is None:
+            self._start_run(request)
+        else:
+            self.store.set_run_status(request.workspace_id, request.run_id, "running")
+        visible_text: list[str] = [
+            str(event["payload"].get("delta") or "")
+            for event in (self.store.list_events(request.workspace_id, request.run_id) if request.continuation else [])
+            if event["type"] == "message.delta"
+        ]
         try:
-            request = await self._assemble_context(request)
+            if request.continuation is None:
+                request = await self._assemble_context(request)
             if request.requested_tool:
                 await self.execute_requested_tool(request)
                 return
@@ -1167,6 +1221,33 @@ class RuntimeOrchestrator:
             runtime = self.provider_runtime if provider.api_key else self.demo_runtime
             async for emission in runtime.stream(request):
                 payload = self.redact_payload(emission.payload)
+                if emission.type == EventType.INPUT_REQUIRED:
+                    if not request.interactive or not emission.continuation:
+                        raise RuntimeError("Runtime did not supply a question continuation")
+                    checkpoint = copy.deepcopy(emission.continuation)
+                    for message in checkpoint["messages"]:
+                        if message.get("role") == "tool":
+                            try:
+                                data = json.loads(message["content"])
+                                message["content"] = json.dumps(self.redact_payload(data) if isinstance(data, (dict, list)) else data, ensure_ascii=False)
+                            except (ValueError, TypeError):
+                                pass
+                        for call in message.get("tool_calls") or []:
+                            try:
+                                data = json.loads(call["function"]["arguments"])
+                                if isinstance(data, dict):
+                                    call["function"]["arguments"] = json.dumps(self.redact_payload(data), ensure_ascii=False)
+                            except (ValueError, TypeError):
+                                pass
+                    checkpoint = json.loads(redact_text(json.dumps(checkpoint, ensure_ascii=False), self.sensitive_values))
+                    checkpoint["request"] = {
+                        "effective_model": request.effective_model,
+                        "reasoning_effort": str(request.reasoning_effort),
+                        "current_message_id": request.current_message_id,
+                        "attachments": [asdict(attachment) for attachment in request.attachments],
+                    }
+                    self.store.suspend_run_for_input(request.workspace_id, request.run_id, payload, checkpoint)
+                    return
                 if emission.type == EventType.MESSAGE_DELTA:
                     delta = payload.get("delta")
                     if isinstance(delta, str):
@@ -1417,6 +1498,37 @@ class RuntimeOrchestrator:
             },
         )
 
+    async def resume_after_input(self, record: dict[str, Any]) -> None:
+        workspace_id, run_id = record["workspace_id"], record["run_id"]
+        try:
+            run = self.store.get_run(workspace_id, run_id)
+            if not run:
+                raise RuntimeError("Run is unavailable")
+            version = self.store.get_agent_version(workspace_id, run["agent_version_id"])
+            thread = self.store.get_thread(workspace_id, run["thread_id"])
+            if not version or not thread:
+                raise RuntimeError("Conversation is unavailable")
+            checkpoint = record["continuation"]
+            if checkpoint.get("adapter") != "openai-chat-v1":
+                raise RuntimeError("Question continuation adapter is unavailable")
+            profile = checkpoint.pop("request")
+            checkpoint["citation_events"] = self.store.list_run_citation_events(workspace_id, run_id)
+            checkpoint["messages"].append({
+                "role": "tool", "tool_call_id": record["question"]["call_id"],
+                "content": json.dumps({"input_id": record["id"], "question": record["question"]["question"], **record["answer"], "notice": "This is clarification from the user, not permission for external actions."}, ensure_ascii=False),
+            })
+            attachments = tuple(RuntimeAttachmentRef(**ref) for ref in profile.pop("attachments"))
+            await self.execute(RuntimeRequest(
+                workspace_id=workspace_id, run_id=run_id, prompt=run["input"],
+                thread_context=thread["context"], definition=AgentDefinition.model_validate(version["definition"]),
+                attachments=attachments, interactive=True, continuation=checkpoint, **profile,
+            ))
+        except Exception as exc:
+            partial = "".join(str(event["payload"].get("delta") or "") for event in self.store.list_events(workspace_id, run_id) if event["type"] == "message.delta")
+            self._finalize_terminal(workspace_id, run_id, "failed", partial, EventType.RUN_FAILED, {
+                "code": "input_resume_failed", "message": redact_text(str(exc), self.sensitive_values)[:500],
+            })
+
     async def resume_after_approval(
         self,
         workspace_id: str,
@@ -1571,6 +1683,7 @@ class RuntimeOrchestrator:
                 EventType.TOOL_COMPLETED,
                 {
                     "tool": tool,
+                    "call_id": str(request_payload.get("call_id") or f"approved_{run_id}"),
                     "status": "denied",
                     "result_summary": "Operation denied by the user.",
                 },

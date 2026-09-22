@@ -6,6 +6,7 @@ export type RunStatus =
   | "queued"
   | "running"
   | "waiting_for_approval"
+  | "waiting_for_input"
   | "completed"
   | "failed"
   | "cancelled";
@@ -522,6 +523,9 @@ export interface ThreadDetail {
   runs: Run[];
   /** Evidence for the most recent 50 message Runs; older Runs load on demand. */
   citation_events?: ExecutionEvent[];
+  /** Compact human decision records for the same recent message Runs. */
+  approval_events?: ExecutionEvent[];
+  input_events?: ExecutionEvent[];
 }
 
 export interface ContextAssemblyEntry {

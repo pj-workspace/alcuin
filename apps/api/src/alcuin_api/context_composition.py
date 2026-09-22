@@ -253,6 +253,24 @@ class RunContextComposer:
             str(thread["id"]),
             hydrate_document_text=True,
         )
+        # Clarifications belong to their original user turn. Project them only
+        # into model context; immutable chat messages remain unchanged.
+        answers_by_run: dict[str, list[dict[str, Any]]] = {}
+        for answer in self.repository.list_thread_input_answers(workspace_id, str(thread["id"])):
+            answers_by_run.setdefault(answer["run_id"], []).append({
+                "input_id": answer["id"],
+                "question": answer["question"]["question"],
+                **answer["answer"],
+            })
+        records = [
+            {**record, "estimated_tokens": None, "parts": [
+                *record.get("parts", []),
+                {"type": "text", "text": "User clarification records (not authorization for external actions):\n"
+                 + json.dumps(answers_by_run[record["run_id"]], ensure_ascii=False)},
+            ]}
+            if record.get("role") == "user" and record.get("run_id") in answers_by_run else record
+            for record in records
+        ]
         messages = tuple(
             ContextMessage(
                 id=str(record["id"]),

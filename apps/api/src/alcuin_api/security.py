@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -47,6 +48,15 @@ def redact_text(value: str, secrets: Iterable[str | None]) -> str:
         if secret:
             redacted = redacted.replace(secret, "[REDACTED]")
     return redacted
+
+
+def configured_secrets(settings: Settings) -> tuple[str | None, ...]:
+    """Values to redact at both execution and human-input boundaries."""
+    return (
+        settings.openai_api_key, settings.deepseek_api_key,
+        settings.dashscope_api_key, settings.qdrant_api_key,
+        *(value for key, value in os.environ.items() if key.startswith("ALCUIN_SECRET_")),
+    )
 
 
 def _b64encode(value: bytes) -> str:

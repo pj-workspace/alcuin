@@ -121,7 +121,9 @@ async def chat_completions_fixture(request: Request) -> StreamingResponse:
 
     event: dict[str, Any] | None = None
     if last_message.get("role") != "tool":
-        if (
+        if "ask my audience" in prompt and "human_ask" in tools:
+            event = provider_tool_call("human_ask", {"question": "Who will read the report?", "options": ["Engineering", "Management"]})
+        elif (
             any(term in prompt for term in ("update", "修改", "更新"))
             and "ops_update_ticket" in tools
         ):
