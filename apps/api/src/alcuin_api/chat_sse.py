@@ -35,6 +35,7 @@ def project_execution_event(event: dict[str, Any]) -> list[dict[str, Any]]:
         return [{
             **common,
             "type": "tool-call",
+            "call_id": payload.get("call_id"),
             "name": payload.get("tool", "tool"),
             "input": payload.get("arguments", {}),
             "summary": payload.get("summary", "Tool requested"),
@@ -44,12 +45,17 @@ def project_execution_event(event: dict[str, Any]) -> list[dict[str, Any]]:
         return [{
             **common,
             "type": "tool-result",
+            "call_id": payload.get("call_id"),
             "name": payload.get("tool", "tool"),
             "status": "success" if payload.get("status") == "succeeded" else payload.get("status", "error"),
             "outputPreview": payload.get("result_summary", ""),
         }]
     if event_type == EventType.APPROVAL_REQUIRED:
         return [{**common, "type": "approval-required", **payload}]
+    if event_type == EventType.APPROVAL_DECIDED:
+        return [{**common, "type": "approval-decided", **payload}]
+    if event_type in {EventType.INPUT_REQUIRED, EventType.INPUT_ANSWERED}:
+        return [{**common, "type": "input-required" if event_type == EventType.INPUT_REQUIRED else "input-answered", **payload}]
     if event_type == EventType.ARTIFACT_UPDATED:
         return [{**common, "type": "artifact-updated", **payload}]
     if event_type == EventType.CITATION_CREATED:

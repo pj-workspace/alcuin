@@ -293,10 +293,14 @@ export function createAlcuinClient(options: AlcuinClientOptions) {
         },
       }),
     }),
-  decideApproval: (runId: string, approvalId: string, decision: "approved" | "denied") =>
+  answerInput: (runId: string, inputId: string, answer: string, skip = false) =>
+    request(`/v1/runs/${resourceId(runId)}/inputs/${resourceId(inputId)}`, {
+      method: "POST", body: JSON.stringify({ answer, skip }),
+    }),
+  decideApproval: (runId: string, approvalId: string, decision: "approved" | "denied", note?: string) =>
     request(`/v1/runs/${runId}/approvals/${approvalId}`, {
       method: "POST",
-      body: JSON.stringify({ decision }),
+      body: JSON.stringify({ decision, ...(note?.trim() ? { note: note.trim() } : {}) }),
     }),
   createAgentVersion: (agentId: string, definition: Agent["definition"]) =>
     request<Agent>(`/v1/agents/${resourceId(agentId)}/versions`, {
@@ -639,20 +643,27 @@ export function executionEventFromChatFrame(value: unknown): ExecutionEvent | nu
   if (row.type === "thinking-delta") return { ...base, type: "reasoning.delta", payload: { delta: row.textDelta } };
   if (row.type === "text-delta") return { ...base, type: "message.delta", payload: { delta: row.textDelta } };
   if (row.type === "tool-call") return { ...base, type: "tool.requested", payload: {
+    ...(typeof row.call_id === "string" ? { call_id: row.call_id } : {}),
     tool: row.name,
     arguments: row.input,
     summary: row.summary,
     mutating: row.mutating,
   } };
   if (row.type === "tool-result") return { ...base, type: "tool.completed", payload: {
+    ...(typeof row.call_id === "string" ? { call_id: row.call_id } : {}),
     tool: row.name,
     status: row.status === "success" ? "succeeded" : row.status,
     result_summary: row.outputPreview,
   } };
-  if (row.type === "approval-required") {
+  if (row.type === "approval-required" || row.type === "approval-decided") {
     const { type: _type, eventId: _eventId, runId: _runId, sequence: _sequence, timestamp: _timestamp, ...payload } = row;
     void _type; void _eventId; void _runId; void _sequence; void _timestamp;
-    return { ...base, type: "approval.required", payload };
+    return { ...base, type: row.type === "approval-required" ? "approval.required" : "approval.decided", payload };
+  }
+  if (row.type === "input-required" || row.type === "input-answered") {
+    const { type: _type, eventId: _eventId, runId: _runId, sequence: _sequence, timestamp: _timestamp, ...payload } = row;
+    void _type; void _eventId; void _runId; void _sequence; void _timestamp;
+    return { ...base, type: row.type === "input-required" ? "input.required" : "input.answered", payload };
   }
   if (row.type === "artifact-updated") return { ...base, type: "artifact.updated", payload: { artifact: row.artifact } };
   if (row.type === "source-registry") return { ...base, type: "citation.created", payload: Array.isArray(row.sources) ? row.sources[0] ?? {} : {} };

@@ -20,3 +20,10 @@ test("the active turn always participates in live layout measurement", () => {
   assert.match(activeTurnRule, /content-visibility:\s*visible/);
   assert.match(activeTurnRule, /contain-intrinsic-size:\s*none/);
 });
+
+test("the latest-content control does not change layout or create a scroll animation queue", () => {
+  const control = css.match(/\.jump-to-latest\s*\{[^}]+\}/)?.[0] ?? "";
+  assert.match(control, /position:\s*absolute/);
+  assert.match(control, /transition:\s*opacity 180ms[^;]*transform 180ms/);
+  assert.doesNotMatch(control, /transition:[^;]*(?:height|width|bottom|top)/);
+});

@@ -18,6 +18,9 @@ test("the natural content wrapper preserves full text, edge spacing, and existin
   assert.match(component, /\{rendered\}\s*<\/ReactMarkdown>/);
   assert.match(component, /maxHeight: clamped \? SOFT_MAX_HEIGHT_PX : contentHeight/);
   assert.match(component, /aria-expanded=\{expanded\}/);
+  assert.match(component, /aria-controls=\{contentId\}/);
+  assert.match(component, /id=\{contentId\}/);
+  assert.match(component, /t\(expanded \? "Show less" : "Show more"\)/);
   assert.match(css, /\.thinking-md-content \{ display: flow-root; \}/);
   assert.match(css, /\.thinking-md-content > :first-child \{ margin-top: 0 !important; \}/);
   assert.match(css, /\.thinking-md-content > :last-child \{ margin-bottom: 0 !important; \}/);

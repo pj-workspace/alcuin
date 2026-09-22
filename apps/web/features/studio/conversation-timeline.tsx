@@ -19,6 +19,7 @@ export function ConversationTimeline({
   spacerPx,
   onCopy,
   onDecision,
+  onAnswer,
   emptyState,
 }: {
   turns: ConversationTurnModel[];
@@ -31,7 +32,8 @@ export function ConversationTimeline({
   endRef: RefObject<HTMLElement | null>;
   spacerPx: number;
   onCopy: (text: string) => void | Promise<void>;
-  onDecision: (runId: string, approvalId: string, decision: "approved" | "denied") => void;
+  onDecision: (runId: string, approvalId: string, decision: "approved" | "denied", note?: string) => Promise<void>;
+  onAnswer: (runId: string, inputId: string, answer: string, skip: boolean) => Promise<void>;
   emptyState?: ReactNode;
 }) {
   const { t } = useI18n();
@@ -56,6 +58,7 @@ export function ConversationTimeline({
           agentRef={index === latestIndex ? endRef : undefined}
           onCopy={onCopy}
           onDecision={onDecision}
+          onAnswer={onAnswer}
         />
       ))}
       <div className="turn-stream-spacer" style={{ height: spacerPx }} aria-hidden />

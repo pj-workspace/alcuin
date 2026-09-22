@@ -33,6 +33,9 @@ class EventType(StrEnum):
     TOOL_REQUESTED = "tool.requested"
     TOOL_COMPLETED = "tool.completed"
     APPROVAL_REQUIRED = "approval.required"
+    APPROVAL_DECIDED = "approval.decided"
+    INPUT_REQUIRED = "input.required"
+    INPUT_ANSWERED = "input.answered"
     ARTIFACT_UPDATED = "artifact.updated"
     CITATION_CREATED = "citation.created"
     RUN_COMPLETED = "run.completed"
@@ -266,6 +269,8 @@ class ThreadDetail(StrictModel):
     messages: list[dict[str, Any]]
     runs: list[dict[str, Any]]
     citation_events: list[ExecutionEvent] = Field(default_factory=list, max_length=6_400)
+    approval_events: list[ExecutionEvent] = Field(default_factory=list, max_length=6_400)
+    input_events: list[ExecutionEvent] = Field(default_factory=list, max_length=400)
 
     @model_validator(mode="after")
     def validate_citation_scope(self) -> "ThreadDetail":
@@ -275,6 +280,14 @@ class ThreadDetail(StrictModel):
             for event in self.citation_events
         ):
             raise ValueError("Thread evidence must contain only this Thread's Run citations")
+        if any(
+            event.type not in {EventType.APPROVAL_REQUIRED, EventType.APPROVAL_DECIDED, EventType.TOOL_COMPLETED}
+            or event.run_id not in run_ids
+            for event in self.approval_events
+        ):
+            raise ValueError("Thread decisions must contain only this Thread's approval records")
+        if any(event.type not in {EventType.INPUT_REQUIRED, EventType.INPUT_ANSWERED} or event.run_id not in run_ids for event in self.input_events):
+            raise ValueError("Thread questions must contain only this Thread's input records")
         return self
 
 

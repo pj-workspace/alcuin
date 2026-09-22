@@ -1,5 +1,54 @@
 # Release readiness
 
+## Human interaction and mobile reading slice
+
+This slice targets `develop`, with no production deployment or product-version
+management changes.
+
+- Studio can ask a necessary clarification, accept a choice or free-text answer,
+  or continue after an explicit skip. Questions survive refresh; continuation
+  stays in the same Run without replaying completed tools or resetting budgets.
+- Approval cards distinguish permission from the actual operation result, retain
+  decisions and reasons after refresh, and reject duplicate/stale decisions.
+- Manual upward scrolling preserves the reading position while output arrives;
+  Back to latest restores following. Hidden mobile panels retain their position.
+- The mobile composer uses one toolbar row and a labelled settings panel for
+  model, thinking effort, and context. Desktop controls stay inline.
+- Inactive orbs and collapsed trace loops stop animating; active feedback and
+  disclosure transitions remain, with reduced-motion and keyboard support.
+
+Apply migration `20260922_0012` before starting the new API against an existing
+database. Do not downgrade with unanswered questions. The checkpoint is private
+runtime state, not a public event or a credential-entry mechanism.
+
+Local verification on 2026-09-22: 388 Python tests passed (one existing Starlette
+deprecation warning); the focused desktop/mobile suite below passed 30 cases
+with four device-conditional skips. Workspace tests, type checks, lint, and
+production builds passed. This is scoped acceptance, not a claim that every
+browser test in the repository was rerun.
+
+Verification commands (run service-wrapped commands sequentially):
+
+```sh
+pnpm test
+pnpm -r test
+pnpm -r lint
+pnpm -r build
+./scripts/with-test-services.sh pnpm test:e2e:run tests/e2e/studio.spec.ts tests/e2e/approval-interaction.spec.ts tests/e2e/question-interaction.spec.ts tests/e2e/mobile-composer.spec.ts tests/e2e/streaming-performance.spec.ts --workers=1
+```
+
+The browser suite uses an isolated database and deterministic provider fixtures;
+it does not establish external-model latency or physical-phone keyboard quality.
+Manual acceptance: ask for a report that needs clarification, answer or skip,
+refresh the receipt, inspect an approval before allowing it, and scroll upward
+during a long response. At 320/390px, open settings, change the model and thinking
+effort, and check that the next request uses those values.
+
+Known boundaries: Task/Embed questions and encrypted credential forms are not
+implemented. Mutation approval executes the authorized adapter and records its
+receipt, but does not resume a full multi-call model loop. Recovery after an
+answer has been claimed fails closed rather than replaying uncertain work.
+
 ## Planning and streaming experience slice
 
 This slice targets `develop`; it is not a production deployment or a new

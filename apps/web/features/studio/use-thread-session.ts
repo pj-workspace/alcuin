@@ -233,7 +233,7 @@ export function useThreadSession({
   ) => {
     const value = input.trim();
     if ((!value && attachments.length === 0) || !agent) return;
-    if (stateRef.current.phase === "submitting" || stateRef.current.phase === "streaming" || stateRef.current.phase === "waiting_for_approval") return;
+    if (["submitting", "streaming", "waiting_for_approval", "waiting_for_input"].includes(stateRef.current.phase)) return;
     const optimisticId = `optimistic-${crypto.randomUUID()}`;
     let connectedRun: Run | null = null;
     dispatch({ type: "turn.submitted", turn: optimisticTurn(optimisticId, value, attachments) });
@@ -260,7 +260,7 @@ export function useThreadSession({
 
   const runTool = useCallback(async (input: ToolRunInput, options: SendOptions = {}) => {
     if (!agent) return;
-    if (stateRef.current.phase === "submitting" || stateRef.current.phase === "streaming" || stateRef.current.phase === "waiting_for_approval") return;
+    if (["submitting", "streaming", "waiting_for_approval", "waiting_for_input"].includes(stateRef.current.phase)) return;
     const optimisticId = `optimistic-${crypto.randomUUID()}`;
     let connectedRun: Run | null = null;
     dispatch({ type: "turn.submitted", turn: optimisticTurn(optimisticId, input.label, []) });
@@ -306,7 +306,7 @@ export function useThreadSession({
     runTool,
     refresh,
     running: state.phase === "submitting" || state.phase === "streaming",
-    blocked: state.phase === "submitting" || state.phase === "streaming" || state.phase === "waiting_for_approval",
+    blocked: ["submitting", "streaming", "waiting_for_approval", "waiting_for_input"].includes(state.phase),
   };
 }
 

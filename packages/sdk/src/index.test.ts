@@ -9,6 +9,42 @@ import {
   taskEventFromCanonicalFrame,
 } from "./index.ts";
 
+test("question answers preserve workspace scope and both compact question frames", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const client = createAlcuinClient({ baseUrl: "https://agents.example.test", workspaceId: "ws_review", fetch: async (url, init) => {
+    calls.push({ url: String(url), init }); return Response.json({ status: "answered" });
+  } });
+  await client.answerInput("run/1", "input/1", "Engineering");
+  assert.equal(calls[0].url, "https://agents.example.test/v1/runs/run%2F1/inputs/input%2F1");
+  assert.equal(new Headers(calls[0].init?.headers).get("X-Alcuin-Workspace"), "ws_review");
+  assert.deepEqual(JSON.parse(String(calls[0].init?.body)), { answer: "Engineering", skip: false });
+  const common = { eventId: "e1", runId: "r1", sequence: 2, timestamp: "2026-09-22T00:00:00Z", input_id: "inp1" };
+  const question = executionEventFromChatFrame({ ...common, type: "input-required", question: "Audience?", options: ["Engineering"] });
+  const answer = executionEventFromChatFrame({ ...common, type: "input-answered", answer: "Engineering", skip: false });
+  assert.equal(question?.type, "input.required");
+  assert.equal(answer?.type, "input.answered");
+  assert.equal(answer?.payload.input_id, "inp1");
+  assert.equal(answer?.payload.answer, "Engineering");
+  assert.equal(answer?.payload.runId, undefined);
+});
+
+test("approval notes and compact decision/receipt frames preserve exact call identity", async () => {
+  let sent: unknown;
+  const client = createAlcuinClient({ baseUrl: "https://agents.example.test", workspaceId: "ws_review", fetch: async (_input, init) => {
+    sent = JSON.parse(String(init?.body));
+    return Response.json({ status: "denied" });
+  } });
+  await client.decideApproval("run1", "apr1", "denied", "  Wrong target  ");
+  assert.deepEqual(sent, { decision: "denied", note: "Wrong target" });
+  const common = { eventId: "evt1", runId: "run1", sequence: 4, timestamp: "2026-09-22T00:00:00Z" };
+  const decision = executionEventFromChatFrame({ ...common, type: "approval-decided", approval_id: "apr1", call_id: "call1", decision: "denied", note: "Wrong target" });
+  assert.equal(decision?.type, "approval.decided");
+  assert.deepEqual(decision?.payload, { approval_id: "apr1", call_id: "call1", decision: "denied", note: "Wrong target" });
+  const receipt = executionEventFromChatFrame({ ...common, type: "tool-result", name: "records.update", call_id: "call1", status: "success" });
+  assert.equal(receipt?.payload.call_id, "call1");
+  assert.equal(receipt?.payload.status, "succeeded");
+});
+
 test("thread naming is explicit, scoped, abortable, and never starts a Run", async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const controller = new AbortController();

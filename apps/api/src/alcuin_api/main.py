@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
@@ -9,6 +10,9 @@ from typing import Annotated, Literal
 from urllib.parse import quote
 
 import httpx
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.responses import JSONResponse
 from alcuin_knowledge import (
     DocumentParseError,
     DocumentParser,
@@ -120,7 +124,7 @@ from .context_composition import (
     persisted_user_parts,
     public_context_assembly,
 )
-from .security import RequestScope, issue_embed_token, resolve_scope
+from .security import RequestScope, configured_secrets, issue_embed_token, redact_text, resolve_scope
 from .chat_sse import project_execution_event
 from .tools import ToolExecutor, ToolRegistry
 from .tasks import (
@@ -131,6 +135,8 @@ from .tasks import (
     create_task_router,
 )
 from .skill_wiring import skill_tool_definitions
+from .human_input import human_question_tool
+from alcuin_core.human_input import HumanAnswer
 from .web_search_wiring import web_search_config, web_search_tool_definition
 from .run_profile import resolve_run_model_controls
 from .artifact_downloads import export_artifact
@@ -191,6 +197,7 @@ def create_app(
         timeout_seconds=settings.extension_health_timeout_seconds
     )
     definitions = list(skill_tool_definitions(repository))
+    definitions.append(human_question_tool())
     if web_search_service:
         definitions.append(web_search_tool_definition(web_search_service))
     if configured_knowledge_service:
@@ -1184,6 +1191,10 @@ def create_app(
             "messages": messages,
             "runs": runs,
             "citation_events": citation_events,
+            "approval_events": repository.list_thread_approval_events(
+                scope.workspace_id, thread_id, run_ids[-50:]
+            ),
+            "input_events": repository.list_thread_input_events(scope.workspace_id, thread_id, run_ids[-50:]),
         }
 
     @app.get("/v1/threads/{thread_id}/messages")
@@ -1371,6 +1382,7 @@ def create_app(
                 else None
             ),
             include_workspace_preferences=not scope.embed,
+            interactive=not scope.embed,
         )
         task = asyncio.create_task(app.state.runtime.execute(runtime_request))
         app.state.tasks.add(task)
@@ -1547,6 +1559,7 @@ def create_app(
                         "failed",
                         "cancelled",
                         "waiting_for_approval",
+                        "waiting_for_input",
                     }:
                         yield "data: [DONE]\n\n"
                         break
@@ -1560,6 +1573,36 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    @app.exception_handler(RequestValidationError)
+    async def safe_input_validation(request: Request, exc: RequestValidationError):
+        if re.fullmatch(r"/v1/runs/[^/]+/inputs/[^/]+", request.url.path):
+            # Validation errors can include the raw submitted body. An invalid
+            # answer must not echo accidentally pasted credentials to clients.
+            return JSONResponse(status_code=422, content={"detail": "Provide an answer of up to 4000 characters, or explicitly skip."})
+        return await request_validation_exception_handler(request, exc)
+
+    @app.post("/v1/runs/{run_id}/inputs/{input_id}", status_code=202)
+    async def answer_input(run_id: str, input_id: str, payload: HumanAnswer, scope: ScopeDependency) -> dict:
+        scope.require("run:create")
+        run = repository.get_run(scope.workspace_id, run_id)
+        if not run:
+            raise missing("Run")
+        require_run_agent(scope, run)
+        answer = payload.model_dump()
+        answer["answer"] = redact_text(answer["answer"], configured_secrets(settings))
+        try:
+            record = repository.answer_run_input(scope.workspace_id, run_id, input_id, answer)
+        except RepositoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Do not include credentials in an answer") from exc
+        if record is None:
+            raise missing("Question")
+        task = asyncio.create_task(app.state.runtime.resume_after_input(record))
+        app.state.tasks.add(task)
+        task.add_done_callback(app.state.tasks.discard)
+        return {"input_id": input_id, "run_id": run_id, "status": record["status"]}
+
     @app.post("/v1/runs/{run_id}/approvals/{approval_id}")
     async def decide_approval(
         run_id: str, approval_id: str, payload: ApprovalDecision, scope: ScopeDependency
@@ -1571,6 +1614,7 @@ def create_app(
             raise missing("Approval")
         require_run_agent(scope, run)
         task_link = repository.get_task_run_link(scope.workspace_id, run_id)
+        note = redact_text(payload.note.strip(), configured_secrets(settings)) if payload.note else None
         resumed_task = None
         if task_link is not None:
             # Approval and the owning Task cross the governed boundary in one
@@ -1581,21 +1625,28 @@ def create_app(
                     scope.workspace_id,
                     approval_id,
                     payload.decision,
-                    payload.note,
+                    note,
                 )
             except RepositoryConflict as exc:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=str(exc),
                 ) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="Do not include credentials in a decision note") from exc
             if not outcome:
                 raise HTTPException(status_code=409, detail="Approval already decided")
             decided = outcome["approval"]
             resumed_task = outcome["task"]
         else:
-            decided = repository.decide_approval(
-                scope.workspace_id, approval_id, payload.decision, payload.note
-            )
+            try:
+                decided = repository.decide_approval(
+                    scope.workspace_id, approval_id, payload.decision, note
+                )
+            except RepositoryConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="Do not include credentials in a decision note") from exc
             if not decided:
                 raise HTTPException(status_code=409, detail="Approval already decided")
 

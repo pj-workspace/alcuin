@@ -4,6 +4,7 @@ import type { Agent, ContextAssembly, ExecutionEvent, Extension, Rule, Skill, Th
 import type { ProviderModelProfile, ProviderStatus, ReasoningEffort } from "@alcuin/sdk";
 import {
   ArrowUp,
+  ArrowDown,
   Brain,
   ChevronDown,
   Check,
@@ -39,6 +40,7 @@ import { useThreadSession } from "@/features/studio/use-thread-session";
 import { TaskCanvas, TaskInlineStatus, interventionCommandForStatus, useTaskSession } from "@/features/studio/tasks";
 import { resolveExtensionUIBlocks, type ResolvedExtensionUIBlock } from "@/features/extensions";
 import { useI18n } from "@/shared/lib/i18n";
+import { MobileComposerSettings } from "@/features/studio/mobile-composer-settings";
 
 type CanvasTab = "artifact" | "task" | "trace" | "extensions" | "context";
 type MobileSurface = "conversation" | "canvas";
@@ -88,6 +90,7 @@ export function StudioView({
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState(false);
+  const approvalInFlight = useRef(false);
   const userSelectedCanvasRef = useRef(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
@@ -131,6 +134,8 @@ export function StudioView({
   const latestTurn = state.turns.at(-1);
   const sendButtonLabel = activeTask
     ? (locale === "zh" ? "引导当前任务" : "Guide current Task")
+    : state.phase === "waiting_for_input"
+    ? t("Answer the question above or choose to skip")
     : state.phase === "waiting_for_approval"
     ? t("Resolve approval before sending another message")
     : composerMode === "plan"
@@ -181,7 +186,7 @@ export function StudioView({
     })),
   ];
   const turnKey = `${state.thread?.id ?? "new"}:${latestTurn?.id ?? "empty"}`;
-  const { anchorRef, endRef, scrollRef: timelineRef, spacerPx } = usePinnedTurnScroll(
+  const { anchorRef, endRef, scrollRef: timelineRef, spacerPx, canJumpToLatest, jumpToLatest } = usePinnedTurnScroll(
     turnKey,
     activeEvents.length + (running ? 1 : 0),
   );
@@ -432,22 +437,44 @@ export function StudioView({
     addFiles(event.dataTransfer.files);
   };
 
-  const decide = useCallback(async (runId: string, approvalId: string, decision: "approved" | "denied") => {
+  const onDecision = useCallback(async (runId: string, approvalId: string, decision: "approved" | "denied", note?: string) => {
+    if (approvalInFlight.current) return;
+    approvalInFlight.current = true;
     setApprovalBusy(true);
     try {
-      await alcuinApi.decideApproval(runId, approvalId, decision);
+      await alcuinApi.decideApproval(runId, approvalId, decision, note);
       await onRunCreated(runId);
       await refreshThread();
-      showToast(t(decision === "approved" ? "Operation approved and completed" : "Operation denied — no changes made"));
+      showToast(t(decision === "approved" ? "Your permission was recorded" : "This action was declined"));
     } catch (error) {
-      showToast(error instanceof Error ? error.message : t("Approval failed"));
+      // The server may have saved the decision before the connection failed.
+      // Refresh first so the user cannot unknowingly submit it twice.
+      await refreshThread();
+      throw error;
     } finally {
+      approvalInFlight.current = false;
       setApprovalBusy(false);
     }
   }, [onRunCreated, refreshThread, showToast, t]);
-  const onDecision = useCallback((runId: string, approvalId: string, decision: "approved" | "denied") => { void decide(runId, approvalId, decision); }, [decide]);
+
+  const onAnswer = useCallback(async (runId: string, inputId: string, answer: string, skip: boolean) => {
+    try {
+      await alcuinApi.answerInput(runId, inputId, answer, skip);
+      await onRunCreated(runId);
+    } finally {
+      // Reconcile an uncertain network response before offering another submit.
+      await refreshThread();
+    }
+  }, [onRunCreated, refreshThread]);
 
   if (!agent) return null;
+
+  const changeModel = (value: string) => {
+    const next = value || null;
+    setModelOverride(next);
+    const profile = modelProfiles.find((candidate) => candidate.id === (next ?? agent.definition.model.model));
+    if (reasoningEffort && profile && !profile.reasoning_efforts.includes(reasoningEffort)) setReasoningEffort(null);
+  };
 
   return (
     <div className={clsx("studio-layout", !canvasOpen && "canvas-closed")}>
@@ -467,7 +494,7 @@ export function StudioView({
           </div>
         </header>
 
-        <div className="conversation-scroll" ref={timelineRef}>
+        <div className="conversation-scroll" ref={timelineRef} tabIndex={0} role="region" aria-label={t("Conversation history")}>
           <ConversationTimeline
             turns={state.turns}
             workspaceName={workspace.name}
@@ -475,6 +502,7 @@ export function StudioView({
             activeRunId={state.activeRunId}
             running={running}
             busy={approvalBusy}
+            onAnswer={onAnswer}
             anchorRef={anchorRef}
             endRef={endRef}
             spacerPx={spacerPx}
@@ -485,6 +513,14 @@ export function StudioView({
         </div>
 
         <div className="composer-wrap">
+          <button
+            type="button"
+            className={clsx("jump-to-latest", canJumpToLatest && "visible")}
+            aria-hidden={!canJumpToLatest}
+            tabIndex={canJumpToLatest ? 0 : -1}
+            disabled={!canJumpToLatest}
+            onClick={jumpToLatest}
+          ><ArrowDown size={14} aria-hidden="true" />{t("Back to latest")}</button>
           <TaskInlineStatus
             projection={taskSession.state.projection}
             phase={taskSession.state.phase}
@@ -503,14 +539,18 @@ export function StudioView({
                 {!activeTask && <div className="composer-mode-switch" role="group" aria-label={locale === "zh" ? "工作模式" : "Work mode"}><button type="button" className={clsx(composerMode === "chat" && "active")} aria-pressed={composerMode === "chat"} disabled={composerBlocked} onClick={() => setComposerMode("chat")}><MessageSquare size={12} />{locale === "zh" ? "对话" : "Chat"}</button><button type="button" className={clsx(composerMode === "plan" && "active")} aria-pressed={composerMode === "plan"} disabled={composerBlocked || attachmentController.items.length > 0} onClick={() => setComposerMode("plan")}><ListChecks size={12} />{locale === "zh" ? "计划" : "Plan"}</button></div>}
                 <button className={clsx("context-chip", running && "live")} aria-label={running ? t("Agent is working") : t("Context · {skills} skills · {rules} rules", { skills: contextSkillCount, rules: contextRuleCount })} onClick={openContextLedger}><span className="context-dot" /><span className="context-chip-label">{running ? t("Agent is working") : t("Context · {skills} skills · {rules} rules", { skills: contextSkillCount, rules: contextRuleCount })}</span><ChevronDown size={11} /></button>
                 <span className="composer-control-divider" aria-hidden="true" />
+                <MobileComposerSettings
+                  model={displayedModelValue} effort={displayedReasoningValue}
+                  models={modelControlOptions} efforts={reasoningControlOptions}
+                  disabled={composerBlocked || Boolean(activeTask)}
+                  contextLabel={t("Context · {skills} skills · {rules} rules", { skills: contextSkillCount, rules: contextRuleCount })}
+                  onModel={changeModel}
+                  onEffort={(value) => setReasoningEffort((value || null) as ReasoningEffort | null)}
+                  onContext={openContextLedger}
+                />
                 <div className={clsx("run-profile-controls", running && "locked")} aria-label={t("Run profile")} title={providerCatalogError ?? undefined}>
                   <span className="run-profile-indicator" aria-hidden="true" />
-                  <RunProfileMenu ariaLabel={t("Model profile")} icon={<Cpu size={12} />} value={displayedModelValue} options={modelControlOptions} disabled={composerBlocked || Boolean(activeTask)} onChange={(value) => {
-                    const next = value || null;
-                    setModelOverride(next);
-                    const profile = modelProfiles.find((candidate) => candidate.id === (next ?? agent.definition.model.model));
-                    if (reasoningEffort && profile && !profile.reasoning_efforts.includes(reasoningEffort)) setReasoningEffort(null);
-                  }} />
+                  <RunProfileMenu ariaLabel={t("Model profile")} icon={<Cpu size={12} />} value={displayedModelValue} options={modelControlOptions} disabled={composerBlocked || Boolean(activeTask)} onChange={changeModel} />
                   <RunProfileMenu ariaLabel={t("Thinking effort")} icon={<Brain size={12} />} value={displayedReasoningValue} options={reasoningControlOptions} disabled={composerBlocked || Boolean(activeTask)} onChange={(value) => setReasoningEffort((value || null) as ReasoningEffort | null)} align="right" />
                 </div>
               </div>

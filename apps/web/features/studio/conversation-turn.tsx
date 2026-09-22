@@ -1,12 +1,15 @@
 "use client";
 
-import { Check, ShieldCheck, X } from "lucide-react";
 import { memo } from "react";
 
 import { MessageAttachments } from "@/features/studio/attachments";
 import { RunOutput } from "@/features/studio/run-output";
 import type { ConversationTurn as ConversationTurnModel } from "@/features/studio/thread-session-reducer";
 import { useI18n } from "@/shared/lib/i18n";
+import { ApprovalCard } from "@/features/studio/approvals/approval-card";
+import { approvalRecords, type ApprovalDecision } from "@/features/studio/approvals/approval-model";
+import { QuestionCard } from "@/features/studio/questions/question-card";
+import { questionRecords } from "@/features/studio/questions/question-model";
 
 export const ConversationTurn = memo(function ConversationTurn({
   turn,
@@ -17,6 +20,7 @@ export const ConversationTurn = memo(function ConversationTurn({
   agentRef,
   onCopy,
   onDecision,
+  onAnswer,
 }: {
   turn: ConversationTurnModel;
   active: boolean;
@@ -25,11 +29,11 @@ export const ConversationTurn = memo(function ConversationTurn({
   userRef?: React.Ref<HTMLElement>;
   agentRef?: React.Ref<HTMLElement>;
   onCopy: (text: string) => void | Promise<void>;
-  onDecision: (runId: string, approvalId: string, decision: "approved" | "denied") => void;
+  onDecision: (runId: string, approvalId: string, decision: ApprovalDecision, note?: string) => Promise<void>;
+  onAnswer: (runId: string, inputId: string, answer: string, skip: boolean) => Promise<void>;
 }) {
   const { t } = useI18n();
-  const approval = [...turn.events].reverse().find((event) => event.type === "approval.required");
-  const completed = turn.events.some((event) => event.type === "run.completed");
+  const approvals = approvalRecords(turn.events, turn.status);
   const hasUserContent = Boolean(turn.input.trim() || turn.attachments.length > 0);
 
   return (
@@ -50,21 +54,9 @@ export const ConversationTurn = memo(function ConversationTurn({
             running={running}
             assistantText={turn.assistantText}
             onCopy={onCopy}
+            interaction={turn.runId && questionRecords(turn.events, turn.status).map((record) => <QuestionCard key={record.id} record={record} onAnswer={(answer, skip) => onAnswer(turn.runId!, record.id, answer, skip)} />)}
           />
-          {approval && !completed && turn.runId && (
-            <div className="approval-card">
-              <div className="approval-top">
-                <span className="approval-icon"><ShieldCheck size={16} /></span>
-                <div><strong>{approval.payload.title}</strong><p>{approval.payload.description}</p></div>
-                <span className="risk-label">{t("High impact")}</span>
-              </div>
-              <div className="approval-command"><code>{approval.payload.tool}</code><span>{JSON.stringify(approval.payload.arguments)}</span></div>
-              <div className="approval-actions">
-                <button className="button secondary" disabled={busy} onClick={() => onDecision(turn.runId!, String(approval.payload.approval_id), "denied")}><X size={14} />{t("Deny")}</button>
-                <button className="button dark" disabled={busy} onClick={() => onDecision(turn.runId!, String(approval.payload.approval_id), "approved")}><Check size={14} />{t("Approve once")}</button>
-              </div>
-            </div>
-          )}
+          {turn.runId && approvals.map((record) => <ApprovalCard key={record.id} record={record} busy={busy} onDecision={(decision, note) => onDecision(turn.runId!, record.id, decision, note)} />)}
         </div>
       </article>
     </section>
