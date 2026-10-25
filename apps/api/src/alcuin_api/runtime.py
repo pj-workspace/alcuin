@@ -30,6 +30,7 @@ from .tools import ToolContext, ToolError, ToolExecutor
 from .artifact_stream import ArtifactStream, OUTPUT_PROTOCOL, final_answer_committed
 from .evidence import RunCitationRegistry
 from alcuin_core.human_input import HumanQuestion
+from .continuations import prepare_continuation
 
 
 SKILL_RUNTIME_TOOL_IDS = ("skill.load", "skill.read_resource")
@@ -866,6 +867,16 @@ class OpenAICompatibleRuntime:
                     if definition and definition.mutating:
                         policy = request.definition.policies.mutating_tools
                         if policy == "ask":
+                            if request.interactive and _step + 1 >= request.definition.runtime.max_steps:
+                                error = {"code": "approval_step_budget_exceeded", "message": "No remaining steps to continue after approval. The operation was not executed."}
+                                yield RuntimeEmission(EventType.TOOL_COMPLETED, {"tool": name, "call_id": call_id, "status": "failed", "error": error, "duration_ms": 0})
+                                messages.append({"role": "tool", "tool_call_id": call_id, "content": json.dumps({"error": error})})
+                                continue
+                            checkpoint = None
+                            if request.interactive:
+                                for sibling in normalized_calls[call_index + 1:]:
+                                    messages.append({"role": "tool", "tool_call_id": sibling["id"], "content": json.dumps({"status": "deferred", "message": "Not executed. Request again after the approval decision if still needed."})})
+                                checkpoint = {"adapter": "openai-chat-v1", "messages": messages, "next_step": _step + 1, "tool_call_counts": tool_call_counts}
                             yield RuntimeEmission(
                                 EventType.APPROVAL_REQUIRED,
                                 {
@@ -876,6 +887,7 @@ class OpenAICompatibleRuntime:
                                     "arguments": arguments,
                                     "risk": "high",
                                 },
+                                continuation=checkpoint,
                             )
                             return
                         if policy == "deny":
@@ -1224,28 +1236,12 @@ class RuntimeOrchestrator:
                 if emission.type == EventType.INPUT_REQUIRED:
                     if not request.interactive or not emission.continuation:
                         raise RuntimeError("Runtime did not supply a question continuation")
-                    checkpoint = copy.deepcopy(emission.continuation)
-                    for message in checkpoint["messages"]:
-                        if message.get("role") == "tool":
-                            try:
-                                data = json.loads(message["content"])
-                                message["content"] = json.dumps(self.redact_payload(data) if isinstance(data, (dict, list)) else data, ensure_ascii=False)
-                            except (ValueError, TypeError):
-                                pass
-                        for call in message.get("tool_calls") or []:
-                            try:
-                                data = json.loads(call["function"]["arguments"])
-                                if isinstance(data, dict):
-                                    call["function"]["arguments"] = json.dumps(self.redact_payload(data), ensure_ascii=False)
-                            except (ValueError, TypeError):
-                                pass
-                    checkpoint = json.loads(redact_text(json.dumps(checkpoint, ensure_ascii=False), self.sensitive_values))
-                    checkpoint["request"] = {
+                    checkpoint = prepare_continuation(emission.continuation, {
                         "effective_model": request.effective_model,
                         "reasoning_effort": str(request.reasoning_effort),
                         "current_message_id": request.current_message_id,
                         "attachments": [asdict(attachment) for attachment in request.attachments],
-                    }
+                    }, self.sensitive_values)
                     self.store.suspend_run_for_input(request.workspace_id, request.run_id, payload, checkpoint)
                     return
                 if emission.type == EventType.MESSAGE_DELTA:
@@ -1253,6 +1249,15 @@ class RuntimeOrchestrator:
                     if isinstance(delta, str):
                         visible_text.append(delta)
                 if emission.type == EventType.APPROVAL_REQUIRED:
+                    if request.interactive and emission.continuation:
+                        checkpoint = prepare_continuation(emission.continuation, {
+                            "effective_model": request.effective_model,
+                            "reasoning_effort": str(request.reasoning_effort),
+                            "current_message_id": request.current_message_id,
+                            "attachments": [asdict(attachment) for attachment in request.attachments],
+                        }, self.sensitive_values)
+                        self.store.suspend_run_for_approval(request.workspace_id, request.run_id, payload, checkpoint)
+                        return
                     approval = self.store.create_approval(
                         request.workspace_id, request.run_id, payload
                     )
@@ -1499,7 +1504,12 @@ class RuntimeOrchestrator:
         )
 
     async def resume_after_input(self, record: dict[str, Any]) -> None:
-        workspace_id, run_id = record["workspace_id"], record["run_id"]
+        await self._resume_checkpoint(record["workspace_id"], record["run_id"], record["continuation"], record["question"]["call_id"], {
+            "input_id": record["id"], "question": record["question"]["question"], **record["answer"],
+            "notice": "This is clarification from the user, not permission for external actions.",
+        })
+
+    async def _resume_checkpoint(self, workspace_id: str, run_id: str, checkpoint: dict[str, Any], call_id: str, response: dict[str, Any]) -> None:
         try:
             run = self.store.get_run(workspace_id, run_id)
             if not run:
@@ -1508,14 +1518,13 @@ class RuntimeOrchestrator:
             thread = self.store.get_thread(workspace_id, run["thread_id"])
             if not version or not thread:
                 raise RuntimeError("Conversation is unavailable")
-            checkpoint = record["continuation"]
             if checkpoint.get("adapter") != "openai-chat-v1":
-                raise RuntimeError("Question continuation adapter is unavailable")
+                raise RuntimeError("Continuation adapter is unavailable")
             profile = checkpoint.pop("request")
             checkpoint["citation_events"] = self.store.list_run_citation_events(workspace_id, run_id)
             checkpoint["messages"].append({
-                "role": "tool", "tool_call_id": record["question"]["call_id"],
-                "content": json.dumps({"input_id": record["id"], "question": record["question"]["question"], **record["answer"], "notice": "This is clarification from the user, not permission for external actions."}, ensure_ascii=False),
+                "role": "tool", "tool_call_id": call_id,
+                "content": json.dumps(response, ensure_ascii=False),
             })
             attachments = tuple(RuntimeAttachmentRef(**ref) for ref in profile.pop("attachments"))
             await self.execute(RuntimeRequest(
@@ -1529,13 +1538,26 @@ class RuntimeOrchestrator:
                 "code": "input_resume_failed", "message": redact_text(str(exc), self.sensitive_values)[:500],
             })
 
+    async def continue_approval_in_background(self, workspace_id: str, run_id: str, approved: bool, request_payload: dict[str, Any], approval_id: str) -> None:
+        try:
+            await self.resume_after_approval(workspace_id, run_id, approved, request_payload, approval_id)
+        except Exception:
+            # Never retry a possibly completed external write. Keep the durable
+            # decision and show a verification boundary if receipt storage fails.
+            partial = "".join(str(event["payload"].get("delta") or "") for event in self.store.list_events(workspace_id, run_id) if event["type"] == "message.delta")
+            self._finalize_terminal(workspace_id, run_id, "failed", partial, EventType.RUN_FAILED, {
+                "code": "approval_resume_failed", "message": "The approved operation could not be fully reconciled. Verify its result before retrying.",
+            })
+
     async def resume_after_approval(
         self,
         workspace_id: str,
         run_id: str,
         approved: bool,
         request_payload: dict[str, Any],
+        approval_id: str | None = None,
     ) -> None:
+        checkpoint = self.store.take_approval_continuation(workspace_id, run_id, approval_id) if approval_id else None
         tool = request_payload.get("tool", "external.tool")
         if approved:
             self.store.set_run_status(workspace_id, run_id, "running")
@@ -1650,6 +1672,9 @@ class RuntimeOrchestrator:
                     EventType.CITATION_CREATED,
                     self.redact_payload(citation_payload),
                 )
+            if checkpoint:
+                await self._resume_checkpoint(workspace_id, run_id, checkpoint, call_id, self.redact_payload(json.loads(evidence.model_content)))
+                return
             visible_summary = f"The approved {tool} operation completed successfully."
             self.store.append_event(
                 workspace_id,
@@ -1688,6 +1713,9 @@ class RuntimeOrchestrator:
                     "result_summary": "Operation denied by the user.",
                 },
             )
+            if checkpoint:
+                await self._resume_checkpoint(workspace_id, run_id, checkpoint, str(request_payload["call_id"]), {"status": "denied", "message": "The user declined this operation. No changes were made. Do not retry it without a new user instruction."})
+                return
             visible_summary = (
                 "No external changes were made because the approval request was denied."
             )

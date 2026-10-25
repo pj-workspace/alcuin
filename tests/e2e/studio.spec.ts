@@ -12,7 +12,7 @@ test("runs an approval-gated operation through its real adapter", async ({ page 
   await expect(page.getByRole("button", { name: "Allow once", exact: true })).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "Allow once", exact: true }).click();
 
-  await expect(page.getByText("The approved ops.update_ticket operation completed successfully.")).toBeVisible();
+  await expect(page.locator(".assistant-output")).toContainText("I updated INC-104 to monitoring after your approval.");
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeVisible();
 });
 

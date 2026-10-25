@@ -1650,6 +1650,14 @@ def create_app(
             if not decided:
                 raise HTTPException(status_code=409, detail="Approval already decided")
 
+        if task_link is None and repository.has_approval_continuation(scope.workspace_id, run_id, approval_id):
+            task = asyncio.create_task(app.state.runtime.continue_approval_in_background(
+                scope.workspace_id, run_id, payload.decision == "approved", approval["request"], approval_id,
+            ))
+            app.state.tasks.add(task)
+            task.add_done_callback(app.state.tasks.discard)
+            return decided
+
         try:
             await app.state.runtime.resume_after_approval(
                 scope.workspace_id,

@@ -1,4 +1,6 @@
+import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
@@ -32,6 +34,16 @@ records = {
         status="monitoring",
     )
 }
+
+# Explicit test gates let browser tests observe a partially streamed continuation
+# without relying on network speed or fixed delays.
+provider_gates: dict[str, asyncio.Event] = {}
+
+
+@app.post("/_test/provider-gates/{gate_id}/release", include_in_schema=False)
+async def release_provider_gate(gate_id: str) -> dict[str, bool]:
+    provider_gates.setdefault(gate_id, asyncio.Event()).set()
+    return {"released": True}
 
 
 @app.get("/search", include_in_schema=False)
@@ -103,6 +115,26 @@ def provider_final_text(messages: list[dict[str, Any]]) -> str:
         return "Web evidence confirms that Alcuin composes governed tools, knowledge, and portable Agent versions."
     if tool_name == "knowledge_search":
         return "The bound release policy requires a rollback owner, verified monitoring, and an approval record."
+    if tool_name == "ops_update_ticket":
+        try:
+            result = json.loads(str(tool_message.get("content") or "{}"))
+        except (TypeError, ValueError):
+            result = {}
+        if isinstance(result, dict) and isinstance(result.get("data"), dict):
+            result = result["data"]
+        if isinstance(result, dict) and result.get("status") == "denied":
+            return (
+                "I left INC-104 unchanged because you declined the update. "
+                "As an alternative, review the current incident details and confirm "
+                "the intended status before requesting another change."
+            )
+        if isinstance(result, dict) and result.get("updated") is True:
+            return (
+                f"I updated {result['ticket_id']} to {result['status']} after your approval. "
+                "The next step is to review the incident metrics and confirm that "
+                "the mitigation remains effective before closing the record."
+            )
+        return "I could not confirm the ticket update. Review the action result before making another change."
     return (
         "I reviewed the current record for INC-104. Checkout latency is recovering, "
         "the mitigation is active, and no new payment failures have appeared in the last 20 minutes."
@@ -154,10 +186,28 @@ async def chat_completions_fixture(request: Request) -> StreamingResponse:
         if event:
             yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
         else:
-            text = provider_final_text(messages)
+            # Commit the final answer before streaming its body, just as the
+            # runtime's output protocol requires for tool-enabled model turns.
+            text = f"<alcuin-answer>{provider_final_text(messages)}</alcuin-answer>"
+            gate_match = next(
+                (
+                    match
+                    for message in messages
+                    if message.get("role") == "user"
+                    for match in [re.search(r"\[continuation-gate:([a-zA-Z0-9-]+)\]", str(message.get("content") or ""))]
+                    if match
+                ),
+                None,
+            )
             for index in range(0, len(text), 48):
                 chunk = {"choices": [{"delta": {"content": text[index : index + 48]}}]}
                 yield f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n"
+                if index == 0 and gate_match and last_message.get("role") == "tool":
+                    gate_id = gate_match.group(1)
+                    try:
+                        await asyncio.wait_for(provider_gates.setdefault(gate_id, asyncio.Event()).wait(), timeout=30)
+                    finally:
+                        provider_gates.pop(gate_id, None)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
