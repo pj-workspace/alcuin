@@ -1,5 +1,201 @@
 # Release readiness
 
+## Canvas draft protection and consolidated delivery
+
+The 2026-10-25 delivery closes ordinary Run stopping, user-facing work records,
+saved-document continuation, and tab-local Canvas draft protection together.
+The earlier sections below record the verification state of each preceding slice;
+Git/PR history is the authority for subsequent integration, not those snapshots.
+
+- Closing the editor keeps dirty text; a recovery banner and resource markers
+  make it discoverable. Explicit discard requires confirmation.
+- Reloading the same tab can restore its draft. Storage failures show a warning;
+  no cloud autosave, encryption, cross-tab sync or post-tab-closure guarantee is
+  claimed. Drafts are partitioned by Workspace/Thread/Artifact.
+- Save conflicts retain local edits. Reviewing saved content is separate from
+  choosing it or continuing with the draft. Continuing still requires Save.
+- Recovery notices use 180ms entry motion; saved-content disclosure transitions
+  open/closed where supported and respects reduced motion. Mobile controls keep
+  44px targets; English and Chinese copy are supplied.
+
+Local verification: workspace tests, type checks, lint and production builds
+passed. Draft-specific pure suites cover 20 editor-model cases and seven storage
+cases. Full desktop/mobile browser regression passed **110 cases, six conditional
+skips** using installed Chrome and deterministic local providers. The added
+journey covers close, reload, conflict review, explicit save and draft cleanup.
+This is browser emulation, not real-phone keyboard or external-model acceptance.
+No production deployment is included. Existing databases need migration `0014`.
+
+Final backend rerun: **463 passed**, with 44 existing Starlette/Qdrant warnings.
+After the full browser run, the draft journey was extended to confirm explicit
+discard and capture settled disclosure screenshots. An initial desktop test
+race clicked before Canvas hydration; its semantic wait was corrected. The final
+focused desktop/mobile rerun passed **2/2**, including the theme-border cleanup.
+No verification assertions or security checks were disabled.
+
+## Saved-document continuation slice
+
+This local slice targets `develop`; it is not committed, merged, or deployed by
+this verification. It connects saved Canvas edits to a subsequent ordinary Chat
+message without adding product-version management or changing the source file.
+
+- “Use in conversation” attaches one saved document to the composer. The sent
+  message keeps an inspectable, immutable snapshot, even after later Canvas edits.
+- The server checks Workspace and Thread ownership and resolves the content;
+  the client sends only its ID and expected saved version. Stale content returns
+  a conflict, keeps the unsent message, refreshes the Canvas, and requires the
+  user to attach the new content explicitly. Oversized references are rejected.
+- Canonical message fields, including the content digest, arrive without a page
+  reload or delaying the answer stream. A late response from another Thread
+  cannot replace the current reference, clear its input, or connect its stream.
+- Composer cards and native previews use scoped entry/exit motion, reduced-motion
+  support, keyboard focus containment and focus restoration. Mobile controls
+  retain 44px targets. HTML is literal text in the snapshot viewer, not executable.
+
+Local verification on 2026-10-25: **463 Python tests passed**, plus workspace unit
+and contract tests (including 28 SDK tests), type checks, lint and production
+builds. The final full browser suite passed **108 cases with six device-conditional
+skips**, including all 12 new desktop/mobile reference cases. This covers editing
+and saving B, sending it, changing the original to C, and still reading B after
+reload; conflict recovery; cross-Thread late responses; and actual motion/focus
+behavior. Existing approvals, stop controls, naming, planning, streaming and
+Artifact regression cases passed in the same run.
+
+Browser verification used installed Chrome 155 with the repository's device
+profiles because pinned Chromium was unavailable. Additional manual Ego browser
+checks inspected the light-theme composer and preview at a 390px mobile width;
+automated English/Chinese dark-theme screenshots were also inspected. Earlier
+checks caught and corrected modal focus and cross-Thread input isolation issues;
+test helpers now wait for semantic Canvas state rather than transient geometry.
+Existing Starlette/Qdrant warnings remain, with no suppression added.
+
+The tests use local deterministic providers and verify the exact content delivered
+to the provider, not external-model answer quality or real-phone keyboard behavior.
+The limit is one saved document of at most 100,000 UTF-8 bytes and a nonempty
+instruction. Unsaved editor text, Task/Plan continuation, and Embed references
+are not included. Original citation IDs stay scoped to their source Run; a
+snapshot digest is content identity, not factual verification. This slice does
+not add persistent per-Thread drafts: explicit navigation clears unsent input,
+while a rejected send in the same Thread retains it. No new migration is needed
+beyond the preceding cancellation slice's `0014`.
+
+Verification commands (service-wrapped commands must run sequentially):
+
+```sh
+./scripts/with-test-services.sh uv run --project apps/api pytest -c apps/api/pyproject.toml
+pnpm -r test
+pnpm lint
+pnpm build
+./scripts/with-test-services.sh pnpm test:e2e:run --workers=1
+```
+
+The browser run used a temporary config selecting `channel: "chrome"` while
+retaining the repository tests and desktop/mobile profiles.
+
+## User-facing work records slice
+
+This local slice targets `develop`; it is not committed, merged, or deployed by
+this verification. It replaces the placeholder Runs dashboard with usable work
+records, without expanding product-version management or embedding.
+
+- Search and status filters work on the latest 30 Runs. The interface states this
+  scope and no longer shows hardcoded success rates, durations, or token metrics.
+- Each selected record loads its own verified snapshot. Slow old requests cannot
+  replace the current result; failed requests have an explicit retry path.
+- Results, citation inspection, deliverables, human decisions, and actual tool
+  outcomes stay together. Permission is not presented as execution success;
+  failed/stopped work is labelled incomplete and missing outcomes stay unknown.
+- Open conversation returns to the original Thread. Markdown receipts include
+  status, operation outcomes and source identifiers/locators, not private
+  reasoning, answer transcripts, or raw tool arguments/results.
+- Mobile uses list/detail navigation with restored focus and reading position.
+  English/Chinese, light/dark themes, and reduced-motion preferences are covered;
+  scoped entry motion uses 180ms and cleans up on navigation.
+
+Local verification on 2026-10-25: workspace unit/contract tests, lint, type checks,
+and production builds passed. The pure receipt model has 13 focused tests, and
+the SDK suite has 27. The final full browser suite passed **96 cases with six
+device-conditional skips**, including all ten new desktop/mobile receipt cases
+and the prior stop, question, approval, streaming, and Artifact regressions.
+Desktop light and mobile Chinese-dark screenshots were inspected. An earlier
+empty-history fixture race was fixed by prefetching its bootstrap data and
+returning static mock responses; the full suite was rerun after that correction.
+
+Browser verification used installed Chrome 155 with the repository device
+profiles because the pinned Chromium binary was unavailable. The checks use
+deterministic model fixtures; mobile emulation does not certify physical-phone
+keyboard behavior or external-provider latency. No backend behavior changed in
+this records slice; the preceding stop slice's 430-test Python result remains
+the backend verification. Existing databases still need its migration `0014`.
+
+Verification commands (service-wrapped commands must run sequentially):
+
+```sh
+pnpm -r test
+pnpm lint
+pnpm build
+./scripts/with-test-services.sh pnpm test:e2e:run --workers=1
+```
+
+The browser invocation used a temporary config selecting `channel: "chrome"`
+without changing test assertions or device profiles. Records refresh manually;
+history pagination, live record streaming, and a full transcript export are not
+part of this slice.
+
+## Studio stop-generation slice
+
+This slice targets `develop`; it adds ordinary conversation controls, not
+product-version management or production deployment.
+
+- Stop records durable intent and waits for a real terminal receipt. Existing
+  answer text, editable/downloadable Artifacts and citations remain available.
+- Provider and read-only waits can be interrupted. A dispatched mutation is not
+  rolled back: its actual receipt is retained before any later work is stopped.
+- Pending questions and approvals close without inventing answers, permission
+  decisions or successful tool results. Stale submissions are rejected.
+- Unconfirmed network requests offer retry; an accepted stop can recover its
+  terminal state after a lost event stream. Thread changes clean up requests.
+- Stopped output is explicitly incomplete in future model context, including
+  after compaction. Restart recovery does not replay uncertain actions.
+- Sending/stopping use the same 44px control footprint. Both languages, narrow
+  layouts and reduced-motion preferences retain the existing interaction model.
+
+Apply migration `20261025_0014` before starting the API against an existing
+database. Downgrade is blocked while cancellation requests or cancelled messages
+remain; preserve their history rather than deleting it to bypass that guard.
+The owner is still a single API worker. Task-owned Runs use Task controls; Embed
+callers cannot use the ordinary stop endpoint. Stopping does not guarantee that
+an external service has undone a dispatched action or stopped billing.
+
+Local verification on 2026-10-25: 430 Python tests passed. Workspace unit and
+contract tests, type checks, lint and production builds passed after the final
+snapshot-timeout and cross-Thread isolation fixes. Existing Starlette deprecation
+and Qdrant version-probe warnings remain; they are not newly suppressed.
+
+The final full browser suite passed 86 cases with six device-conditional skips,
+using installed Chrome 155 and the repository's desktop/mobile device profiles
+(the pinned Playwright Chromium binary was unavailable). Stop-specific coverage
+includes partial output across refresh and a subsequent turn, stale approval and
+question rejection, and failed-stop retry in both profiles. Chinese and English
+dark-mode screenshots were inspected; motion and reduced-motion checks passed.
+Separate unit cases cover a hung snapshot and a late response after navigation.
+These checks use deterministic provider fixtures; they do not certify external
+model latency, production mutations or physical-phone keyboard behavior.
+
+Verification commands (run service-wrapped commands sequentially):
+
+```sh
+./scripts/with-test-services.sh uv run --project apps/api pytest -c apps/api/pyproject.toml
+pnpm -r test
+pnpm lint
+pnpm build
+./scripts/with-test-services.sh pnpm test:e2e:run --workers=1
+```
+
+The browser run used a temporary config that retained these tests and device
+profiles while selecting `channel: "chrome"`; no repository browser settings or
+assertions were weakened to accommodate the missing pinned binary.
+
 ## Studio approval continuation slice
 
 This slice targets `develop`, with no production deployment or new product-facing
