@@ -2401,6 +2401,7 @@ class SqlRepository(HumanInputStorage):
             for run in interrupted:
                 workspace_id = str(run["workspace_id"])
                 run_id = str(run["id"])
+                self.connection.execute("UPDATE approval_continuations SET checkpoint_json = NULL WHERE workspace_id = ? AND run_id = ?", (workspace_id, run_id))
                 thread_id = str(run["thread_id"])
                 delta_rows = self._all(
                     """SELECT payload_json FROM events
@@ -2663,6 +2664,52 @@ class SqlRepository(HumanInputStorage):
             "timestamp": row["created_at"],
             "payload": json.loads(row["payload_json"]),
         }
+
+    def suspend_run_for_approval(
+        self, workspace_id: str, run_id: str, request: dict[str, Any], checkpoint: dict[str, Any]
+    ) -> dict[str, Any]:
+        self._validate_no_raw_secrets(request)
+        self._validate_no_raw_secrets(checkpoint)
+        serialized = self._json(checkpoint)
+        if len(serialized.encode()) > 2_000_000:
+            raise ValueError("Approval continuation exceeds the safe size limit")
+        approval_id, created_at = new_id("apr"), utc_now()
+        with self.lock, self.connection:
+            run = self._one("SELECT status FROM runs WHERE workspace_id = ? AND id = ? FOR UPDATE", (workspace_id, run_id))
+            if not run or run["status"] != "running":
+                raise RepositoryConflict("Run is not available for approval")
+            if self._one("SELECT 1 FROM task_run_links WHERE workspace_id = ? AND run_id = ?", (workspace_id, run_id)):
+                raise RepositoryConflict("Task continuation requires a Task suspension boundary")
+            self.connection.execute(
+                "INSERT INTO approvals (id, workspace_id, run_id, status, request_json, created_at) VALUES (?, ?, ?, 'pending', ?, ?)",
+                (approval_id, workspace_id, run_id, self._json(request), created_at),
+            )
+            self.connection.execute(
+                "INSERT INTO approval_continuations (approval_id, workspace_id, run_id, checkpoint_json) VALUES (?, ?, ?, ?)",
+                (approval_id, workspace_id, run_id, serialized),
+            )
+            self.connection.execute("UPDATE runs SET status = 'waiting_for_approval' WHERE workspace_id = ? AND id = ?", (workspace_id, run_id))
+            return self._append_event_locked(workspace_id, run_id, "approval.required", {**request, "approval_id": approval_id})
+
+    def has_approval_continuation(self, workspace_id: str, run_id: str, approval_id: str) -> bool:
+        return self._one("SELECT 1 FROM approval_continuations WHERE workspace_id = ? AND run_id = ? AND approval_id = ?", (workspace_id, run_id, approval_id)) is not None
+
+    def take_approval_continuation(self, workspace_id: str, run_id: str, approval_id: str) -> dict[str, Any] | None:
+        """Internal one-shot consumption after durable authorization, never a public read."""
+        with self.lock, self.connection:
+            approval = self._one("SELECT status FROM approvals WHERE workspace_id = ? AND run_id = ? AND id = ? FOR UPDATE", (workspace_id, run_id, approval_id))
+            if not approval or approval["status"] not in {"approved", "denied"}:
+                raise RepositoryConflict("Approval has not been decided")
+            run = self._one("SELECT status FROM runs WHERE workspace_id = ? AND id = ? FOR UPDATE", (workspace_id, run_id))
+            if not run or run["status"] != "running":
+                raise RepositoryConflict("Run is not available for continuation")
+            row = self._one("SELECT checkpoint_json FROM approval_continuations WHERE workspace_id = ? AND run_id = ? AND approval_id = ?", (workspace_id, run_id, approval_id))
+            if row is None:
+                return None
+            if row["checkpoint_json"] is None:
+                raise RepositoryConflict("Approval continuation was already consumed")
+            self.connection.execute("UPDATE approval_continuations SET checkpoint_json = NULL WHERE workspace_id = ? AND run_id = ? AND approval_id = ?", (workspace_id, run_id, approval_id))
+            return json.loads(row["checkpoint_json"])
 
     def create_approval(
         self, workspace_id: str, run_id: str, request: dict[str, Any]

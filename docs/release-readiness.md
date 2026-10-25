@@ -1,5 +1,58 @@
 # Release readiness
 
+## Studio approval continuation slice
+
+This slice targets `develop`, with no production deployment or new product-facing
+version-management work.
+
+- Ordinary Studio model-generated approvals resume the same model loop after
+  approval or refusal, instead of ending with a synthetic operation receipt.
+- The decision is saved and returned before background continuation finishes,
+  allowing Studio to display streamed progress and restore it after refresh.
+- Authorized tool results preserve source evidence for the model. Refusal does
+  not execute the tool; remaining sibling calls must be requested again.
+- Private checkpoints preserve the original model, attachments and execution
+  budgets. Duplicate decisions cannot execute the operation again. Interrupted
+  work fails closed for verification rather than replaying uncertain writes.
+- Checkpoint preparation decodes tool JSON before redaction, including secret
+  values containing quotes, newlines and backslashes.
+
+Apply migration `20261025_0013` before starting the API against an existing
+database. Resolve pending approval continuations before downgrading. Task,
+Embed, legacy approvals and explicit one-off tool requests retain their previous
+adapter/receipt behavior; this slice does not extend their suspension boundaries.
+
+Local verification on 2026-10-25: 402 Python tests passed. Workspace tests, type
+checks, lint and production builds passed. Existing Starlette deprecation and
+Qdrant version-probe warnings remain; they are not newly suppressed.
+
+Browser acceptance used installed Chrome 155 with the repository's desktop and
+mobile device profiles; the pinned Playwright Chromium binary was unavailable.
+The full suite initially passed 74 cases with six device-conditional skips; two
+new approval gate cases exposed a fixture missing the final-answer delimiter.
+After correcting that fixture without weakening the assertions, the focused
+approval, clarification and Studio suite passed 26 cases with two conditional
+skips, including both approval gate cases. The entire suite was not rerun after
+that fixture-only correction. This does not certify physical-phone keyboard
+behavior or latency from an external model.
+
+Verification commands (run service-wrapped commands sequentially):
+
+```sh
+./scripts/with-test-services.sh uv run --project apps/api pytest -c apps/api/pyproject.toml
+pnpm -r test
+pnpm lint
+pnpm build
+./scripts/with-test-services.sh pnpm test:e2e:run --workers=1
+./scripts/with-test-services.sh pnpm test:e2e:run tests/e2e/approval-continuation.spec.ts tests/e2e/approval-interaction.spec.ts tests/e2e/question-interaction.spec.ts tests/e2e/studio.spec.ts --workers=1
+```
+
+Manual acceptance: ask Studio to change a record, review the exact action, then
+allow or decline it. The decision receipt should remain visible while the model
+continues answering; refreshing must keep the same Run without repeating the
+operation. These local checks use deterministic provider fixtures, not a live
+external model or a production mutation target.
+
 ## Human interaction and mobile reading slice
 
 This slice targets `develop`, with no production deployment or product-version
