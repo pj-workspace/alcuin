@@ -2,6 +2,7 @@ import type {
   Agent,
   AgentVersion,
   ArtifactResource,
+  ArtifactReferenceInput,
   AttachmentResource,
   BootstrapPayload,
   ContextAssembly,
@@ -52,6 +53,7 @@ export interface AlcuinClientOptions {
 }
 
 export interface ListThreadMessagesOptions {
+  signal?: AbortSignal;
   /** Return only messages after this Thread-local sequence. */
   after?: number;
   limit?: number;
@@ -78,6 +80,7 @@ export interface ProviderStatus {
 }
 
 export interface CreateRunOptions {
+  artifactReferences?: ArtifactReferenceInput[];
   /** Override only this Run; the Agent definition remains unchanged. */
   modelOverride?: string | null;
   /** Override only this Run; null delegates to the Agent/runtime default. */
@@ -136,8 +139,10 @@ export function createAlcuinClient(options: AlcuinClientOptions) {
 
   return {
   bootstrap: () => request<BootstrapPayload>("/v1/bootstrap"),
+  listRuns: (signal?: AbortSignal) => request<Run[]>("/v1/runs", { signal }),
   listProviders: () => request<ProviderStatus[]>("/v1/providers"),
-  getRun: (runId: string) => request<Run & { events: ExecutionEvent[] }>(`/v1/runs/${runId}`),
+  getRun: (runId: string, signal?: AbortSignal) => request<Run & { events: ExecutionEvent[] }>(`/v1/runs/${runId}`, { signal }),
+  cancelRun: (runId: string, signal?: AbortSignal) => request<Run & { events: ExecutionEvent[] }>(`/v1/runs/${resourceId(runId)}/cancel`, { method: "POST", signal }),
   getRunCitations: (runId: string) => request<ExecutionEvent[]>(`/v1/runs/${resourceId(runId)}/citations`),
   getTask: (taskId: string) => request<Task>(`/v1/tasks/${resourceId(taskId)}`),
   listTasks: (options: { threadId?: string; statuses?: Task["status"][]; limit?: number } = {}) => {
@@ -178,7 +183,7 @@ export function createAlcuinClient(options: AlcuinClientOptions) {
   listThreadMessages: (
     threadId: string,
     options: ListThreadMessagesOptions = {},
-  ) => request<ThreadMessage[]>(threadMessagesPath(threadId, options)),
+  ) => request<ThreadMessage[]>(threadMessagesPath(threadId, options), { signal: options.signal }),
   getRunContext: (runId: string) =>
     request<ContextAssembly>(`/v1/runs/${resourceId(runId)}/context`),
   createThread: (
@@ -208,6 +213,9 @@ export function createAlcuinClient(options: AlcuinClientOptions) {
       body: JSON.stringify({
         input,
         attachment_ids: attachmentIds,
+        ...(runOptions.artifactReferences === undefined ? {} : {
+          artifact_references: runOptions.artifactReferences.map(({ artifact_id, expected_version }) => ({ artifact_id, expected_version })),
+        }),
         ...(runOptions.thinking === undefined ? {} : { thinking: runOptions.thinking }),
         ...(runOptions.modelOverride == null ? {} : { model_override: runOptions.modelOverride }),
         ...(runOptions.reasoningEffort == null ? {} : { reasoning_effort: runOptions.reasoningEffort }),
@@ -664,6 +672,11 @@ export function executionEventFromChatFrame(value: unknown): ExecutionEvent | nu
     const { type: _type, eventId: _eventId, runId: _runId, sequence: _sequence, timestamp: _timestamp, ...payload } = row;
     void _type; void _eventId; void _runId; void _sequence; void _timestamp;
     return { ...base, type: row.type === "input-required" ? "input.required" : "input.answered", payload };
+  }
+  if (row.type === "cancel-requested" || row.type === "cancelled") {
+    const { type: _type, eventId: _eventId, runId: _runId, sequence: _sequence, timestamp: _timestamp, ...payload } = row;
+    void _type; void _eventId; void _runId; void _sequence; void _timestamp;
+    return { ...base, type: row.type === "cancel-requested" ? "run.cancel_requested" : "run.cancelled", payload };
   }
   if (row.type === "artifact-updated") return { ...base, type: "artifact.updated", payload: { artifact: row.artifact } };
   if (row.type === "source-registry") return { ...base, type: "citation.created", payload: Array.isArray(row.sources) ? row.sources[0] ?? {} : {} };

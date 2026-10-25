@@ -114,7 +114,7 @@ class SqlRepository(HumanInputStorage):
 
     @classmethod
     def _validate_persisted_parts(cls, parts: list[dict[str, Any]]) -> None:
-        """Persist only resource references; inline data URLs belong to the active request."""
+        """Reject inline attachment data; allow verified, bounded document snapshots."""
         if not isinstance(parts, list) or not all(isinstance(part, dict) for part in parts):
             raise ValueError("message parts must be a list of objects")
         if not parts:
@@ -130,8 +130,40 @@ class SqlRepository(HumanInputStorage):
                 return any(contains_inline_data(item) for item in value)
             return isinstance(value, str) and value.lstrip().casefold().startswith("data:")
 
-        if contains_inline_data(parts):
-            raise ValueError("inline data URLs cannot be persisted in conversation messages")
+        for part in parts:
+            checked = part
+            if part.get("type") == "artifact_reference":
+                expected_keys = {
+                    "type", "artifact_id", "version", "title", "content_type",
+                    "source_run_id", "source_run_status", "sha256", "content",
+                }
+                content = part.get("content")
+                title = part.get("title")
+                valid = (
+                    set(part) == expected_keys
+                    and isinstance(content, str)
+                    and len(content.encode("utf-8")) <= 100_000
+                    and isinstance(title, str) and bool(title.strip()) and len(title) <= 200
+                    and type(part.get("version")) is int and part["version"] > 0
+                    and all(isinstance(part.get(key), str) and 1 <= len(part[key]) <= 200
+                            for key in ("artifact_id", "source_run_id"))
+                    and isinstance(part.get("content_type"), str) and part["content_type"] in {
+                        "text/plain", "text/markdown", "text/html", "application/json",
+                    }
+                    and isinstance(part.get("source_run_status"), str) and part["source_run_status"] in {
+                        "queued", "running", "waiting_for_input", "waiting_for_approval",
+                        "cancel_requested", "cancelled", "completed", "failed", "unknown",
+                    }
+                    and isinstance(part.get("sha256"), str)
+                    and hashlib.sha256(content.encode("utf-8")).hexdigest() == part["sha256"]
+                )
+                if not valid:
+                    raise ValueError("artifact reference snapshot is invalid")
+                # Only these two verified scalar strings are document text. All
+                # identifiers/metadata still pass the ordinary recursive check.
+                checked = {key: value for key, value in part.items() if key not in {"content", "title"}}
+            if contains_inline_data(checked):
+                raise ValueError("inline data URLs cannot be persisted in conversation messages")
 
     @staticmethod
     def _decoded_json(value: Any) -> Any:
@@ -1227,6 +1259,8 @@ class SqlRepository(HumanInputStorage):
                 raise RepositoryConflict("Run does not exist in this Workspace")
             if str(run["status"]) in {"completed", "failed", "cancelled"}:
                 raise RepositoryConflict("A terminal Run cannot update its Artifact")
+            if run["status"] == "cancel_requested":
+                raise RepositoryConflict("A stopping Run cannot update its Artifact")
             existing = self._one(
                 """SELECT * FROM artifacts
                 WHERE workspace_id = ? AND source_run_id = ? AND generation_key = ? FOR UPDATE""",
@@ -1423,7 +1457,7 @@ class SqlRepository(HumanInputStorage):
                 EXISTS(
                     SELECT 1 FROM events e
                     WHERE e.workspace_id = r.workspace_id AND e.run_id = r.id
-                      AND e.type IN ('run.completed', 'run.failed')
+                      AND e.type IN ('run.completed', 'run.failed', 'run.cancelled')
                 ) AS has_terminal_event
                 FROM runs r
                 WHERE r.workspace_id = ? AND r.id = ? FOR SHARE""",
@@ -1558,7 +1592,7 @@ class SqlRepository(HumanInputStorage):
                 )
             active = self._one(
                 """SELECT id FROM runs WHERE workspace_id = ? AND thread_id = ?
-                AND status IN ('queued', 'running', 'waiting_for_approval', 'waiting_for_input') LIMIT 1""",
+                AND status IN ('queued', 'running', 'waiting_for_approval', 'waiting_for_input', 'cancel_requested') LIMIT 1""",
                 (workspace_id, thread_id),
             )
             if active is not None:
@@ -1752,8 +1786,8 @@ class SqlRepository(HumanInputStorage):
         estimated_tokens: int,
     ) -> dict[str, Any]:
         """Persist a completed response or safe failed partial exactly once."""
-        if status not in {"completed", "failed"}:
-            raise ValueError("Assistant message status must be completed or failed")
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("Assistant message status must be completed, failed or cancelled")
         if estimated_tokens < 0:
             raise ValueError("estimated_tokens cannot be negative")
         self._validate_persisted_parts(parts)
@@ -1766,6 +1800,8 @@ class SqlRepository(HumanInputStorage):
             )
             if run is None:
                 raise RepositoryConflict("Run does not exist in this Workspace")
+            if run["status"] == "cancel_requested" and status != "cancelled":
+                raise RepositoryConflict("Run cancellation has already been requested")
             existing = self._one(
                 """SELECT * FROM messages
                 WHERE workspace_id = ? AND run_id = ? AND role = 'assistant'""",
@@ -1855,13 +1891,14 @@ class SqlRepository(HumanInputStorage):
         expected_event_type = {
             "completed": "run.completed",
             "failed": "run.failed",
+            "cancelled": "run.cancelled",
         }.get(status)
         if expected_event_type is None or terminal_event_type != expected_event_type:
             raise ValueError("Terminal Run status and event type must match")
         if estimated_tokens < 0:
             raise ValueError("estimated_tokens cannot be negative")
         parts = [{"type": "text", "text": content}]
-        if content.strip():
+        if content.strip() or status == "cancelled":
             self._validate_persisted_parts(parts)
         completed_at = utc_now()
         with self.lock, self.connection:
@@ -1872,6 +1909,8 @@ class SqlRepository(HumanInputStorage):
             )
             if run is None:
                 raise RepositoryConflict("Run does not exist in this Workspace")
+            if run["status"] == "cancel_requested" and status != "cancelled":
+                raise RepositoryConflict("Run cancellation has already been requested")
             if str(run["status"]) in {"completed", "failed", "cancelled"} and str(
                 run["status"]
             ) != status:
@@ -1896,7 +1935,10 @@ class SqlRepository(HumanInputStorage):
                         "Run already has a different immutable assistant message"
                     )
                 message_id = str(materialized["id"])
-            elif content.strip():
+            elif content.strip() or status == "cancelled":
+                # Even a stop before the first token closes the conversation turn.
+                # An empty text part preserves the nonempty-parts contract without
+                # inventing assistant prose; context projects its cancelled status.
                 sequence_row = self._one(
                     """UPDATE threads
                     SET next_message_sequence = next_message_sequence + 1, updated_at = ?
@@ -1932,7 +1974,7 @@ class SqlRepository(HumanInputStorage):
             existing_event = self._one(
                 """SELECT * FROM events
                 WHERE workspace_id = ? AND run_id = ?
-                  AND type IN ('run.completed', 'run.failed')
+                  AND type IN ('run.completed', 'run.failed', 'run.cancelled')
                 ORDER BY sequence DESC LIMIT 1""",
                 (workspace_id, run_id),
             )
@@ -2395,10 +2437,13 @@ class SqlRepository(HumanInputStorage):
         with self.lock, self.connection:
             interrupted = self._all(
                 """SELECT * FROM runs
-                WHERE status IN ('queued', 'running')
+                WHERE status IN ('queued', 'running', 'cancel_requested')
                 ORDER BY created_at, id FOR UPDATE"""
             )
             for run in interrupted:
+                cancelled = run["status"] == "cancel_requested"
+                terminal_status = "cancelled" if cancelled else "failed"
+                terminal_type = f"run.{terminal_status}"
                 workspace_id = str(run["workspace_id"])
                 run_id = str(run["id"])
                 self.connection.execute("UPDATE approval_continuations SET checkpoint_json = NULL WHERE workspace_id = ? AND run_id = ?", (workspace_id, run_id))
@@ -2418,7 +2463,7 @@ class SqlRepository(HumanInputStorage):
                 visible_content = "".join(visible_fragments)
 
                 output_message_id: str | None = None
-                if visible_content.strip():
+                if visible_content.strip() or cancelled:
                     parts = [{"type": "text", "text": visible_content}]
                     self._validate_persisted_parts(parts)
                     sequence_row = self._one(
@@ -2437,7 +2482,7 @@ class SqlRepository(HumanInputStorage):
                         """INSERT INTO messages
                         (id, workspace_id, thread_id, run_id, agent_version_id, sequence, role,
                          status, parts_json, estimated_tokens, created_at, completed_at)
-                        VALUES (?, ?, ?, ?, ?, ?, 'assistant', 'failed', ?, ?, ?, ?)""",
+                        VALUES (?, ?, ?, ?, ?, ?, 'assistant', ?, ?, ?, ?, ?)""",
                         (
                             output_message_id,
                             workspace_id,
@@ -2445,6 +2490,7 @@ class SqlRepository(HumanInputStorage):
                             run_id,
                             run["agent_version_id"],
                             int(sequence_row["value"]),
+                            terminal_status,
                             self._json(parts),
                             self._estimate_tokens(visible_content),
                             recovered_at,
@@ -2454,19 +2500,19 @@ class SqlRepository(HumanInputStorage):
 
                 existing_failure = self._one(
                     """SELECT id FROM events
-                    WHERE workspace_id = ? AND run_id = ? AND type = 'run.failed'
+                    WHERE workspace_id = ? AND run_id = ? AND type = ?
                     ORDER BY sequence LIMIT 1""",
-                    (workspace_id, run_id),
+                    (workspace_id, run_id, terminal_type),
                 )
                 terminal_event_id: str
                 if existing_failure is None:
                     sequence_row = self._one(
                         """UPDATE runs
-                        SET status = 'failed', completed_at = ?,
+                        SET status = ?, completed_at = ?,
                             next_event_sequence = next_event_sequence + 1
                         WHERE workspace_id = ? AND id = ?
                         RETURNING next_event_sequence AS value""",
-                        (recovered_at, workspace_id, run_id),
+                        (terminal_status, recovered_at, workspace_id, run_id),
                     )
                     if sequence_row is None:
                         raise RepositoryConflict(
@@ -2479,22 +2525,28 @@ class SqlRepository(HumanInputStorage):
                         (workspace_id, run_id),
                     )
                     payload = {
-                        "code": "runtime_interrupted",
-                        "message": failure_message,
+                        "code": "run_cancelled" if cancelled else "runtime_interrupted",
+                        "message": (
+                            "The Run was stopped after an API restart. External actions may have completed; verify their results. It was not retried automatically."
+                            if cancelled else failure_message
+                        ),
                         "automatic_retry": False,
                         "external_tool_results": "verification_required",
                         "output_message_id": output_message_id,
                         "context_assembly_id": context["id"] if context else None,
                     }
+                    if cancelled:
+                        payload["external_actions_may_have_completed"] = True
                     self.connection.execute(
                         """INSERT INTO events
                         (id, workspace_id, run_id, sequence, type, payload_json, created_at)
-                        VALUES (?, ?, ?, ?, 'run.failed', ?, ?)""",
+                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
                         (
                             terminal_event_id,
                             workspace_id,
                             run_id,
                             int(sequence_row["value"]),
+                            terminal_type,
                             self._json(payload),
                             recovered_at,
                         ),
@@ -2502,9 +2554,9 @@ class SqlRepository(HumanInputStorage):
                 else:
                     terminal_event_id = str(existing_failure["id"])
                     self.connection.execute(
-                        """UPDATE runs SET status = 'failed', completed_at = ?
+                        """UPDATE runs SET status = ?, completed_at = ?
                         WHERE workspace_id = ? AND id = ?""",
-                        (recovered_at, workspace_id, run_id),
+                        (terminal_status, recovered_at, workspace_id, run_id),
                     )
 
                 recovered.append(
@@ -2512,16 +2564,47 @@ class SqlRepository(HumanInputStorage):
                         "workspace_id": workspace_id,
                         "thread_id": thread_id,
                         "run_id": run_id,
-                        "status": "failed",
+                        "status": terminal_status,
                         "output_message_id": output_message_id,
                         "terminal_event_id": terminal_event_id,
                     }
                 )
         return recovered
 
+    def request_run_cancel(
+        self, workspace_id: str, run_id: str, *, tool_in_flight: bool = False
+    ) -> dict[str, Any] | None:
+        """Durably claim stopping an ordinary Run without inventing tool outcomes.
+
+        Terminal and already-requested Runs are returned unchanged. The owning
+        worker must quiesce before finalizing cancellation; the Thread remains
+        reserved until then. History is retained, only replay checkpoints expire.
+        """
+        with self.lock, self.connection:
+            run = self._one("SELECT * FROM runs WHERE workspace_id = ? AND id = ? FOR UPDATE", (workspace_id, run_id))
+            if run is None:
+                return None
+            if self._one("SELECT 1 FROM task_run_links WHERE workspace_id = ? AND run_id = ?", (workspace_id, run_id)):
+                raise RepositoryConflict("Task Runs must be stopped through Task controls")
+            if run["status"] not in {"completed", "failed", "cancelled", "cancel_requested"}:
+                if run["status"] not in {"queued", "running", "waiting_for_approval", "waiting_for_input"}:
+                    raise RepositoryConflict("Run is not available for cancellation")
+                self.connection.execute("UPDATE runs SET status = 'cancel_requested' WHERE workspace_id = ? AND id = ?", (workspace_id, run_id))
+                self.connection.execute("UPDATE approval_continuations SET checkpoint_json = NULL WHERE workspace_id = ? AND run_id = ?", (workspace_id, run_id))
+                self.connection.execute("UPDATE run_inputs SET continuation_json = NULL WHERE workspace_id = ? AND run_id = ?", (workspace_id, run_id))
+                self._append_event_locked(workspace_id, run_id, "run.cancel_requested", {"tool_in_flight": tool_in_flight, "automatic_retry": False})
+            return self.get_run(workspace_id, run_id)
+
     def set_run_status(self, workspace_id: str, run_id: str, status: str) -> None:
         terminal = status in {"completed", "failed", "cancelled"}
         with self.lock, self.connection:
+            run = self._one("SELECT status FROM runs WHERE workspace_id = ? AND id = ? FOR UPDATE", (workspace_id, run_id))
+            if run is None:
+                raise RepositoryConflict("Run does not exist in this Workspace")
+            if run["status"] in {"completed", "failed", "cancelled", "cancel_requested"}:
+                if run["status"] == status:
+                    return
+                raise RepositoryConflict("Run is terminal or cancellation has been requested")
             self.connection.execute(
                 "UPDATE runs SET status = ?, completed_at = ? WHERE id = ? AND workspace_id = ?",
                 (status, utc_now() if terminal else None, run_id, workspace_id),
@@ -2531,6 +2614,14 @@ class SqlRepository(HumanInputStorage):
         self, workspace_id: str, run_id: str, event_type: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         with self.lock, self.connection:
+            run = self._one("SELECT status FROM runs WHERE workspace_id = ? AND id = ? FOR UPDATE", (workspace_id, run_id))
+            if run is None:
+                raise RepositoryConflict("Run does not exist in this Workspace")
+            if run["status"] == "cancelled" or (
+                run["status"] == "cancel_requested"
+                and event_type not in {"tool.completed", "citation.created"}
+            ):
+                raise RepositoryConflict("Run no longer accepts execution output")
             return self._append_event_locked(workspace_id, run_id, event_type, payload)
 
     def _append_event_locked(

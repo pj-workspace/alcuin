@@ -50,7 +50,7 @@ export function approvalRecords(events: ExecutionEvent[], runStatus: RunStatus |
       }
     }
   }
-  const terminal = ["completed", "failed", "cancelled"].includes(runStatus);
+  const terminal = ["completed", "failed", "cancelled", "cancel_requested"].includes(runStatus);
   for (const record of records.values()) {
     if (record.state === "pending" && terminal) record.state = "unavailable";
     // Authorization survived but execution has no durable receipt; don't

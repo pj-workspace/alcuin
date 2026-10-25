@@ -40,6 +40,8 @@ class EventType(StrEnum):
     CITATION_CREATED = "citation.created"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
+    RUN_CANCEL_REQUESTED = "run.cancel_requested"
+    RUN_CANCELLED = "run.cancelled"
 
 
 class ReasoningEffort(StrEnum):
@@ -199,9 +201,15 @@ class RequestedToolCall(StrictModel):
         return self
 
 
+class ArtifactReferenceInput(StrictModel):
+    artifact_id: str = Field(min_length=1, max_length=200)
+    expected_version: int = Field(gt=0, strict=True)
+
+
 class RunCreate(StrictModel):
     input: str = Field(default="", max_length=40_000)
     attachment_ids: list[str] = Field(default_factory=list, max_length=4)
+    artifact_references: list[ArtifactReferenceInput] = Field(default_factory=list, max_length=1)
     thinking: bool | None = None
     model_override: str | None = Field(
         default=None,
@@ -214,6 +222,10 @@ class RunCreate(StrictModel):
 
     @model_validator(mode="after")
     def validate_content(self) -> "RunCreate":
+        if self.artifact_references and not self.input.strip():
+            raise ValueError("artifact references require an explicit instruction")
+        if self.artifact_references and self.requested_tool:
+            raise ValueError("requested tool runs cannot include artifact references")
         if not self.input.strip() and not self.attachment_ids and not self.requested_tool:
             raise ValueError("a run requires text, an attachment, or a requested tool")
         if self.requested_tool and self.attachment_ids:

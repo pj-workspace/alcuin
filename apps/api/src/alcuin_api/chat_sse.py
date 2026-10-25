@@ -62,6 +62,10 @@ def project_execution_event(event: dict[str, Any]) -> list[dict[str, Any]]:
         return [{**common, "type": "source-registry", "sources": [payload]}]
     if event_type == EventType.RUN_FAILED:
         return [{**common, "type": "error", "message": payload.get("message", "Run failed")}]
+    if event_type == EventType.RUN_CANCEL_REQUESTED:
+        return [{**common, "type": "cancel-requested", **payload}]
+    if event_type == EventType.RUN_CANCELLED:
+        return [{**common, "type": "cancelled", **payload}]
     if event_type == EventType.RUN_COMPLETED:
         return [{**common, "type": "done"}]
     return []

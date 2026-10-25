@@ -7,6 +7,7 @@ export type RunStatus =
   | "running"
   | "waiting_for_approval"
   | "waiting_for_input"
+  | "cancel_requested"
   | "completed"
   | "failed"
   | "cancelled";
@@ -15,7 +16,7 @@ export type RunStatus =
  * Message status is independent from Run status: a failed Run may still leave a
  * safe, partial assistant message that the conversation can render.
  */
-export type MessageStatus = "pending" | "streaming" | "completed" | "failed";
+export type MessageStatus = "pending" | "streaming" | "completed" | "failed" | "cancelled";
 
 export interface TextMessagePart {
   type: "text";
@@ -40,7 +41,25 @@ export interface TaskInstructionMessagePart {
   text: string;
 }
 
-export type MessagePart = TextMessagePart | AttachmentMessagePart | TaskInstructionMessagePart;
+export interface ArtifactReferenceInput {
+  artifact_id: string;
+  expected_version: number;
+}
+
+/** Immutable saved Artifact snapshot attached to one user message. */
+export interface ArtifactReferenceMessagePart {
+  type: "artifact_reference";
+  artifact_id: string;
+  version: number;
+  title: string;
+  content_type: ArtifactResource["content_type"];
+  source_run_id: string;
+  source_run_status?: RunStatus | "unknown";
+  sha256: string;
+  content: string;
+}
+
+export type MessagePart = TextMessagePart | AttachmentMessagePart | TaskInstructionMessagePart | ArtifactReferenceMessagePart;
 
 export type SkillInvocationMode = "auto" | "always" | "manual";
 

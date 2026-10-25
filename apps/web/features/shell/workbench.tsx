@@ -3,7 +3,6 @@
 import type {
   AgentDefinition,
   BootstrapPayload,
-  ExecutionEvent,
   Rule,
   Skill,
   Thread,
@@ -89,7 +88,6 @@ export function Workbench({ surface }: { surface: Surface }) {
   const pathname = usePathname();
   const router = useRouter();
   const [data, setData] = useState<BootstrapPayload | null>(null);
-  const [events, setEvents] = useState<ExecutionEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -139,7 +137,7 @@ export function Workbench({ surface }: { surface: Surface }) {
     onUpdated: acceptThreadTitle,
   });
 
-  const refresh = useCallback(async (preferredRunId?: string) => {
+  const refresh = useCallback(async () => {
     try {
       const bootstrap = await alcuinApi.bootstrap();
       setData((current) => current?.workspace.id === bootstrap.workspace.id ? {
@@ -160,11 +158,6 @@ export function Workbench({ surface }: { surface: Surface }) {
         return next;
       });
       setError(null);
-      const selectedRunId = preferredRunId ?? bootstrap.runs[0]?.id;
-      if (selectedRunId) {
-        const run = await alcuinApi.getRun(selectedRunId);
-        setEvents(run.events);
-      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to connect to Alcuin API");
     } finally {
@@ -390,7 +383,7 @@ export function Workbench({ surface }: { surface: Surface }) {
         />
       );
       case "extensions": return <ExtensionsView extensions={data.extensions} skills={skills} rules={rules} customizationError={customizationError} onChanged={async () => { await Promise.all([refresh(), refreshCustomization()]); }} />;
-      case "runs": return <RunsView runs={data.runs} events={events} onSelectEvents={setEvents} />;
+      case "runs": return <RunsView runs={data.runs} />;
       case "embed": return <EmbedView agent={activeAgent} />;
       default: return (
         <StudioView
@@ -410,7 +403,7 @@ export function Workbench({ surface }: { surface: Surface }) {
         />
       );
     }
-  }, [acceptCreatedThread, activeAgent, activeThread, activeThreadId, customizationError, data, events, locale, openCreateAgent, providerCatalogError, providers, refresh, refreshCustomization, refreshThreadTitle, rules, selectAgent, skills, surface]);
+  }, [acceptCreatedThread, activeAgent, activeThread, activeThreadId, customizationError, data, locale, openCreateAgent, providerCatalogError, providers, refresh, refreshCustomization, refreshThreadTitle, rules, selectAgent, skills, surface]);
 
   return (
     <main className="app-frame">

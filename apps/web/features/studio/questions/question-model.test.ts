@@ -8,7 +8,7 @@ const answered: ExecutionEvent = { ...required, id: "ev2", sequence: 3, type: "i
 test("only a waiting Run offers an answer; replayed frames do not duplicate questions", () => {
   assert.equal(questionRecords([required, required], "waiting_for_input").length, 1);
   assert.equal(questionRecords([required], "waiting_for_input")[0].state, "pending");
-  for (const status of ["failed", "completed", "cancelled", "running"] as const) assert.equal(questionRecords([required], status)[0].state, "closed");
+  for (const status of ["failed", "completed", "cancelled", "cancel_requested", "running"] as const) assert.equal(questionRecords([required], status)[0].state, "closed");
 });
 test("ordered records preserve answers and explicit skipping on refresh", () => {
   assert.equal(questionRecords([answered, required], "completed")[0].answer, "Engineering");

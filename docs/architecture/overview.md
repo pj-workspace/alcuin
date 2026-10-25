@@ -2,6 +2,23 @@
 
 Alcuin's current product center is the **Agent Foundation**: Studio, durable conversations and Tasks, Skills/Rules, deterministic context assembly, governed capabilities, source inspection, independent Artifacts, and persisted execution events. Agent snapshots and internal revisions support correctness; version-management product flows and quick embedding remain frozen.
 
+## Canvas draft recovery
+
+Canvas editor drafts are tab-local, not server document revisions. A scoped store
+keys each draft by Workspace, Thread and Artifact. Input updates the in-memory
+copy synchronously; a 250ms debounce and unmount/pagehide flush persist it to
+sessionStorage. Drafts retain their original saved baseline. A saved-document
+conflict preserves local text and requires an explicit choice after reviewing
+the current server content. Keeping a draft only updates the edit baseline;
+the ordinary optimistic-concurrency Save request is still required.
+
+Save results are guarded by editor identity/epoch. Draft deletion uses the token
+captured when Save started, so a late success cannot erase a newer edit. Failed
+storage writes retain memory copies and surface a refresh/close warning. This
+is convenience recovery within the same browser tab, not encrypted storage,
+cross-device sync or a guarantee after tab closure. Only saved server content
+may be attached to an Agent message; local drafts never enter model context.
+
 ## Core Boundary
 
 Alcuin separates the platform control plane from execution runtimes and domain extensions.
@@ -173,6 +190,101 @@ Mutating tools pause at `approval.required`. An approval decision does not manuf
 Human decisions emit `approval.decided` with the approval/call identifiers, decision, optional reason, and timestamp. The decision, ordered event, and Run resumption status commit atomically; Task approvals also retain their existing pause/cancel boundary transaction. Duplicate or stale decisions cannot execute a tool again. An API restart after authorization fails the interrupted Run for verification rather than automatically replaying an uncertain mutation. Notes are audit text, not new instructions or credential fields; known configured secrets are redacted and credential-shaped notes rejected.
 
 Studio shows an inline action review with field-by-field arguments, optional reason, and explicit one-time allow/decline controls. Permission and execution outcomes are separate states. Closed or failed Runs never keep an actionable confirmation button. Recent decision cards survive navigation and subsequent turns through the bounded `ThreadDetail.approval_events` projection (latest 50 message Runs, at most 128 records per Run); tool receipts omit result bodies. Older full records remain in the Run event endpoint. Card entry uses 180ms opacity/translation, details use a bounded disclosure transition, and reduced-motion settings are respected. This mutation-confirmation flow is distinct from human clarification. Ordinary model-generated Studio approvals restore the model loop as described above; one-off, legacy, Task and Embed approvals retain their adapter/receipt behavior. Displayed thought-process duration excludes both question and approval waits, including after refresh.
+
+### Stopping an ordinary Studio Run
+
+`POST /v1/runs/{run_id}/cancel` is a Workspace-operator action and returns the
+canonical Run plus its ordered events. Embed callers are denied; Task-owned Runs
+must use their Task controls. Repeated requests are idempotent. A completed or
+failed Run is returned unchanged rather than rewritten as cancelled.
+
+Storage atomically records `cancel_requested` and `run.cancel_requested`, clears
+private question/approval continuations, and keeps the Thread active until the
+terminal `cancelled` / `run.cancelled` receipt. Local execution ownership lives in
+`alcuin_api.run_control`; durable state remains authoritative. Generation and
+read-only waits are interrupted. Already-dispatched mutations are allowed to
+return their actual receipt and citations before stopping; no subsequent model
+or tool call is dispatched. Stopping is not rollback. The terminal receipt flags
+possibly completed external actions for verification.
+
+Partial answer text, Artifacts and source evidence remain available. Stale
+question/approval actions are rejected, and both SSE protocols terminate on the
+cancelled receipt. Studio waits for server confirmation, supports retry after an
+unconfirmed request, and uses bounded snapshot recovery when an accepted stop
+loses its stream connection. It never converts a connection failure into a
+successful stop. Restart recovery closes pending stops conservatively without
+replaying actions. This is single-worker ownership, not distributed cancellation.
+
+Cancelled assistant Messages keep their partial text (or an empty text part when
+stopped before any output). Context composition marks these Messages incomplete
+and carries the stop warning through compaction; it does not rewrite the saved
+answer or treat an interrupted response as proof that an external action finished.
+Retrying uncertain actions still requires verification and the applicable approval.
+
+### User-facing work records
+
+The Runs surface projects persisted execution records into results, decisions,
+action outcomes, deliverables, and source evidence. Its list covers the latest
+30 Workspace-scoped Runs; search and status filters operate on that list, not
+the entire history. It does not report fabricated aggregate success rates,
+token usage, or latency. Total duration is recorded wall time including human
+waits; missing completion times remain unknown.
+
+Each selection loads its own `getRun` snapshot and verifies Run, Workspace, and
+Thread identity. Event projections require the selected Run identity and reject
+explicit mismatched Workspace fields. Artifact projections additionally verify
+Workspace, Thread, and source Run ownership. Navigation aborts obsolete requests;
+bounded timeouts and explicit retry prevent failed or late requests from
+substituting another record. Refresh is manual, and open work is labelled as a
+snapshot rather than presented as a live feed. The shell no longer keeps an
+unscoped latest-Run event array for this surface.
+
+`features/runs/run-receipt-model` owns pure filtering, receipt projection, duration,
+and portable Markdown export. Authorization and execution results stay separate;
+terminal work without a tool receipt has an unconfirmed outcome. The visible
+answer uses only the selected Run's `message.delta` events and reuses Studio's
+citation reader. Downloads contain allowlisted status, tool outcomes, and source
+identifiers/locators, including document/page/chunk references where available;
+they omit answer transcripts, private reasoning, and raw tool inputs/results.
+This is a receipt, not a factuality guarantee or a full audit export.
+
+Links return to the original conversation for continuation and Artifact editing;
+they do not replay an action or claim to deep-link a particular Artifact. Desktop
+uses a list/detail layout; mobile keeps one panel visible and restores list focus
+and position on return. Scoped 180ms entry motion cleans up on navigation and is
+disabled for reduced-motion preferences.
+
+## Explicit saved-document context
+
+Studio can attach one saved Canvas document to an ordinary conversation message
+through “Use in conversation”. It does not silently include every open document,
+send unsaved editor contents, or overwrite the original. Tasks, requested-tool
+Runs, and Embed sessions do not support this reference in the current slice.
+
+`RunCreate.artifact_references` contains only `artifact_id` and `expected_version`.
+The API's `artifact_references` module checks the same Workspace and Thread,
+rejects a stale version with `artifact_reference_changed` (409), and captures a
+server-owned snapshot in the accepted user Message parts. Each part preserves
+the source Run, title, content type, saved version, exact content and SHA-256.
+Later Canvas edits do not alter the content already sent. References are limited
+to one document and 100,000 UTF-8 bytes; oversized content is rejected rather than
+silently truncated. Existing JSON Message parts store this additive contract.
+
+Context composition includes the snapshot as JSON-encoded untrusted reference
+material and accounts for it in the context budget and compaction digest. It is
+not an instruction or authorization. Incomplete source Runs are labelled as
+such. Citation markers remain scoped to the original Run; they are not promoted
+to new evidence without retrieval/verification. The digest proves content
+identity, not factual correctness or author identity.
+
+Studio shows the reference in the composer and sent user bubble, with a read-only
+snapshot viewer. A bounded, scoped message read replaces the optimistic snapshot
+with canonical server fields without delaying the output stream. Late responses
+after Thread navigation cannot clear another draft or hydrate another Thread.
+A stale-reference rejection preserves the draft, refreshes the Canvas, and asks
+the user to attach the updated document explicitly. Scoped 180ms entry and 140ms
+dialog exit motion respect reduced-motion settings; the native modal restores
+focus on close and renders reference HTML as literal text.
 
 See [ADR-0001](adr-0001-runtime-extension-contracts.md) for the contract decisions implemented by the prototype.
 See [ADR-0002](adr-0002-modular-package-boundaries.md) for the implemented package dependency rules and staged extraction order.

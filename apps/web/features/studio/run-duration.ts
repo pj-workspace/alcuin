@@ -2,11 +2,11 @@ import type { ExecutionEvent } from "@alcuin/contracts";
 
 /** Execution wall time excluding human clarification and approval waits. */
 export function activeRunDuration(events: ExecutionEvent[], now?: number): number {
-  const boundaries = events.filter((event) => ["run.started", "run.completed", "run.failed", "input.required", "input.answered", "approval.required", "approval.decided"].includes(event.type)).sort((a, b) => a.sequence - b.sequence);
+  const boundaries = events.filter((event) => ["run.started", "run.completed", "run.failed", "run.cancelled", "input.required", "input.answered", "approval.required", "approval.decided"].includes(event.type)).sort((a, b) => a.sequence - b.sequence);
   const start = boundaries.find((event) => event.type === "run.started");
   if (!start) return 0;
   const startMs = Date.parse(start.timestamp);
-  const terminal = boundaries.find((event) => event.type === "run.completed" || event.type === "run.failed");
+  const terminal = boundaries.find((event) => ["run.completed", "run.failed", "run.cancelled"].includes(event.type));
   const endMs = terminal ? Date.parse(terminal.timestamp) : now ?? Date.parse(boundaries.at(-1)!.timestamp);
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return 0;
   const waiting = new Set<string>();

@@ -20,6 +20,8 @@ test("approval and execution are distinct; the result must match the call", () =
 });
 
 test("completed Runs and missing receipts cannot be presented as approval success", () => {
+  assert.equal(approvalRecords([required], "cancel_requested")[0].state, "unavailable");
+  assert.equal(approvalRecords([required, decided], "cancelled")[0].state, "unavailable");
   assert.equal(approvalRecords([required], "failed")[0].state, "unavailable");
   assert.equal(approvalRecords([required, decided], "completed")[0].state, "unavailable");
   const done = event(3, "tool.completed", { call_id: "call1", status: "succeeded" });

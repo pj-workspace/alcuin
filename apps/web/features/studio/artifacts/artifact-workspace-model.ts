@@ -29,6 +29,9 @@ export interface ArtifactWorkspaceState {
   draftTitle: string;
   draftContent: string;
   baseVersion: number | null;
+  baseTitle: string;
+  baseContent: string;
+  editorEpoch: number;
   conflictLatest: ArtifactResource | null;
   refreshingConflict: boolean;
   message: string | null;
@@ -42,10 +45,28 @@ export const initialArtifactWorkspaceState: ArtifactWorkspaceState = {
   draftTitle: "",
   draftContent: "",
   baseVersion: null,
+  baseTitle: "",
+  baseContent: "",
+  editorEpoch: 0,
   conflictLatest: null,
   refreshingConflict: false,
   message: null,
 };
+
+export interface ArtifactEditorScope {
+  artifactId: string;
+  workspaceId: string;
+  threadId: string;
+  editorEpoch: number;
+}
+
+export interface ArtifactDraftValues {
+  baseVersion: number;
+  baseTitle: string;
+  baseContent: string;
+  draftTitle: string;
+  draftContent: string;
+}
 
 export type ArtifactWorkspaceAction =
   | { type: "thread.reset" }
@@ -55,22 +76,28 @@ export type ArtifactWorkspaceAction =
   | { type: "resource.received"; resource: ArtifactResource; select?: boolean }
   | { type: "resource.selected"; id: string }
   | { type: "edit.started" }
+  | { type: "draft.restored"; resource: ArtifactResource; draft: ArtifactDraftValues }
   | { type: "draft.changed"; title?: string; content?: string }
   | { type: "edit.cancelled" }
   | { type: "save.started" }
-  | { type: "save.succeeded"; resource: ArtifactResource }
-  | { type: "save.failed"; message: string }
-  | { type: "save.conflict"; message: string; latest?: ArtifactResource | null }
+  | { type: "save.succeeded"; resource: ArtifactResource; scope: ArtifactEditorScope }
+  | { type: "save.failed"; message: string; scope: ArtifactEditorScope }
+  | { type: "save.conflict"; message: string; latest?: ArtifactResource | null; scope: ArtifactEditorScope }
   | { type: "conflict.refreshing" }
-  | { type: "conflict.refreshed"; resource: ArtifactResource }
-  | { type: "saved.settled" };
+  | { type: "conflict.refreshed"; resource: ArtifactResource; scope: ArtifactEditorScope }
+  | { type: "conflict.use-latest" }
+  | { type: "conflict.keep-mine" }
+  | { type: "saved.settled"; scope: ArtifactEditorScope };
 
 export function artifactWorkspaceReducer(
   state: ArtifactWorkspaceState,
   action: ArtifactWorkspaceAction,
 ): ArtifactWorkspaceState {
-  if (action.type === "thread.reset") return initialArtifactWorkspaceState;
-  if (action.type === "resources.loading") return { ...initialArtifactWorkspaceState, phase: "loading" };
+  if ("scope" in action && !matchesEditorScope(state, action.scope)) return state;
+  if ("scope" in action && "resource" in action && !matchesResourceScope(action.resource, action.scope)) return state;
+  if (action.type === "save.conflict" && action.latest && !matchesResourceScope(action.latest, action.scope)) return state;
+  if (action.type === "thread.reset") return { ...initialArtifactWorkspaceState, editorEpoch: state.editorEpoch + 1 };
+  if (action.type === "resources.loading") return { ...initialArtifactWorkspaceState, editorEpoch: state.editorEpoch + 1, phase: "loading" };
   if (action.type === "resources.loaded") {
     const resources = action.resources.reduce(
       (current, resource) => upsertArtifact(current, resource),
@@ -94,7 +121,7 @@ export function artifactWorkspaceReducer(
     const selectedId = resources.some((item) => item.id === state.selectedId)
       ? state.selectedId
       : resources[0]?.id ?? null;
-    return { ...initialArtifactWorkspaceState, resources, selectedId, phase: "preview" };
+    return { ...initialArtifactWorkspaceState, editorEpoch: state.editorEpoch + 1, resources, selectedId, phase: "preview" };
   }
   if (action.type === "resources.failed") {
     return { ...state, phase: "error", message: action.message };
@@ -140,10 +167,24 @@ export function artifactWorkspaceReducer(
       draftTitle: resource.title,
       draftContent: resource.content,
       baseVersion: resource.version,
+      baseTitle: resource.title,
+      baseContent: resource.content,
+      editorEpoch: state.editorEpoch + 1,
       conflictLatest: null,
       refreshingConflict: false,
       message: null,
     };
+  }
+  if (action.type === "draft.restored") {
+    const selected = selectedArtifact(state);
+    if (!selected || selected.id !== action.resource.id || selected.workspace_id !== action.resource.workspace_id
+      || selected.thread_id !== action.resource.thread_id || isEditorState(state)) return state;
+    const resources = upsertArtifact(state.resources, action.resource);
+    const latest = resources.find((item) => item.id === selected.id)!;
+    const conflict = latest.version !== action.draft.baseVersion;
+    return { ...state, ...action.draft, resources, editorEpoch: state.editorEpoch + 1,
+      phase: conflict ? "conflict" : "editing", conflictLatest: conflict ? latest : null,
+      refreshingConflict: false, message: conflict ? "Artifact changed while it was being edited" : null };
   }
   if (action.type === "draft.changed") {
     return {
@@ -165,43 +206,57 @@ export function artifactWorkspaceReducer(
       phase: "preview",
     }, pending ?? selectedArtifact(state));
   }
-  if (action.type === "save.started") return { ...state, phase: "saving", message: null };
+  if (action.type === "save.started") return isEditorState(state) && state.phase !== "conflict" ? { ...state, phase: "saving", message: null } : state;
   if (action.type === "save.succeeded") {
     const resources = upsertArtifact(state.resources, action.resource);
+    const latest = resources.find((item) => item.id === action.resource.id)!;
+    const superseded = latest.version > action.resource.version;
     return {
       ...state,
       resources,
       selectedId: action.resource.id,
-      phase: "saved",
+      phase: superseded ? "conflict" : "saved",
       draftTitle: action.resource.title,
       draftContent: action.resource.content,
       baseVersion: action.resource.version,
-      conflictLatest: null,
+      baseTitle: action.resource.title,
+      baseContent: action.resource.content,
+      conflictLatest: superseded ? latest : null,
       refreshingConflict: false,
       message: null,
     };
   }
   if (action.type === "save.failed") return { ...state, phase: "error", message: action.message };
   if (action.type === "save.conflict") {
+    const resources = action.latest ? upsertArtifact(state.resources, action.latest) : state.resources;
+    const latest = resources.find((item) => item.id === state.selectedId);
     return {
       ...state,
-      resources: action.latest ? upsertArtifact(state.resources, action.latest) : state.resources,
+      resources,
       phase: "conflict",
-      conflictLatest: action.latest ?? null,
+      conflictLatest: latest && latest.version !== state.baseVersion ? latest : state.conflictLatest,
       refreshingConflict: false,
       message: action.message,
     };
   }
-  if (action.type === "conflict.refreshing") return { ...state, refreshingConflict: true };
+  if (action.type === "conflict.refreshing") return state.phase === "conflict" ? { ...state, refreshingConflict: true } : state;
   if (action.type === "conflict.refreshed") {
-    return editorReset({
+    if (state.phase !== "conflict") return state;
+    const resources = upsertArtifact(state.resources, action.resource);
+    return {
       ...state,
-      resources: upsertArtifact(state.resources, action.resource),
-      selectedId: action.resource.id,
-      pendingSelectedId: null,
-      phase: "preview",
+      resources,
+      conflictLatest: resources.find((item) => item.id === state.selectedId) ?? null,
       refreshingConflict: false,
-    }, action.resource);
+    };
+  }
+  if (action.type === "conflict.use-latest" || action.type === "conflict.keep-mine") {
+    if (state.phase !== "conflict" || !state.conflictLatest) return state;
+    const latest = selectedArtifact(state);
+    if (!latest) return state;
+    if (action.type === "conflict.use-latest") return editorReset({ ...state, phase: "preview" }, latest);
+    return { ...state, baseVersion: latest.version, baseTitle: latest.title, baseContent: latest.content,
+      editorEpoch: state.editorEpoch + 1, phase: "editing", conflictLatest: null, refreshingConflict: false, message: null };
   }
   if (action.type === "saved.settled" && state.phase === "saved") {
     const pending = state.pendingSelectedId
@@ -222,8 +277,22 @@ export function selectedArtifact(state: ArtifactWorkspaceState): ArtifactResourc
 }
 
 export function artifactDraftHasChanges(state: ArtifactWorkspaceState): boolean {
-  const selected = selectedArtifact(state);
-  return Boolean(selected && (state.draftTitle !== selected.title || state.draftContent !== selected.content));
+  return state.baseVersion !== null && (state.draftTitle !== state.baseTitle || state.draftContent !== state.baseContent);
+}
+
+export function artifactEditorScope(state: ArtifactWorkspaceState): ArtifactEditorScope | null {
+  const resource = selectedArtifact(state);
+  return resource ? { artifactId: resource.id, workspaceId: resource.workspace_id,
+    threadId: resource.thread_id, editorEpoch: state.editorEpoch } : null;
+}
+
+function matchesResourceScope(resource: ArtifactResource, scope: ArtifactEditorScope): boolean {
+  return resource.id === scope.artifactId && resource.workspace_id === scope.workspaceId && resource.thread_id === scope.threadId;
+}
+
+function matchesEditorScope(state: ArtifactWorkspaceState, scope: ArtifactEditorScope): boolean {
+  const resource = selectedArtifact(state);
+  return Boolean(resource && matchesResourceScope(resource, scope) && state.editorEpoch === scope.editorEpoch);
 }
 
 export function isArtifactResource(value: unknown): value is ArtifactResource {
@@ -263,6 +332,9 @@ function editorReset(
     draftTitle: resource?.title ?? "",
     draftContent: resource?.content ?? "",
     baseVersion: resource?.version ?? null,
+    baseTitle: resource?.title ?? "",
+    baseContent: resource?.content ?? "",
+    editorEpoch: state.editorEpoch + 1,
     conflictLatest: null,
     refreshingConflict: false,
     message: null,

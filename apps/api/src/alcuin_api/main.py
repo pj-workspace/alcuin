@@ -52,6 +52,7 @@ from fastapi.responses import StreamingResponse
 
 from .config import Settings, get_settings
 from .attachments import AttachmentService, AttachmentUploadError, public_attachment
+from .artifact_references import resolve_artifact_references
 from alcuin_core.contracts import (
     AgentCreate,
     AgentDefinition,
@@ -224,8 +225,12 @@ def create_app(
         yield
         await application.state.task_coordinator.close()
         await application.state.thread_titles.close()
-        for task in application.state.tasks:
+        tasks = tuple(application.state.tasks)
+        for task in tasks:
             task.cancel()
+        # Owned workers persist their stop receipt in finally/done callbacks.
+        # Drain them while the repository and tool dependencies remain open.
+        await asyncio.gather(*tasks, return_exceptions=True)
         if web_search_service:
             await web_search_service.aclose()
         if configured_knowledge_service:
@@ -1275,6 +1280,10 @@ def create_app(
             raise missing("Thread")
         require_thread_agent(scope, thread)
         version_id = thread["agent_version_id"]
+        artifact_references = resolve_artifact_references(
+            repository, scope.workspace_id, thread_id, payload.artifact_references,
+            embed=bool(scope.embed),
+        )
         version = repository.get_agent_version(scope.workspace_id, version_id)
         if not version or version["agent_id"] != thread["agent_id"]:
             raise HTTPException(
@@ -1321,6 +1330,7 @@ def create_app(
                 payload.requested_tool.name if payload.requested_tool else None
             ),
         )
+        message_parts.extend(artifact_references)
         attachment_texts = {
             str(attachment["id"]): str(blob["extracted_text"])
             for attachment in attachments
@@ -1384,7 +1394,7 @@ def create_app(
             include_workspace_preferences=not scope.embed,
             interactive=not scope.embed,
         )
-        task = asyncio.create_task(app.state.runtime.execute(runtime_request))
+        task = app.state.runtime.run_controls.schedule(scope.workspace_id, run["id"], lambda: app.state.runtime.execute(runtime_request))
         app.state.tasks.add(task)
         task.add_done_callback(app.state.tasks.discard)
         return run
@@ -1401,6 +1411,18 @@ def create_app(
         if not run:
             raise missing("Run")
         require_run_agent(scope, run)
+        return {**run, "events": repository.list_events(scope.workspace_id, run_id)}
+
+    @app.post("/v1/runs/{run_id}/cancel")
+    async def cancel_run(run_id: str, scope: ScopeDependency) -> dict:
+        require_workspace_operator(scope)
+        scope.require("run:create")
+        try:
+            run = app.state.runtime.run_controls.cancel(scope.workspace_id, run_id)
+        except RepositoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not run:
+            raise missing("Run")
         return {**run, "events": repository.list_events(scope.workspace_id, run_id)}
 
     @app.get("/v1/runs/{run_id}/citations")
@@ -1544,10 +1566,11 @@ def create_app(
                         if event["type"] in {
                             EventType.RUN_COMPLETED,
                             EventType.RUN_FAILED,
+                            EventType.RUN_CANCELLED,
                         }:
                             if (
                                 protocol == "execution"
-                                or event["type"] == EventType.RUN_FAILED
+                                or event["type"] in {EventType.RUN_FAILED, EventType.RUN_CANCELLED}
                             ):
                                 yield "data: [DONE]\n\n"
                             return
@@ -1598,7 +1621,7 @@ def create_app(
             raise HTTPException(status_code=422, detail="Do not include credentials in an answer") from exc
         if record is None:
             raise missing("Question")
-        task = asyncio.create_task(app.state.runtime.resume_after_input(record))
+        task = app.state.runtime.run_controls.schedule(scope.workspace_id, run_id, lambda: app.state.runtime.resume_after_input(record))
         app.state.tasks.add(task)
         task.add_done_callback(app.state.tasks.discard)
         return {"input_id": input_id, "run_id": run_id, "status": record["status"]}
@@ -1651,7 +1674,7 @@ def create_app(
                 raise HTTPException(status_code=409, detail="Approval already decided")
 
         if task_link is None and repository.has_approval_continuation(scope.workspace_id, run_id, approval_id):
-            task = asyncio.create_task(app.state.runtime.continue_approval_in_background(
+            task = app.state.runtime.run_controls.schedule(scope.workspace_id, run_id, lambda: app.state.runtime.continue_approval_in_background(
                 scope.workspace_id, run_id, payload.decision == "approved", approval["request"], approval_id,
             ))
             app.state.tasks.add(task)
@@ -1659,12 +1682,27 @@ def create_app(
             return decided
 
         try:
-            await app.state.runtime.resume_after_approval(
-                scope.workspace_id,
-                run_id,
-                payload.decision == "approved",
-                approval["request"],
-            )
+            if task_link is None:
+                task = app.state.runtime.run_controls.schedule(
+                    scope.workspace_id, run_id,
+                    lambda: app.state.runtime.resume_after_approval(
+                        scope.workspace_id, run_id, payload.decision == "approved", approval["request"],
+                    ),
+                )
+                app.state.tasks.add(task)
+                task.add_done_callback(app.state.tasks.discard)
+                # Keep the legacy response timing without coupling an authorized
+                # operation's lifetime to its request connection.
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    stopped = repository.get_run(scope.workspace_id, run_id)
+                    if not stopped or stopped["status"] not in {"cancel_requested", "cancelled"}:
+                        raise
+            else:
+                await app.state.runtime.resume_after_approval(
+                    scope.workspace_id, run_id, payload.decision == "approved", approval["request"],
+                )
         except Exception:
             if resumed_task is not None:
                 # The authorization is durable but the result is not. Never replay

@@ -10,6 +10,7 @@ import { ApprovalCard } from "@/features/studio/approvals/approval-card";
 import { approvalRecords, type ApprovalDecision } from "@/features/studio/approvals/approval-model";
 import { QuestionCard } from "@/features/studio/questions/question-card";
 import { questionRecords } from "@/features/studio/questions/question-model";
+import { MessageArtifactReferences } from "@/features/studio/artifacts/artifact-reference";
 
 export const ConversationTurn = memo(function ConversationTurn({
   turn,
@@ -34,13 +35,14 @@ export const ConversationTurn = memo(function ConversationTurn({
 }) {
   const { t } = useI18n();
   const approvals = approvalRecords(turn.events, turn.status);
-  const hasUserContent = Boolean(turn.input.trim() || turn.attachments.length > 0);
+  const hasUserContent = Boolean(turn.input.trim() || turn.attachments.length > 0 || turn.artifactReferences?.length);
 
   return (
     <section className="conversation-turn" data-entering={turn.optimistic || undefined} data-active={active || undefined}>
       {hasUserContent && (
         <article className="user-turn" ref={userRef} aria-label={t("You said")}>
           <div className="user-message">
+            {Boolean(turn.artifactReferences?.length) && <MessageArtifactReferences references={turn.artifactReferences ?? []} />}
             <MessageAttachments attachments={turn.attachments} />
             {turn.input && <p>{turn.input}</p>}
           </div>
@@ -50,6 +52,7 @@ export const ConversationTurn = memo(function ConversationTurn({
         <div className="agent-turn-content">
           <RunOutput
             events={turn.events}
+            status={turn.status}
             runId={turn.runId}
             running={running}
             assistantText={turn.assistantText}

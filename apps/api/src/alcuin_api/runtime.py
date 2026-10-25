@@ -31,6 +31,7 @@ from .artifact_stream import ArtifactStream, OUTPUT_PROTOCOL, final_answer_commi
 from .evidence import RunCitationRegistry
 from alcuin_core.human_input import HumanQuestion
 from .continuations import prepare_continuation
+from .run_control import RunControls
 
 
 SKILL_RUNTIME_TOOL_IDS = ("skill.load", "skill.read_resource")
@@ -303,11 +304,13 @@ class OpenAICompatibleRuntime:
         transport: httpx.AsyncBaseTransport | None = None,
         tool_executor: ToolExecutor | None = None,
         attachment_resolver: AttachmentResolver | None = None,
+        run_controls: RunControls | None = None,
     ) -> None:
         self.settings = settings
         self.transport = transport
         self.tool_executor = tool_executor or ToolExecutor()
         self.attachment_resolver = attachment_resolver
+        self.run_controls = run_controls
 
     def _image_data_url(
         self,
@@ -551,6 +554,8 @@ class OpenAICompatibleRuntime:
         headers = {"Authorization": f"Bearer {provider.api_key}"}
         async with httpx.AsyncClient(timeout=90, transport=self.transport) as client:
             for _step in range(int(continuation.get("next_step", 0)), request.definition.runtime.max_steps):
+                if self.run_controls:
+                    self.run_controls.checkpoint(request.workspace_id, request.run_id)
                 payload: dict[str, Any] = {
                     "model": request.effective_model or provider.default_model,
                     "messages": provider_messages(),
@@ -729,6 +734,8 @@ class OpenAICompatibleRuntime:
                 )
 
                 for call_index, call in enumerate(normalized_calls):
+                    if self.run_controls:
+                        self.run_controls.checkpoint(request.workspace_id, request.run_id)
                     call_id = str(call["id"])
                     function = call["function"]
                     provider_name = str(function["name"])
@@ -932,6 +939,8 @@ class OpenAICompatibleRuntime:
                             and request.definition.policies.mutating_tools == "auto"
                             else tool_context
                         )
+                        if self.run_controls:
+                            self.run_controls.before_tool(request.workspace_id, request.run_id, mutating=mutating)
                         execution = await self.tool_executor.execute(
                             name,
                             arguments,
@@ -949,6 +958,8 @@ class OpenAICompatibleRuntime:
                                 "duration_ms": 0,
                             },
                         )
+                        if self.run_controls:
+                            self.run_controls.after_tool(request.workspace_id, request.run_id)
                         messages.append(
                             {
                                 "role": "tool",
@@ -985,6 +996,8 @@ class OpenAICompatibleRuntime:
                             EventType.CITATION_CREATED,
                             citation_payload,
                         )
+                    if self.run_controls:
+                        self.run_controls.after_tool(request.workspace_id, request.run_id)
                     messages.append(
                         {
                             "role": "tool",
@@ -1012,14 +1025,33 @@ class RuntimeOrchestrator:
         self.settings = settings
         self.tool_executor = tool_executor or ToolExecutor()
         self.sensitive_values = configured_secrets(settings)
+        self.run_controls = RunControls(store, self._finish_cancelled)
         self.provider_runtime: AgentRuntime = OpenAICompatibleRuntime(
             settings,
             transport=provider_transport,
             tool_executor=self.tool_executor,
             attachment_resolver=store,
+            run_controls=self.run_controls,
         )
         self.demo_runtime: AgentRuntime = LangGraphReactRuntime()
         self.context_composer = RunContextComposer(store, settings)
+
+    def _finish_cancelled(self, workspace_id: str, run_id: str, mutation_started: bool = False) -> None:
+        run = self.store.get_run(workspace_id, run_id)
+        if not run or run["status"] != "cancel_requested":
+            return
+        events = self.store.list_events(workspace_id, run_id)
+        mutating_calls = {event["payload"].get("call_id") for event in events if event["type"] == "tool.requested" and event["payload"].get("mutating")}
+        external_actions = mutation_started or any(
+            event["type"] == "tool.completed" and event["payload"].get("call_id") in mutating_calls
+            and event["payload"].get("status") in {"succeeded", "failed"}
+            for event in events
+        )
+        partial = "".join(str(event["payload"].get("delta") or "") for event in events if event["type"] == "message.delta")
+        self._finalize_terminal(workspace_id, run_id, "cancelled", partial, EventType.RUN_CANCELLED, {
+            "reason": "user_cancelled", "message": "Generation stopped. Existing output was kept.",
+            "external_actions_may_have_completed": external_actions,
+        })
 
     def redact_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         shaped = redact_sensitive(payload)
@@ -1214,6 +1246,7 @@ class RuntimeOrchestrator:
             },
         )
     async def execute(self, request: RuntimeRequest) -> None:
+        self.run_controls.checkpoint(request.workspace_id, request.run_id)
         if request.continuation is None:
             self._start_run(request)
         else:
@@ -1396,6 +1429,7 @@ class RuntimeOrchestrator:
             mutation_authorized = True
 
         try:
+            self.run_controls.before_tool(request.workspace_id, request.run_id, mutating=bool(definition.mutating))
             execution = await self.tool_executor.execute(
                 tool,
                 arguments,
@@ -1436,6 +1470,7 @@ class RuntimeOrchestrator:
                 EventType.CITATION_CREATED,
                 self.redact_payload(citation_payload),
             )
+        self.run_controls.after_tool(request.workspace_id, request.run_id)
         visible_summary = execution.result.summary
         self.store.append_event(
             request.workspace_id,
@@ -1491,6 +1526,7 @@ class RuntimeOrchestrator:
                 "duration_ms": 0,
             },
         )
+        self.run_controls.after_tool(request.workspace_id, request.run_id)
         self._finalize_terminal(
             request.workspace_id,
             request.run_id,
@@ -1510,6 +1546,7 @@ class RuntimeOrchestrator:
         })
 
     async def _resume_checkpoint(self, workspace_id: str, run_id: str, checkpoint: dict[str, Any], call_id: str, response: dict[str, Any]) -> None:
+        self.run_controls.checkpoint(workspace_id, run_id)
         try:
             run = self.store.get_run(workspace_id, run_id)
             if not run:
@@ -1557,6 +1594,7 @@ class RuntimeOrchestrator:
         request_payload: dict[str, Any],
         approval_id: str | None = None,
     ) -> None:
+        self.run_controls.checkpoint(workspace_id, run_id)
         checkpoint = self.store.take_approval_continuation(workspace_id, run_id, approval_id) if approval_id else None
         tool = request_payload.get("tool", "external.tool")
         if approved:
@@ -1583,6 +1621,7 @@ class RuntimeOrchestrator:
                     raise ToolError(
                         "thread_unavailable", "Thread is no longer available"
                     )
+                self.run_controls.before_tool(workspace_id, run_id, mutating=True)
                 execution = await self.tool_executor.execute(
                     tool,
                     arguments,
@@ -1609,6 +1648,7 @@ class RuntimeOrchestrator:
                         "duration_ms": 0,
                     },
                 )
+                self.run_controls.after_tool(workspace_id, run_id)
                 self._finalize_terminal(
                     workspace_id,
                     run_id,
@@ -1637,6 +1677,7 @@ class RuntimeOrchestrator:
                         "duration_ms": 0,
                     },
                 )
+                self.run_controls.after_tool(workspace_id, run_id)
                 self._finalize_terminal(
                     workspace_id,
                     run_id,
@@ -1672,6 +1713,7 @@ class RuntimeOrchestrator:
                     EventType.CITATION_CREATED,
                     self.redact_payload(citation_payload),
                 )
+            self.run_controls.after_tool(workspace_id, run_id)
             if checkpoint:
                 await self._resume_checkpoint(workspace_id, run_id, checkpoint, call_id, self.redact_payload(json.loads(evidence.model_content)))
                 return
