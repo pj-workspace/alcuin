@@ -53,13 +53,40 @@ Streaming output should distinguish assistant content, reasoning summaries, tool
 
 ### Human clarification
 
+`apps/api/src/alcuin_api/continuations.py` prepares private model-loop checkpoints independently
+of the interaction transport. It copies the transcript and request profile,
+decodes tool JSON before removing credential-shaped fields, and redacts known
+secret values before serialization (including quotes, newlines, and backslashes).
+It preserves step/tool budgets and attachment references without mutating the
+live transcript. Clarification and ordinary Studio model-generated approval
+boundaries share this preparation and restore mechanism.
+
 Ordinary Studio Runs advertise the intrinsic `human.ask` tool. A necessary question pauses at `input.required` / `waiting_for_input`; the user can select a suggestion, write an answer, or explicitly skip. `POST /v1/runs/{run_id}/inputs/{input_id}` atomically records `input.answered`, claims the pending question, and queues continuation of the **same Run**. The adapter restores its private transcript, step cursor, and per-tool budgets; already executed tools are not replayed. Remaining sibling calls in the paused batch receive truthful deferred responses and are not executed. At most three questions are allowed per Run, subject to the original step budget.
 
 `alcuin-core/human_input.py` owns the question/answer contract. The storage human-input mixin owns the scoped transaction; the runtime owns continuation; Studio's `questions` module owns the inline card and receipt. Pending questions survive refresh and API restart. If a worker dies after claiming an answer, startup recovery fails the interrupted Run instead of replaying uncertain work. This is single-worker continuation, not distributed failover.
 
 Private checkpoints are never returned by Thread/Run/SSE APIs. Images remain workspace-scoped attachment references and are revalidated before being inlined into a provider request. Known secrets are redacted and credential-shaped answers rejected; this ordinary clarification form is **not** encrypted credential entry. Answers are context data, never mutation permission. A bounded question/answer projection enriches future model context without rewriting immutable user messages; recent inline receipts hydrate from `ThreadDetail.input_events` (latest 50 message Runs, at most 400 input events).
 
-Question cards retain typed text on submission failures, reconcile ambiguous responses, provide keyboard-accessible suggestions/free text, and keep focus on the saved receipt. The receipt precedes the resulting answer. English/Chinese labels and dark/light themes share the existing Studio system; 180ms GSAP opacity/translation transitions respect reduced motion and clean up on unmount. Durable Task steps and the frozen Embed surface do not advertise this tool yet: they need their own suspension boundary. Mutation approval still executes its authorized adapter and receipt, not a restored multi-call model loop.
+Question cards retain typed text on submission failures, reconcile ambiguous responses, provide keyboard-accessible suggestions/free text, and keep focus on the saved receipt. The receipt precedes the resulting answer. English/Chinese labels and dark/light themes share the existing Studio system; 180ms GSAP opacity/translation transitions respect reduced motion and clean up on unmount. Durable Task steps and the frozen Embed surface do not advertise this tool yet: they need their own suspension boundary.
+
+### Approval continuation
+
+Ordinary Studio model-generated approvals atomically persist the private transcript,
+approval, waiting Run state, and public event. Migration `20261025_0013` stores
+the transcript separately from public approval records. A decision returns after
+it is recorded; a tracked background task executes the authorized tool once and
+restores the model loop in the same Run. Approved results include bounded evidence
+markers; denied calls receive an explicit refusal without executing the tool.
+Unexecuted sibling calls are deferred, not implicitly authorized. Original model,
+reasoning controls, step/tool budgets and attachment references are retained.
+No approval is offered on the final model step when continuation would be impossible.
+
+Claimed checkpoints are cleared but retain a consumed marker to reject duplicate
+internal claims. Restart recovery fails in-flight work without replay and clears
+abandoned private state; undecided approvals remain available. Tool execution
+failures remain explicit failed Runs requiring user verification, not automatic
+retries. Task, Embed, legacy approvals and explicitly requested one-off tools keep
+their previous adapter/receipt behavior; they do not gain model-loop continuation.
 
 ### Mobile composer
 
@@ -145,7 +172,7 @@ Mutating tools pause at `approval.required`. An approval decision does not manuf
 
 Human decisions emit `approval.decided` with the approval/call identifiers, decision, optional reason, and timestamp. The decision, ordered event, and Run resumption status commit atomically; Task approvals also retain their existing pause/cancel boundary transaction. Duplicate or stale decisions cannot execute a tool again. An API restart after authorization fails the interrupted Run for verification rather than automatically replaying an uncertain mutation. Notes are audit text, not new instructions or credential fields; known configured secrets are redacted and credential-shaped notes rejected.
 
-Studio shows an inline action review with field-by-field arguments, optional reason, and explicit one-time allow/decline controls. Permission and execution outcomes are separate states. Closed or failed Runs never keep an actionable confirmation button. Recent decision cards survive navigation and subsequent turns through the bounded `ThreadDetail.approval_events` projection (latest 50 message Runs, at most 128 records per Run); tool receipts omit result bodies. Older full records remain in the Run event endpoint. Card entry uses 180ms opacity/translation, details use a bounded disclosure transition, and reduced-motion settings are respected. This mutation-confirmation flow is distinct from the human clarification boundary described above. The current approval continuation executes the authorized adapter and produces its operation receipt; it does not yet restore a suspended multi-call model loop. Displayed thought-process duration excludes both question and approval waits, including after refresh.
+Studio shows an inline action review with field-by-field arguments, optional reason, and explicit one-time allow/decline controls. Permission and execution outcomes are separate states. Closed or failed Runs never keep an actionable confirmation button. Recent decision cards survive navigation and subsequent turns through the bounded `ThreadDetail.approval_events` projection (latest 50 message Runs, at most 128 records per Run); tool receipts omit result bodies. Older full records remain in the Run event endpoint. Card entry uses 180ms opacity/translation, details use a bounded disclosure transition, and reduced-motion settings are respected. This mutation-confirmation flow is distinct from human clarification. Ordinary model-generated Studio approvals restore the model loop as described above; one-off, legacy, Task and Embed approvals retain their adapter/receipt behavior. Displayed thought-process duration excludes both question and approval waits, including after refresh.
 
 See [ADR-0001](adr-0001-runtime-extension-contracts.md) for the contract decisions implemented by the prototype.
 See [ADR-0002](adr-0002-modular-package-boundaries.md) for the implemented package dependency rules and staged extraction order.
