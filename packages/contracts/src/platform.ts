@@ -18,6 +18,8 @@ export const EXECUTION_EVENT_TYPES = [
   "citation.created",
   "run.completed",
   "run.failed",
+  "run.cancel_requested",
+  "run.cancelled",
 ] as const;
 
 export type ExecutionEventType = (typeof EXECUTION_EVENT_TYPES)[number];

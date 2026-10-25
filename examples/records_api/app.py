@@ -99,6 +99,14 @@ def provider_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def provider_final_text(messages: list[dict[str, Any]]) -> str:
+    last_user = next((str(message.get("content") or "") for message in reversed(messages) if message.get("role") == "user"), "")
+    if "[artifact-reference-fixture]" in last_user:
+        return (
+            "I prepared a document for your review."
+            '<alcuin-artifact title="Reference fixture document" content-type="text/markdown">'
+            "# Reference fixture document\n\nOriginal snapshot A."
+            "</alcuin-artifact>"
+        )
     tool_message = next(
         (message for message in reversed(messages) if message.get("role") == "tool"),
         None,

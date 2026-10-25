@@ -9,6 +9,52 @@ import {
   taskEventFromCanonicalFrame,
 } from "./index.ts";
 
+test("listRuns reads workspace records and forwards cancellation", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const runs = [{ id: "run_1", thread_id: "thread_1", status: "completed" }];
+  const controller = new AbortController();
+  const client = createAlcuinClient({ baseUrl: "https://agents.example.test", workspaceId: "ws_records", fetch: async (url, init) => {
+    calls.push({ url: String(url), init });
+    return Response.json(runs);
+  } });
+  assert.deepEqual(await client.listRuns(controller.signal), runs);
+  assert.equal(calls[0].url, "https://agents.example.test/v1/runs");
+  assert.equal(calls[0].init?.method ?? "GET", "GET");
+  assert.equal(calls[0].init?.signal, controller.signal);
+  assert.equal(new Headers(calls[0].init?.headers).get("X-Alcuin-Workspace"), "ws_records");
+  assert.deepEqual(await client.listRuns(), runs);
+  assert.equal(calls[1].init?.signal, undefined);
+});
+
+test("cancelRun requests server cancellation with workspace scope and returns the actual status", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const snapshot = { id: "run/1", status: "completed", events: [] };
+  const client = createAlcuinClient({ baseUrl: "https://agents.example.test", workspaceId: "ws_stop", fetch: async (url, init) => {
+    calls.push({ url: String(url), init }); return Response.json(snapshot);
+  } });
+  const stopController = new AbortController();
+  assert.deepEqual(await client.cancelRun("run/1", stopController.signal), snapshot);
+  assert.equal(calls[0].init?.signal, stopController.signal);
+  assert.equal(calls[0].url, "https://agents.example.test/v1/runs/run%2F1/cancel");
+  assert.equal(calls[0].init?.method, "POST");
+  assert.equal(new Headers(calls[0].init?.headers).get("X-Alcuin-Workspace"), "ws_stop");
+  const controller = new AbortController();
+  await client.getRun("run1", controller.signal);
+  assert.equal(calls[1].init?.signal, controller.signal);
+});
+
+test("compact cancellation frames preserve intent and the actual terminal receipt", () => {
+  const common = { eventId: "e1", runId: "r1", sequence: 7, timestamp: "2026-10-25T00:00:00Z" };
+  const requested = executionEventFromChatFrame({ ...common, type: "cancel-requested", tool_in_flight: true });
+  assert.equal(requested?.type, "run.cancel_requested");
+  assert.deepEqual(requested?.payload, { tool_in_flight: true });
+  const cancelled = executionEventFromChatFrame({ ...common, type: "cancelled", reason: "user_cancelled", external_actions_may_have_completed: true });
+  assert.equal(cancelled?.type, "run.cancelled");
+  assert.equal(cancelled?.id, "e1");
+  assert.equal(cancelled?.sequence, 7);
+  assert.deepEqual(cancelled?.payload, { reason: "user_cancelled", external_actions_may_have_completed: true });
+});
+
 test("question answers preserve workspace scope and both compact question frames", async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const client = createAlcuinClient({ baseUrl: "https://agents.example.test", workspaceId: "ws_review", fetch: async (url, init) => {
@@ -280,6 +326,25 @@ test("client loads provider profiles and scopes model controls to one Run", asyn
   ]);
 });
 
+test("createRun sends only saved artifact identity and expected version", async () => {
+  const bodies: unknown[] = [];
+  const client = createAlcuinClient({
+    baseUrl: "https://agents.example.test",
+    workspaceId: "ws_test",
+    fetch: async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ id: "run_test" });
+    },
+  });
+  const reference = { artifact_id: "art_1", expected_version: 3, content: "must not be submitted", sha256: "client-supplied" };
+  await client.createRun("thr_test", "Revise the saved draft", [], { artifactReferences: [reference] });
+  await client.createRun("thr_test", "No reference", [], { artifactReferences: [] });
+  assert.deepEqual(bodies, [
+    { input: "Revise the saved draft", attachment_ids: [], artifact_references: [{ artifact_id: "art_1", expected_version: 3 }] },
+    { input: "No reference", attachment_ids: [], artifact_references: [] },
+  ]);
+});
+
 test("client manages staged Attachment resources without inline data", async () => {
   const seen: Array<{ url: string; method: string; contentType: string | null; body: BodyInit | null | undefined }> = [];
   const attachment = {
@@ -470,7 +535,9 @@ test("customization APIs persist next-turn context and verify plugin bytes", asy
 
 test("client reads Workspace-scoped thread messages and context traces", async () => {
   const seen: string[] = [];
-  const fetchMock: typeof fetch = async (input) => {
+  const controller = new AbortController();
+  let messageSignal: AbortSignal | null | undefined;
+  const fetchMock: typeof fetch = async (input, init) => {
     const url = String(input);
     seen.push(url);
     if (url.endsWith("/v1/threads/thr_test")) {
@@ -480,7 +547,7 @@ test("client reads Workspace-scoped thread messages and context traces", async (
         runs: [],
       });
     }
-    if (url.includes("/v1/threads/thr_test/messages")) return Response.json([]);
+    if (url.includes("/v1/threads/thr_test/messages")) { messageSignal = init?.signal; return Response.json([]); }
     return Response.json({
       id: "ctx_test",
       workspace_id: "ws_test",
@@ -501,11 +568,12 @@ test("client reads Workspace-scoped thread messages and context traces", async (
   });
 
   const thread = await client.getThread("thr_test");
-  const messages = await client.listThreadMessages("thr_test", { after: 4, limit: 25 });
+  const messages = await client.listThreadMessages("thr_test", { after: 4, limit: 25, signal: controller.signal });
   const context = await client.getRunContext("run_test");
 
   assert.equal(thread.thread.id, "thr_test");
   assert.deepEqual(messages, []);
+  assert.equal(messageSignal, controller.signal);
   assert.equal(context.id, "ctx_test");
   assert.deepEqual(seen, [
     "https://agents.example.test/v1/threads/thr_test",

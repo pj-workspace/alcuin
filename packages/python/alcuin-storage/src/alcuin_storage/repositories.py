@@ -284,6 +284,8 @@ class RuntimeRepository(
 
     def set_run_status(self, workspace_id: str, run_id: str, status: str) -> None: ...
 
+    def request_run_cancel(self, workspace_id: str, run_id: str, *, tool_in_flight: bool = False) -> Record | None: ...
+
     def append_event(
         self,
         workspace_id: str,

@@ -571,6 +571,100 @@ def test_compaction_and_run_context_assembly_are_immutable_and_workspace_scoped(
         )
 
 
+@pytest.mark.parametrize("initial_status", ["queued", "running"])
+def test_run_cancel_is_durable_idempotent_and_preserves_partial(store: PostgresStore, initial_status: str) -> None:
+    run = create_run(store)
+    run_id = run["id"]
+    store.set_run_status("ws_demo", run_id, initial_status)
+    store.append_event("ws_demo", run_id, "message.delta", {"delta": "Partial answer"})
+    assert store.request_run_cancel("ws_other", run_id) is None
+    assert store.request_run_cancel("ws_demo", run_id, tool_in_flight=True)["status"] == "cancel_requested"
+    assert store.request_run_cancel("ws_demo", run_id)["status"] == "cancel_requested"
+    assert len([e for e in store.list_events("ws_demo", run_id) if e["type"] == "run.cancel_requested"]) == 1
+    with pytest.raises(RepositoryConflict):
+        store.set_run_status("ws_demo", run_id, "running")
+    with pytest.raises(RepositoryConflict):
+        store.finalize_run_with_event("ws_demo", run_id, "completed", "Partial answer", 3, "run.completed", {})
+    with pytest.raises(RepositoryConflict):
+        store.append_event("ws_demo", run_id, "message.delta", {"delta": "too late"})
+    with pytest.raises(RepositoryConflict):
+        store.create_run("ws_demo", run["thread_id"], run["agent_version_id"], "another")
+    store.append_event("ws_demo", run_id, "tool.completed", {"call_id": "in-flight", "status": "succeeded"})
+    store.append_event("ws_demo", run_id, "citation.created", {"source_id": "receipt"})
+    event = store.finalize_run_with_event("ws_demo", run_id, "cancelled", "Partial answer", 3, "run.cancelled", {"automatic_retry": False})
+    assert store.finalize_run_with_event("ws_demo", run_id, "cancelled", "Partial answer", 3, "run.cancelled", {"automatic_retry": False}) == event
+    assert store.request_run_cancel("ws_demo", run_id)["status"] == "cancelled"
+    message = store._one("SELECT status, parts_json FROM messages WHERE id = ?", (event["payload"]["output_message_id"],))
+    assert message["status"] == "cancelled"
+    assert "Partial answer" in message["parts_json"]
+    with pytest.raises(RepositoryConflict):
+        store.append_event("ws_demo", run_id, "tool.completed", {})
+    assert store.create_run("ws_demo", run["thread_id"], run["agent_version_id"], "another")["status"] == "queued"
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_empty_cancelled_run_closes_turn_without_fabricating_answer(store: PostgresStore, recover: bool) -> None:
+    run = create_run(store)
+    before = store.list_messages("ws_demo", run["thread_id"])
+    store.request_run_cancel("ws_demo", run["id"])
+    if recover:
+        store.recover_interrupted_runs()
+    else:
+        event = store.finalize_run_with_event("ws_demo", run["id"], "cancelled", "", 0, "run.cancelled", {})
+        assert store.finalize_run_with_event("ws_demo", run["id"], "cancelled", "", 0, "run.cancelled", {}) == event
+    stopped = store.get_run("ws_demo", run["id"])
+    assert stopped["output_message_id"]
+    after = store.list_messages("ws_demo", run["thread_id"])
+    assert after[:-1] == before
+    assert after[-1]["role"] == "assistant" and after[-1]["status"] == "cancelled"
+    assert after[-1]["parts"] == [{"type": "text", "text": ""}]
+    assert after[-1]["estimated_tokens"] == 0
+    assert store.list_events("ws_demo", run["id"])[-1]["payload"]["output_message_id"] == after[-1]["id"]
+    assert store.recover_interrupted_runs() == []
+
+
+def test_completed_run_wins_late_stop_and_recovery_preserves_requested_stop(store: PostgresStore) -> None:
+    completed = create_run(store)
+    event = store.finalize_run_with_event("ws_demo", completed["id"], "completed", "Done", 1, "run.completed", {})
+    assert store.request_run_cancel("ws_demo", completed["id"])["status"] == "completed"
+    assert store.list_events("ws_demo", completed["id"]) == [event]
+    interrupted = create_run(store)
+    store.append_event("ws_demo", interrupted["id"], "message.delta", {"delta": "Saved partial"})
+    store.request_run_cancel("ws_demo", interrupted["id"])
+    recovered = store.recover_interrupted_runs()
+    assert len(recovered) == 1 and recovered[0]["status"] == "cancelled"
+    terminal = store.list_events("ws_demo", interrupted["id"])[-1]
+    assert terminal["type"] == "run.cancelled"
+    assert terminal["payload"]["automatic_retry"] is False
+    assert terminal["payload"]["external_tool_results"] == "verification_required"
+    assert terminal["payload"]["external_actions_may_have_completed"] is True
+    assert store.recover_interrupted_runs() == []
+
+
+@pytest.mark.parametrize("boundary", ["input", "approval"])
+def test_stop_expires_continuations_without_fabricating_user_decisions(store: PostgresStore, boundary: str) -> None:
+    run = create_run(store)
+    run_id = run["id"]
+    store.set_run_status("ws_demo", run_id, "running")
+    if boundary == "input":
+        event = store.suspend_run_for_input("ws_demo", run_id, {"call_id": "ask", "question": "Which format?", "options": ["Text", "Table"]}, {"next_step": 2})
+    else:
+        event = store.suspend_run_for_approval("ws_demo", run_id, {"call_id": "mutate", "tool": "example.write"}, {"next_step": 2})
+    store.request_run_cancel("ws_demo", run_id)
+    if boundary == "input":
+        row = store._one("SELECT * FROM run_inputs WHERE id = ?", (event["payload"]["input_id"],))
+        assert row["status"] == "pending" and row["continuation_json"] is None
+        with pytest.raises(RepositoryConflict):
+            store.answer_run_input("ws_demo", run_id, row["id"], {"answer": "Text"})
+    else:
+        approval_id = event["payload"]["approval_id"]
+        row = store._one("SELECT checkpoint_json FROM approval_continuations WHERE approval_id = ?", (approval_id,))
+        assert row["checkpoint_json"] is None
+        assert store.get_approval("ws_demo", approval_id)["status"] == "pending"
+        with pytest.raises(RepositoryConflict):
+            store.decide_approval("ws_demo", approval_id, "approved", None)
+
+
 def test_startup_recovery_atomically_fails_only_interrupted_runs(store: PostgresStore) -> None:
     running = create_run(store)
     store.set_run_status("ws_demo", running["id"], "running")

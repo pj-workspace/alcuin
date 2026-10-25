@@ -128,6 +128,6 @@ def test_python_and_typescript_share_platform_contract_vocabulary() -> None:
     assert schema_version.group(1) == AgentDefinition.model_fields[
         "schema_version"
     ].default
-    assert re.findall(r'"([a-z.]+)"', event_block.group(1)) == [
+    assert re.findall(r'"([a-z._]+)"', event_block.group(1)) == [
         event.value for event in EventType
     ]
