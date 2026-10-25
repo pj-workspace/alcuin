@@ -1,6 +1,6 @@
 "use client";
 
-import type { Agent, ContextAssembly, ExecutionEvent, Extension, Rule, Skill, Thread, ThreadConfiguration } from "@alcuin/contracts";
+import type { Agent, ArtifactReferenceMessagePart, ArtifactResource, ContextAssembly, ExecutionEvent, Extension, Rule, Skill, Thread, ThreadConfiguration } from "@alcuin/contracts";
 import type { ProviderModelProfile, ProviderStatus, ReasoningEffort } from "@alcuin/sdk";
 import {
   ArrowUp,
@@ -17,6 +17,7 @@ import {
   MessageSquare,
   Save,
   Sparkles,
+  Square,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -41,6 +42,8 @@ import { TaskCanvas, TaskInlineStatus, interventionCommandForStatus, useTaskSess
 import { resolveExtensionUIBlocks, type ResolvedExtensionUIBlock } from "@/features/extensions";
 import { useI18n } from "@/shared/lib/i18n";
 import { MobileComposerSettings } from "@/features/studio/mobile-composer-settings";
+import { ComposerArtifactReference } from "@/features/studio/artifacts/artifact-reference";
+import { artifactReferenceCopy, artifactReferenceError } from "@/features/studio/artifacts/artifact-reference-copy";
 
 type CanvasTab = "artifact" | "task" | "trace" | "extensions" | "context";
 type MobileSurface = "conversation" | "canvas";
@@ -75,6 +78,11 @@ export function StudioView({
   onRunCreated: (runId: string) => Promise<void>;
 }) {
   const { t, locale } = useI18n();
+  const referenceCopy = artifactReferenceCopy(locale);
+  const [documentReference, setDocumentReference] = useState<{ workspaceId: string; threadId: string; agentId: string; part: ArtifactReferenceMessagePart } | null>(null);
+  const [documentReferenceError, setDocumentReferenceError] = useState<string | null>(null);
+  const [referenceRefresh, setReferenceRefresh] = useState(0);
+  const selectedReference = documentReference?.workspaceId === workspace.id && documentReference.threadId === activeThreadId && documentReference.agentId === agent?.id ? documentReference.part : null;
   const [canvasTab, setCanvasTab] = useState<CanvasTab>("artifact");
   const [canvasOpen, setCanvasOpen] = useState(false);
   const [mobileSurface, setMobileSurface] = useState<MobileSurface>("conversation");
@@ -83,6 +91,7 @@ export function StudioView({
   const [confirmingPlan, setConfirmingPlan] = useState(false);
   const confirmationRef = useRef(false);
   const viewScopeRef = useRef({ agentId: agent?.id, threadId: activeThreadId });
+  const createdThreadRef = useRef<string | null>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [composerFocused, setComposerFocused] = useState(false);
@@ -96,11 +105,15 @@ export function StudioView({
   const dragDepthRef = useRef(0);
   const attachmentController = useComposerAttachments();
   const hostContext = useMemo(() => ({}), []);
+  const handleThreadCreated = useCallback((thread: Thread) => {
+    createdThreadRef.current = thread.id;
+    onThreadCreated(thread);
+  }, [onThreadCreated]);
   const session = useThreadSession({
     agent,
     threadId: activeThreadId,
     hostContext,
-    onThreadCreated,
+    onThreadCreated: handleThreadCreated,
     onRunCreated,
   });
   const { state } = session;
@@ -132,6 +145,8 @@ export function StudioView({
     ? "任务引导暂不支持附件；附件仍保留在输入框，请移除后发送引导，或先停止任务再作为普通消息发送。"
     : "Task guidance cannot include attachments yet. They remain in the composer; remove them to guide the Task, or stop the Task and send a normal message.";
   const latestTurn = state.turns.at(-1);
+  const canStop = !activeTask && Boolean(state.activeRunId) && blocked;
+  const stopping = canStop && Boolean(state.stop?.pending);
   const sendButtonLabel = activeTask
     ? (locale === "zh" ? "引导当前任务" : "Guide current Task")
     : state.phase === "waiting_for_input"
@@ -211,9 +226,19 @@ export function StudioView({
   const artifactEnabled = String(agent?.definition.output_schema.type ?? "artifact") === "artifact";
 
   useEffect(() => {
+    const previous = viewScopeRef.current;
+    const changed = previous.agentId !== agent?.id || previous.threadId !== activeThreadId;
+    const ownCreatedThread = previous.agentId === agent?.id && previous.threadId === null
+      && createdThreadRef.current === activeThreadId;
+    // Keep an in-flight first message until acceptance, but never carry an
+    // unsent instruction about one document into another conversation.
+    if (changed && !ownCreatedThread) setPrompt("");
+    if (changed) createdThreadRef.current = null;
     viewScopeRef.current = { agentId: agent?.id, threadId: activeThreadId };
     confirmationRef.current = false;
     setConfirmingPlan(false);
+    setDocumentReference(null);
+    setDocumentReferenceError(null);
   }, [agent?.id, activeThreadId]);
 
   useEffect(() => {
@@ -302,8 +327,13 @@ export function StudioView({
 
   async function submit(input = prompt) {
     const value = input.trim();
+    const submissionScope = viewScopeRef.current;
+    const stillInSubmission = () => viewScopeRef.current.agentId === submissionScope.agentId
+      && (viewScopeRef.current.threadId === submissionScope.threadId || submissionScope.threadId === null);
+    if (selectedReference && !value) { setDocumentReferenceError("Add an instruction for this document before sending."); return; }
     if ((!value && attachmentController.items.length === 0) || !agent) return;
     if (planning || confirmingPlan) return;
+    if (selectedReference && (activeTask || composerMode === "plan")) { setDocumentReferenceError("Document references are available in Chat, not in a Task or plan."); return; }
     if (!activeTask && composerMode === "plan") { await createTaskFromPrompt(); return; }
     if (activeTask) {
       if (!value || taskSession.busy) return;
@@ -330,21 +360,33 @@ export function StudioView({
       return;
     }
     try {
+      setDocumentReferenceError(null);
       await session.send(value, attachmentController.readyResources, {
         runOptions: { modelOverride, reasoningEffort },
+        artifactReferences: selectedReference ? [selectedReference] : [],
         onAccepted: () => {
+          if (!stillInSubmission()) return;
           setPrompt("");
           attachmentController.clearAccepted();
+          setDocumentReference(null);
+          setDocumentReferenceError(null);
         },
       });
     } catch (error) {
-      showToast(error instanceof Error ? error.message : t("Run failed"));
+      if (!stillInSubmission()) return;
+      const referenceError = artifactReferenceError(error);
+      if (referenceError) {
+        setDocumentReferenceError(referenceError);
+        setReferenceRefresh((value) => value + 1);
+      }
+      else showToast(error instanceof Error ? error.message : t("Run failed"));
     }
   }
 
   async function createTaskFromPrompt() {
     const value = prompt.trim();
     if (!value || activeTask || taskSession.busy || blocked || planning || confirmingPlan) return;
+    if (selectedReference) { setDocumentReferenceError("Document references are available in Chat, not in a Task or plan."); return; }
     if (attachmentController.items.length > 0) {
       showToast(locale === "zh" ? "创建任务前请先移除附件；附件仍保留在输入框中。" : "Remove attachments before creating a Task. They remain in the composer.");
       return;
@@ -358,6 +400,20 @@ export function StudioView({
     } catch (error) {
       showToast(error instanceof Error ? error.message : (locale === "zh" ? "创建任务失败" : "Unable to create Task"));
     }
+  }
+
+  function useDocumentInConversation(artifact: ArtifactResource) {
+    if (!agent || composerBlocked || activeTask || composerMode !== "chat" || artifact.workspace_id !== workspace.id || artifact.thread_id !== activeThreadId || state.thread?.id !== activeThreadId) return;
+    const sourceStatus = state.turns.find((turn) => turn.runId === artifact.source_run_id)?.status;
+    setDocumentReference({ workspaceId: workspace.id, threadId: artifact.thread_id, agentId: agent.id, part: {
+      type: "artifact_reference", artifact_id: artifact.id, version: artifact.version,
+      title: artifact.title, content_type: artifact.content_type, content: artifact.content,
+      source_run_id: artifact.source_run_id, sha256: "",
+      ...(sourceStatus && sourceStatus !== "submitting" ? { source_run_status: sourceStatus } : {}),
+    } });
+    setDocumentReferenceError(null);
+    setMobileSurface("conversation");
+    requestAnimationFrame(() => promptRef.current?.focus());
   }
 
   async function confirmPlan() {
@@ -496,7 +552,7 @@ export function StudioView({
 
         <div className="conversation-scroll" ref={timelineRef} tabIndex={0} role="region" aria-label={t("Conversation history")}>
           <ConversationTimeline
-            turns={state.turns}
+            turns={state.stop?.pending ? state.turns.map((turn) => turn.runId === state.stop?.runId ? { ...turn, status: "cancel_requested" as const } : turn) : state.turns}
             workspaceName={workspace.name}
             threadTitle={activeThreadTitle ?? state.thread?.title ?? t("New thread")}
             activeRunId={state.activeRunId}
@@ -513,6 +569,7 @@ export function StudioView({
         </div>
 
         <div className="composer-wrap">
+          {canStop && state.stop?.error && <p className="run-stop-error" role="alert">{t(state.stop.error === "Connection lost while stopping. Retry to check the result." ? "Connection lost while stopping. Retry to check the result." : "Stop is not confirmed. Try again.")}</p>}
           <button
             type="button"
             className={clsx("jump-to-latest", canJumpToLatest && "visible")}
@@ -530,13 +587,15 @@ export function StudioView({
           />
           <div className={clsx("composer", composerFocused && "focused", running && "running", activeTask && "task-guidance", dragActive && "drag-active")} onDragEnter={handleDragEnter} onDragOver={(event) => { if (!composerBlocked && event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDragLeave={handleDragLeave} onDrop={handleDrop}>
             <ComposerAttachmentTray items={attachmentController.items} onRetry={attachmentController.retry} onRemove={attachmentController.remove} />
+            {selectedReference && <ComposerArtifactReference reference={selectedReference} disabled={composerBlocked} onRemove={() => { setDocumentReference(null); setDocumentReferenceError(null); }} />}
+            {selectedReference && documentReferenceError && <p className="composer-inline-notice" role="alert">{referenceCopy(documentReferenceError)}</p>}
             <textarea ref={promptRef} rows={2} value={prompt} aria-label={locale === "zh" ? "消息输入" : "Message input"} onChange={(event) => setPrompt(event.target.value)} onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)} onPaste={(event) => { const files = Array.from(event.clipboardData.files); if (files.length > 0) { event.preventDefault(); addFiles(files); } }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); void submit(); } }} placeholder={activeTask ? (locale === "zh" ? "引导当前任务…" : "Guide the current Task…") : composerMode === "plan" ? (locale === "zh" ? "描述目标，先生成计划再执行…" : "Describe a goal. Review a plan before it runs…") : t("Message {name}…", { name: agent.name })} />
             {attachmentBlockReason && <div className="composer-inline-notice" role="status">{attachmentBlockReason}</div>}
             <div className="composer-footer">
               <div className="composer-tools">
                 <button className="composer-tool" aria-label={activeTask ? taskAttachmentMessage : t("Attach files")} disabled={composerBlocked || Boolean(activeTask)} onClick={() => attachmentInputRef.current?.click()}><Paperclip size={15} /></button>
                 <input ref={attachmentInputRef} className="visually-hidden" type="file" accept={ATTACHMENT_ACCEPT} multiple onChange={(event) => addFiles(event.target.files)} />
-                {!activeTask && <div className="composer-mode-switch" role="group" aria-label={locale === "zh" ? "工作模式" : "Work mode"}><button type="button" className={clsx(composerMode === "chat" && "active")} aria-pressed={composerMode === "chat"} disabled={composerBlocked} onClick={() => setComposerMode("chat")}><MessageSquare size={12} />{locale === "zh" ? "对话" : "Chat"}</button><button type="button" className={clsx(composerMode === "plan" && "active")} aria-pressed={composerMode === "plan"} disabled={composerBlocked || attachmentController.items.length > 0} onClick={() => setComposerMode("plan")}><ListChecks size={12} />{locale === "zh" ? "计划" : "Plan"}</button></div>}
+                {!activeTask && <div className="composer-mode-switch" role="group" aria-label={locale === "zh" ? "工作模式" : "Work mode"}><button type="button" className={clsx(composerMode === "chat" && "active")} aria-pressed={composerMode === "chat"} disabled={composerBlocked} onClick={() => setComposerMode("chat")}><MessageSquare size={12} />{locale === "zh" ? "对话" : "Chat"}</button><button type="button" className={clsx(composerMode === "plan" && "active")} aria-pressed={composerMode === "plan"} disabled={composerBlocked || attachmentController.items.length > 0 || Boolean(selectedReference)} onClick={() => setComposerMode("plan")}><ListChecks size={12} />{locale === "zh" ? "计划" : "Plan"}</button></div>}
                 <button className={clsx("context-chip", running && "live")} aria-label={running ? t("Agent is working") : t("Context · {skills} skills · {rules} rules", { skills: contextSkillCount, rules: contextRuleCount })} onClick={openContextLedger}><span className="context-dot" /><span className="context-chip-label">{running ? t("Agent is working") : t("Context · {skills} skills · {rules} rules", { skills: contextSkillCount, rules: contextRuleCount })}</span><ChevronDown size={11} /></button>
                 <span className="composer-control-divider" aria-hidden="true" />
                 <MobileComposerSettings
@@ -554,7 +613,7 @@ export function StudioView({
                   <RunProfileMenu ariaLabel={t("Thinking effort")} icon={<Brain size={12} />} value={displayedReasoningValue} options={reasoningControlOptions} disabled={composerBlocked || Boolean(activeTask)} onChange={(value) => setReasoningEffort((value || null) as ReasoningEffort | null)} align="right" />
                 </div>
               </div>
-              <div className="composer-send-group"><span>↵</span><button className="send-button" aria-label={attachmentBlockReason ?? sendButtonLabel} disabled={activeTask ? !prompt.trim() || composerBlocked || !taskCanAcceptGuidance || Boolean(attachmentBlockReason) : ((!prompt.trim() && attachmentController.items.length === 0) || composerBlocked || Boolean(attachmentBlockReason))} onClick={() => void submit()}>{planning || confirmingPlan || (activeTask && taskSession.busy) || (!activeTask && running) ? <span className="send-spinner" /> : composerMode === "plan" ? <ListChecks size={17} /> : <ArrowUp size={17} />}</button></div>
+              <div className="composer-send-group"><span>{canStop ? t(stopping ? "Stopping…" : state.stop?.error ? "Retry stop" : "Stop generation") : "↵"}</span>{canStop ? <button type="button" className="send-button stop-button" aria-label={t(stopping ? "Stopping…" : state.stop?.error ? "Retry stop" : "Stop generation")} aria-busy={stopping} disabled={stopping} onClick={() => void session.stop()}>{stopping ? <span className="send-spinner" /> : <Square size={13} fill="currentColor" />}</button> : <button className="send-button" aria-label={attachmentBlockReason ?? sendButtonLabel} disabled={activeTask ? !prompt.trim() || composerBlocked || !taskCanAcceptGuidance || Boolean(attachmentBlockReason) : ((!prompt.trim() && attachmentController.items.length === 0) || composerBlocked || Boolean(attachmentBlockReason))} onClick={() => void submit()}>{planning || confirmingPlan || (activeTask && taskSession.busy) || (!activeTask && running) ? <span className="send-spinner" /> : composerMode === "plan" ? <ListChecks size={17} /> : <ArrowUp size={17} />}</button>}</div>
             </div>
             {dragActive && <div className="composer-drop-overlay"><Paperclip size={18} /><span>{t("Drop files to attach")}</span></div>}
           </div>
@@ -575,7 +634,7 @@ export function StudioView({
         </header>
         <div className="canvas-content">
           <div id="canvas-panel-artifact" role="tabpanel" aria-labelledby="canvas-tab-artifact" aria-hidden={canvasTab !== "artifact"} className={clsx("canvas-panel", canvasTab === "artifact" && "active")}>
-            <ArtifactCanvas key={state.thread?.id ?? activeThreadId ?? "new-thread"} enabled={artifactEnabled} threadId={state.thread?.id ?? activeThreadId} refreshKey={taskArtifactRefreshKey(taskSession.task, state.thread?.id ?? activeThreadId)} eventArtifacts={eventArtifacts} citationEvents={artifactCitationEvents} activeRunId={state.activeRunId} running={running && artifactBelongsToLatestTurn && artifactEvent?.payload.streaming !== false} onNotify={showToast} />
+            <ArtifactCanvas key={state.thread?.id ?? activeThreadId ?? "new-thread"} enabled={artifactEnabled} threadId={state.thread?.id ?? activeThreadId} refreshKey={JSON.stringify([taskArtifactRefreshKey(taskSession.task, state.thread?.id ?? activeThreadId), referenceRefresh])} eventArtifacts={eventArtifacts} citationEvents={artifactCitationEvents} activeRunId={state.activeRunId} running={running && artifactBelongsToLatestTurn && artifactEvent?.payload.streaming !== false} onNotify={showToast} onUseInConversation={useDocumentInConversation} canUseInConversation={!composerBlocked && !activeTask && composerMode === "chat" && state.thread?.id === activeThreadId} />
           </div>
           {(taskSession.task || hasProposal) && <div id="canvas-panel-task" role="tabpanel" aria-labelledby="canvas-tab-task" aria-hidden={canvasTab !== "task"} className={clsx("canvas-panel", "task-canvas-panel", canvasTab === "task" && "active")}>
             {hasProposal ? <TaskProposalPanel proposal={proposal} confirming={confirmingPlan} onConfirm={() => void confirmPlan()} /> : <TaskCanvas

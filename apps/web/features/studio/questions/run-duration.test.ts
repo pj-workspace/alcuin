@@ -6,6 +6,9 @@ import { activeRunDuration } from "../run-duration.ts";
 function event(type: ExecutionEvent["type"], sequence: number, seconds: number): ExecutionEvent {
   return { id: `e${sequence}`, run_id: "r", type, sequence, timestamp: new Date(seconds * 1000).toISOString(), payload: { input_id: "i", approval_id: "a" } };
 }
+test("cancelled runs stop the active clock at the durable receipt", () => {
+  assert.equal(activeRunDuration([event("run.started", 1, 100), event("run.cancel_requested", 2, 103), event("run.cancelled", 3, 105)], 200_000), 5);
+});
 test("time spent answering is not displayed as model thinking", () => {
   const start = event("run.started", 1, 100);
   const ask = event("input.required", 2, 102);

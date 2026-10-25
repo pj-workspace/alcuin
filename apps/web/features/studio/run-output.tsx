@@ -1,6 +1,6 @@
 "use client";
 
-import type { ExecutionEvent } from "@alcuin/contracts";
+import type { ExecutionEvent, RunStatus } from "@alcuin/contracts";
 import { Check, ChevronRight, CircleAlert, Clock3, Database, Search, Wrench } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { clsx } from "clsx";
@@ -11,6 +11,7 @@ import { CitationResponse } from "@/features/studio/citations";
 import { ThinkingMarkdown } from "@/shared/components/thinking-markdown";
 import { useI18n } from "@/shared/lib/i18n";
 import { activeRunDuration } from "@/features/studio/run-duration";
+import { toolDisplayStatus, type ToolDisplayStatus } from "@/features/studio/run-stop-display";
 
 type ReasoningTrace = {
   kind: "reasoning";
@@ -26,7 +27,7 @@ type ToolTrace = {
   name: string;
   summary: string;
   query?: string;
-  status: "running" | "success" | "error";
+  status: ToolDisplayStatus;
 };
 
 type TraceStep = ReasoningTrace | ToolTrace;
@@ -39,6 +40,7 @@ export function RunOutput({
   onCopy,
   runId,
   interaction,
+  status,
 }: {
   events: ExecutionEvent[];
   running: boolean;
@@ -46,18 +48,25 @@ export function RunOutput({
   onCopy: (text: string) => void | Promise<void>;
   runId?: string | null;
   interaction?: ReactNode;
+  status?: RunStatus | "submitting";
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
   const [tracePinned, setTracePinned] = useState(false);
   const [clock, setClock] = useState<number | undefined>(undefined);
-  const steps = useMemo(() => collectTraceSteps(events), [events]);
+  const cancelled = status === "cancelled" || events.some((event) => event.type === "run.cancelled");
+  const stopping = !cancelled && status === "cancel_requested";
+  const displayStatus = cancelled ? "cancelled" : stopping ? "cancel_requested" : status;
+  const steps = useMemo(() => collectTraceSteps(events).map((step) => step.kind === "tool"
+    ? { ...step, status: toolDisplayStatus(step.status, step.name, displayStatus) } : step), [events, displayStatus]);
   const tools = steps.filter((step): step is ToolTrace => step.kind === "tool");
   const startedEvent = events.find((event) => event.type === "run.started");
   const startedAt = startedEvent?.timestamp;
   const completed = events.some((event) => event.type === "run.completed");
   const failed = events.some((event) => event.type === "run.failed");
-  const hasTrace = Boolean(running || startedAt || steps.length || completed || failed);
+  const cancellation = events.find((event) => event.type === "run.cancelled");
+  const stopRequest = events.find((event) => event.type === "run.cancel_requested");
+  const hasTrace = Boolean(running || startedAt || steps.length || completed || failed || cancelled || stopping);
   const runIdentity = startedEvent?.run_id ?? events[0]?.run_id ?? "empty";
 
   useEffect(() => {
@@ -86,7 +95,9 @@ export function RunOutput({
   const errorMessage = [...events]
     .reverse()
     .find((event) => event.type === "run.failed")?.payload.message;
-  const presence = derivePresence(events, steps, running, assistantText, failed, duration, t);
+  const presence: Presence = cancelled ? { label: t("Generation stopped"), state: "breathing" }
+    : stopping ? { label: t("Stopping…"), state: "breathing" }
+    : derivePresence(events, steps, running, assistantText, failed, duration, t);
   const runningTool = tools.find((tool) => tool.status === "running");
   const lastStep = steps.at(-1);
 
@@ -149,6 +160,10 @@ export function RunOutput({
       </section>
     )}
     {interaction}
+    {(cancelled || stopping) && <div className="run-stop-receipt" data-state={cancelled ? "stopped" : "stopping"} role="status">
+      <span>{t(cancelled ? "Generation stopped. Existing output was kept." : stopRequest?.payload.tool_in_flight ? "Stopping after the current action returns…" : "Stopping…")}</span>
+      {cancelled && (cancellation?.payload.external_actions_may_have_completed === true || !cancellation) && <small>{t("Actions already started may have completed. Check their results before retrying.")}</small>}
+    </div>}
     {(assistantText || events.some((event) => event.type === "citation.created")) && (
       <div className={clsx("assistant-output", running && "streaming")}>
         <CitationResponse content={assistantText} events={events} runId={runId ?? startedEvent?.run_id} running={running} onCopy={onCopy} />
@@ -224,6 +239,7 @@ function collectTraceSteps(events: ExecutionEvent[]): TraceStep[] {
 }
 
 function ToolNodeIcon({ step, active }: { step: ToolTrace; active: boolean }) {
+  if (step.status === "stopped") return <Clock3 size={11} />;
   if (step.status === "running") return active ? <span className="micro-loader" /> : <Clock3 size={11} />;
   if (step.status === "error") return <CircleAlert size={11} />;
   if (isKnowledgeTool(step.name)) return <Database size={11} />;
@@ -232,9 +248,10 @@ function ToolNodeIcon({ step, active }: { step: ToolTrace; active: boolean }) {
 }
 
 function toolStepLabel(step: ToolTrace, t: ReturnType<typeof useI18n>["t"]): string {
-  if (step.name === "human.ask") return t(step.status === "running" ? "Waiting for your answer" : step.status === "error" ? "This question is closed" : "Your answer was recorded");
+  if (step.name === "human.ask") return t(step.status === "running" ? "Waiting for your answer" : step.status === "error" || step.status === "stopped" ? "This question is closed" : "Your answer was recorded");
   const query = step.query?.trim();
   const prefix = isKnowledgeTool(step.name) ? t("Retrieve") : isSearchTool(step.name) ? t("Search") : formatToolName(step.name);
+  if (step.status === "stopped") return `${t("{prefix} · stopped waiting for a result", { prefix })}${query ? ` · ${query}` : ""}`;
   if (step.status === "error") return `${t("{prefix} interrupted", { prefix })}${query ? ` · ${query}` : ""}`;
   const summary = step.summary === "Tool requested" ? t("Tool requested") : step.summary;
   return `${prefix}${query ? ` · ${query}` : summary ? ` · ${summary}` : ""}`;

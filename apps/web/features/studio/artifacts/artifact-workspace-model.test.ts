@@ -5,6 +5,7 @@ import type { ArtifactResource, Task } from "@alcuin/contracts";
 
 import {
   artifactDraftHasChanges,
+  artifactEditorScope,
   artifactWorkspaceReducer,
   initialArtifactWorkspaceState,
   selectedArtifact,
@@ -90,7 +91,7 @@ test("supports edit, save success, and cancel without exposing version workflows
   state = artifactWorkspaceReducer(state, { type: "draft.changed", content: "Local edit" });
   assert.equal(artifactDraftHasChanges(state), true);
   state = artifactWorkspaceReducer(state, { type: "save.started" });
-  state = artifactWorkspaceReducer(state, { type: "save.succeeded", resource: resource(3, "Local edit") });
+  state = artifactWorkspaceReducer(state, { type: "save.succeeded", resource: resource(3, "Local edit"), scope: artifactEditorScope(state)! });
   assert.equal(state.phase, "saved");
   assert.equal(selectedArtifact(state)?.content, "Local edit");
   state = artifactWorkspaceReducer(state, { type: "edit.started" });
@@ -100,14 +101,19 @@ test("supports edit, save success, and cancel without exposing version workflows
   assert.equal(state.draftTitle, "Risk brief");
 });
 
-test("a conflict preserves the draft until the operator refreshes latest", () => {
+test("refreshing a conflict preserves the draft until explicitly choosing latest", () => {
   let state = artifactWorkspaceReducer(initialArtifactWorkspaceState, { type: "resources.loaded", resources: [resource(2)] });
   state = artifactWorkspaceReducer(state, { type: "edit.started" });
   state = artifactWorkspaceReducer(state, { type: "draft.changed", content: "My unsaved draft" });
   state = artifactWorkspaceReducer(state, { type: "resource.received", resource: resource(3, "Remote edit") });
   assert.equal(state.phase, "conflict");
   assert.equal(state.draftContent, "My unsaved draft");
-  state = artifactWorkspaceReducer(state, { type: "conflict.refreshed", resource: resource(4, "Latest remote edit") });
+  state = artifactWorkspaceReducer(state, { type: "conflict.refreshed", resource: resource(4, "Latest remote edit"), scope: artifactEditorScope(state)! });
+  assert.equal(state.phase, "conflict");
+  assert.equal(state.draftContent, "My unsaved draft");
+  assert.equal(state.baseContent, "Saved 2");
+  assert.equal(state.conflictLatest?.content, "Latest remote edit");
+  state = artifactWorkspaceReducer(state, { type: "conflict.use-latest" });
   assert.equal(state.phase, "preview");
   assert.equal(state.draftContent, "Latest remote edit");
   assert.equal(selectedArtifact(state)?.content, "Latest remote edit");
@@ -131,11 +137,11 @@ test("saving A completes against A before a pending B becomes active", () => {
   state = artifactWorkspaceReducer(state, { type: "draft.changed", content: "Saved only to A" });
   state = artifactWorkspaceReducer(state, { type: "resource.received", resource: resource(1, "Generated B", "art_2"), select: true });
   state = artifactWorkspaceReducer(state, { type: "save.started" });
-  state = artifactWorkspaceReducer(state, { type: "save.succeeded", resource: resource(3, "Saved only to A") });
+  state = artifactWorkspaceReducer(state, { type: "save.succeeded", resource: resource(3, "Saved only to A"), scope: artifactEditorScope(state)! });
   assert.equal(state.phase, "saved");
   assert.equal(state.selectedId, "art_1");
   assert.equal(selectedArtifact(state)?.content, "Saved only to A");
-  state = artifactWorkspaceReducer(state, { type: "saved.settled" });
+  state = artifactWorkspaceReducer(state, { type: "saved.settled", scope: artifactEditorScope(state)! });
   assert.equal(state.selectedId, "art_2");
   assert.equal(selectedArtifact(state)?.content, "Generated B");
 });
@@ -150,6 +156,129 @@ test("a late list response merges resources without resetting an active editor",
   assert.equal(state.draftContent, "Unsaved while loading");
   assert.equal(state.resources.length, 2);
   assert.equal(state.baseVersion, 2);
+});
+
+test("dirty compares the immutable editor baseline, never a background-updated resource", () => {
+  let state = artifactWorkspaceReducer(initialArtifactWorkspaceState, { type: "resources.loaded", resources: [resource(2)] });
+  state = artifactWorkspaceReducer(state, { type: "edit.started" });
+  state = artifactWorkspaceReducer(state, { type: "resource.received", resource: resource(3, "Remote") });
+  assert.equal(artifactDraftHasChanges(state), false, "remote edits alone are not local changes");
+  state = artifactWorkspaceReducer(state, { type: "draft.changed", content: "Remote" });
+  assert.equal(artifactDraftHasChanges(state), true, "local changes remain dirty even when equal to latest remote");
+  assert.equal(state.baseContent, "Saved 2");
+  state = artifactWorkspaceReducer(state, { type: "draft.changed", content: "Saved 2" });
+  assert.equal(artifactDraftHasChanges(state), false);
+});
+
+test("keep mine rebases without saving and a second conflict keeps local changes", () => {
+  let state = artifactWorkspaceReducer(initialArtifactWorkspaceState, { type: "resources.loaded", resources: [resource(2)] });
+  state = artifactWorkspaceReducer(state, { type: "edit.started" });
+  state = artifactWorkspaceReducer(state, { type: "draft.changed", content: "Mine" });
+  const obsolete = artifactEditorScope(state)!;
+  state = artifactWorkspaceReducer(state, { type: "save.conflict", latest: resource(3, "Theirs"), message: "Conflict", scope: obsolete });
+  state = artifactWorkspaceReducer(state, { type: "conflict.keep-mine" });
+  assert.equal(state.phase, "editing");
+  assert.equal(state.baseVersion, 3);
+  assert.equal(state.baseContent, "Theirs");
+  assert.equal(state.draftContent, "Mine");
+  assert.equal(selectedArtifact(state)?.content, "Theirs", "rebase does not mutate server resource");
+  assert.equal(artifactDraftHasChanges(state), true);
+  assert.equal(artifactWorkspaceReducer(state, { type: "conflict.refreshed", resource: resource(4), scope: obsolete }), state);
+  state = artifactWorkspaceReducer(state, { type: "save.started" });
+  state = artifactWorkspaceReducer(state, { type: "save.conflict", latest: resource(4, "Changed again"), message: "Conflict again", scope: artifactEditorScope(state)! });
+  assert.equal(state.phase, "conflict");
+  assert.equal(state.draftContent, "Mine");
+  assert.equal(state.baseVersion, 3);
+});
+
+test("restored drafts retain original baseline and conflict against newer saved content", () => {
+  const draft = { baseVersion: 2, baseTitle: "Risk brief", baseContent: "Saved 2", draftTitle: "Recovered title", draftContent: "Recovered text" };
+  let state = artifactWorkspaceReducer(initialArtifactWorkspaceState, { type: "resources.loaded", resources: [resource(3, "Remote")] });
+  state = artifactWorkspaceReducer(state, { type: "draft.restored", resource: resource(3, "Remote"), draft });
+  assert.equal(state.phase, "conflict");
+  assert.equal(state.draftContent, "Recovered text");
+  assert.equal(state.baseContent, "Saved 2");
+  assert.equal(state.conflictLatest?.version, 3);
+  assert.equal(artifactDraftHasChanges(state), true);
+  assert.equal(artifactWorkspaceReducer(state, { type: "draft.restored", resource: resource(3), draft: { ...draft, draftContent: "Late recovery" } }), state);
+  const unchanged = artifactWorkspaceReducer(initialArtifactWorkspaceState, { type: "resources.loaded", resources: [resource(2)] });
+  assert.equal(artifactWorkspaceReducer(unchanged, { type: "draft.restored", resource: resource(2), draft }).phase, "editing");
+  assert.equal(artifactWorkspaceReducer(unchanged, { type: "draft.restored", resource: resource(2, "Other", "art_2"), draft }), unchanged);
+});
+
+test("late save and refresh results cannot enter another artifact or a reopened editor", () => {
+  let state = artifactWorkspaceReducer(initialArtifactWorkspaceState, { type: "resources.loaded", resources: [resource(2), resource(1, "B", "art_2")] });
+  state = artifactWorkspaceReducer(state, { type: "resource.selected", id: "art_1" });
+  state = artifactWorkspaceReducer(state, { type: "edit.started" });
+  const scope = artifactEditorScope(state)!;
+  state = artifactWorkspaceReducer(state, { type: "edit.cancelled" });
+  state = artifactWorkspaceReducer(state, { type: "edit.started" });
+  state = artifactWorkspaceReducer(state, { type: "draft.changed", content: "New editor draft" });
+  const late = [
+    { type: "save.succeeded" as const, resource: resource(3), scope },
+    { type: "save.failed" as const, message: "Old failure", scope },
+    { type: "save.conflict" as const, latest: resource(3), message: "Old conflict", scope },
+    { type: "conflict.refreshed" as const, resource: resource(3), scope },
+    { type: "saved.settled" as const, scope },
+  ];
+  for (const action of late) assert.equal(artifactWorkspaceReducer(state, action), state);
+  state = artifactWorkspaceReducer(state, { type: "resource.selected", id: "art_2" });
+  for (const action of late) assert.equal(artifactWorkspaceReducer(state, action), state);
+});
+
+test("async results reject foreign resource identity even with a current editor token", () => {
+  let state = artifactWorkspaceReducer(initialArtifactWorkspaceState, { type: "resources.loaded", resources: [resource(2)] });
+  state = artifactWorkspaceReducer(state, { type: "edit.started" });
+  const scope = artifactEditorScope(state)!;
+  for (const foreign of [{ ...resource(3), workspace_id: "other" }, { ...resource(3), thread_id: "other" }, resource(3, "B", "art_2")]) {
+    assert.equal(artifactWorkspaceReducer(state, { type: "save.succeeded", resource: foreign, scope }), state);
+    assert.equal(artifactWorkspaceReducer(state, { type: "save.conflict", latest: foreign, message: "Conflict", scope }), state);
+    assert.equal(artifactWorkspaceReducer(state, { type: "conflict.refreshed", resource: foreign, scope }), state);
+  }
+});
+
+test("late refresh cannot regress a more recent conflict and pending B stays deferred", () => {
+  let state = artifactWorkspaceReducer(initialArtifactWorkspaceState, { type: "resources.loaded", resources: [resource(2)] });
+  state = artifactWorkspaceReducer(state, { type: "edit.started" });
+  state = artifactWorkspaceReducer(state, { type: "draft.changed", content: "Mine" });
+  state = artifactWorkspaceReducer(state, { type: "resource.received", resource: resource(1, "B", "art_2"), select: true });
+  state = artifactWorkspaceReducer(state, { type: "resource.received", resource: resource(4, "Newest") });
+  state = artifactWorkspaceReducer(state, { type: "conflict.refreshed", resource: resource(3, "Older"), scope: artifactEditorScope(state)! });
+  assert.equal(state.conflictLatest?.version, 4);
+  assert.equal(state.pendingSelectedId, "art_2");
+  state = artifactWorkspaceReducer(state, { type: "conflict.keep-mine" });
+  assert.equal(state.selectedId, "art_1");
+  state = artifactWorkspaceReducer(state, { type: "save.started" });
+  state = artifactWorkspaceReducer(state, { type: "save.succeeded", resource: resource(5, "Mine"), scope: artifactEditorScope(state)! });
+  assert.equal(state.selectedId, "art_1");
+  state = artifactWorkspaceReducer(state, { type: "saved.settled", scope: artifactEditorScope(state)! });
+  assert.equal(state.selectedId, "art_2");
+});
+
+test("a successful save receipt cannot hide a newer remote change", () => {
+  let state = artifactWorkspaceReducer(initialArtifactWorkspaceState, { type: "resources.loaded", resources: [resource(2)] });
+  state = artifactWorkspaceReducer(state, { type: "edit.started" });
+  state = artifactWorkspaceReducer(state, { type: "draft.changed", content: "Mine" });
+  const scope = artifactEditorScope(state)!;
+  state = artifactWorkspaceReducer(state, { type: "save.started" });
+  state = artifactWorkspaceReducer(state, { type: "resource.received", resource: resource(4, "Remote after my save") });
+  state = artifactWorkspaceReducer(state, { type: "save.succeeded", resource: resource(3, "Mine"), scope });
+  assert.equal(state.phase, "conflict");
+  assert.equal(state.baseVersion, 3);
+  assert.equal(state.draftContent, "Mine");
+  assert.equal(state.conflictLatest?.version, 4);
+  assert.equal(selectedArtifact(state)?.version, 4);
+  assert.equal(artifactDraftHasChanges(state), false, "the acknowledged local text was saved");
+});
+
+test("thread reset invalidates earlier editor tokens even when the same artifact is loaded again", () => {
+  let state = artifactWorkspaceReducer(initialArtifactWorkspaceState, { type: "resources.loaded", resources: [resource(2)] });
+  state = artifactWorkspaceReducer(state, { type: "edit.started" });
+  const scope = artifactEditorScope(state)!;
+  state = artifactWorkspaceReducer(state, { type: "thread.reset" });
+  state = artifactWorkspaceReducer(state, { type: "resources.loaded", resources: [resource(2)] });
+  state = artifactWorkspaceReducer(state, { type: "edit.started" });
+  assert.equal(artifactWorkspaceReducer(state, { type: "save.succeeded", resource: resource(3), scope }), state);
 });
 
 test("Task artifact refresh hints are thread-scoped and stable across unrelated progress", () => {

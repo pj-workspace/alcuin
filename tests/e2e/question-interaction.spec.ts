@@ -18,7 +18,7 @@ test("question survives reload; a chosen and edited answer resumes the same Run"
   await expect(page.locator(".brainstorm-collapse").last()).not.toHaveAttribute("inert");
   await expect(page.locator(".brainstorm-node.tool .micro-loader")).toHaveCount(0);
   await expect(page.locator(".tool-step-label").last()).toContainText("Waiting for your answer");
-  await expect(page.getByRole("button", { name: "Answer the question above or choose to skip", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Stop generation", exact: true })).toBeEnabled();
   await page.reload();
   await expect(question).toBeVisible();
   await question.getByRole("radio", { name: "Management" }).check();

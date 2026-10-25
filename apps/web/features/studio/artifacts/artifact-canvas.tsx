@@ -14,6 +14,7 @@ import {
   RefreshCw,
   Save,
   Sparkles,
+  MessageSquarePlus,
   X,
 } from "lucide-react";
 import { clsx } from "clsx";
@@ -27,6 +28,8 @@ import { ArtifactHtmlPreview } from "./artifact-html-preview";
 import { useArtifactWorkspace } from "./use-artifact-workspace";
 import { citationsForArtifact } from "./artifact-citation-model";
 import { artifactDocumentBody } from "./artifact-document-model";
+import { artifactReferenceCopy } from "./artifact-reference-copy";
+import "./artifact-drafts.css";
 
 export function ArtifactCanvas({
   enabled,
@@ -37,6 +40,8 @@ export function ArtifactCanvas({
   running,
   refreshKey,
   onNotify,
+  onUseInConversation,
+  canUseInConversation = false,
 }: {
   enabled: boolean;
   threadId: string | null;
@@ -46,8 +51,12 @@ export function ArtifactCanvas({
   running: boolean;
   refreshKey?: string | null;
   onNotify: (message: string) => void;
+  onUseInConversation?: (artifact: ArtifactResource) => void;
+  canUseInConversation?: boolean;
 }) {
   const { t, locale } = useI18n();
+  const referenceCopy = artifactReferenceCopy(locale);
+  const zh = locale === "zh";
   const workspace = useArtifactWorkspace({ threadId, eventArtifacts, running, refreshKey });
   const { state, displayedArtifact } = workspace;
   const status = artifactStatus(state.phase, running, t);
@@ -98,6 +107,8 @@ export function ArtifactCanvas({
 
   return (
     <section className="artifact-workspace" data-phase={state.phase}>
+      {workspace.storageWarning && <div className="artifact-editor-notice error" role="alert">{zh ? "草稿仅保留在当前页面，刷新或关闭前请保存或复制。" : "Draft storage is unavailable. Save or copy your work before refreshing or closing."}</div>}
+      {!workspace.editorOpen && workspace.recovery && <div className="artifact-draft-banner" role="status"><div><strong>{zh ? "有未保存的草稿" : "Unsaved draft"}</strong><small>{zh ? "仅保留在此标签页；关闭前请保存。" : "Kept in this tab only. Save before closing."}</small></div><button className="button secondary" disabled={running} onClick={workspace.beginEdit}>{zh ? "继续编辑" : "Resume editing"}</button><button className="button secondary" onClick={() => { if (window.confirm(zh ? "放弃草稿？未保存的修改将被删除。" : "Discard this draft? Unsaved changes will be deleted.")) workspace.discard(); }}>{zh ? "放弃草稿" : "Discard draft"}</button></div>}
       {workspace.refreshError && <div className="artifact-editor-notice error" role="alert"><AlertTriangle size={15} /><p>{workspace.refreshError}</p><button className="button secondary" onClick={workspace.reload}><RefreshCw size={13} />{t("Try again")}</button></div>}
       <div className="artifact-workspace-toolbar">
         <div className="artifact-resource-switcher" role="tablist" aria-label={t("Artifacts in this thread")} onKeyDown={(event) => {
@@ -121,7 +132,7 @@ export function ArtifactCanvas({
               onClick={() => workspace.select(resource.id)}
               key={resource.id}
               title={resource.title}
-            >{resource.content_type === "text/html" ? <Code2 size={12} /> : <FileText size={12} />}<span>{resource.title}</span></button>
+            >{resource.content_type === "text/html" ? <Code2 size={12} /> : <FileText size={12} />}<span>{resource.title}{workspace.hasDraft(resource) ? " •" : ""}</span></button>
           ))}
           {state.resources.length === 0 && running && <span className="artifact-live-label"><span />{t("Live draft")}</span>}
         </div>
@@ -139,6 +150,7 @@ export function ArtifactCanvas({
         </div>
       </div>
 
+      {!workspace.editorOpen && onUseInConversation && <button type="button" className="button secondary artifact-use-button" disabled={!canUseInConversation || running || state.phase === "loading"} onClick={() => onUseInConversation(displayedArtifact)} aria-label={referenceCopy("Use in conversation")} title={referenceCopy("Use in conversation")}><MessageSquarePlus size={14} /><span>{referenceCopy("Use in conversation")}</span></button>}
       <div id="artifact-resource-surface" className="artifact-workspace-surface" key={`${displayedArtifact.id}:${workspace.editorOpen ? "edit" : "preview"}`}>
         {workspace.editorOpen ? (
           <ArtifactEditor workspace={workspace} />
@@ -151,7 +163,8 @@ export function ArtifactCanvas({
 }
 
 function ArtifactEditor({ workspace }: { workspace: ReturnType<typeof useArtifactWorkspace> }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const zh = locale === "zh";
   const { state } = workspace;
   const saving = state.phase === "saving";
   return (
@@ -159,15 +172,15 @@ function ArtifactEditor({ workspace }: { workspace: ReturnType<typeof useArtifac
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") { event.preventDefault(); if (workspace.canSave) void workspace.save(); }
     }}>
       <div className="artifact-editor-heading">
-        <div><span>{t("Editing artifact")}</span><small>{t("Changes are saved to this artifact only.")}</small></div>
+        <div><span>{t("Editing artifact")}</span><small>{zh ? "退出编辑会保留此标签页的草稿；点击保存才会更新文档。" : "Closing keeps a draft in this tab. Only Save updates the document."}</small></div>
         <button type="button" className="icon-button quiet" aria-label={t("Cancel editing")} onClick={workspace.cancel} disabled={saving}><X size={14} /></button>
       </div>
       <label className="artifact-title-field"><span>{t("Title")}</span><input autoFocus value={state.draftTitle} maxLength={200} disabled={saving} onChange={(event) => workspace.changeTitle(event.target.value)} /></label>
       <label className="artifact-content-field"><span>{t(workspace.selected?.content_type === "text/html" ? "HTML source" : "Content")}</span><textarea spellCheck={workspace.selected?.content_type !== "text/html"} value={state.draftContent} maxLength={500_000} disabled={saving} onChange={(event) => workspace.changeContent(event.target.value)} /></label>
-      {state.phase === "conflict" && <div className="artifact-editor-notice conflict" role="alert"><AlertTriangle size={15} /><div><strong>{t("This artifact changed while you were editing")}</strong><p>{t("Refresh to load the latest saved content before editing again.")}</p></div><button type="button" className="button secondary" disabled={state.refreshingConflict} onClick={() => void workspace.refreshConflict()}>{state.refreshingConflict ? <LoaderCircle className="attachment-loader" size={13} /> : <RefreshCw size={13} />}{t("Refresh latest")}</button></div>}
+      {state.phase === "conflict" && <div className="artifact-conflict-review" role="alert"><strong>{t("This artifact changed while you were editing")}</strong><p>{zh ? "你的草稿已保留。请对照下方已保存内容，再决定如何继续。" : "Your draft is safe. Review the saved content below before continuing."}</p><details key={state.conflictLatest?.version}><summary>{zh ? "查看已保存内容" : "Review saved content"}</summary><div className="artifact-conflict-content"><strong>{state.conflictLatest?.title}</strong><pre>{state.conflictLatest?.content}</pre><div className="artifact-draft-buttons"><button type="button" className="button secondary" disabled={!state.conflictLatest || state.refreshingConflict} onClick={workspace.keepMine}>{zh ? "保留草稿，继续编辑" : "Keep draft and continue"}</button><button type="button" className="button secondary" onClick={() => { if (window.confirm(zh ? "放弃你的修改并采用已保存内容？" : "Discard your changes and use saved content?")) workspace.discard(); }}>{zh ? "采用已保存内容" : "Use saved content"}</button></div><small>{zh ? "保留草稿不会立即覆盖文档，仍需点击保存。" : "Keeping the draft does not overwrite the document until you save."}</small></div></details><button type="button" className="button secondary" disabled={state.refreshingConflict} onClick={() => void workspace.refreshConflict()}>{t("Refresh latest")}</button></div>}
       {state.phase === "error" && state.message && <div className="artifact-editor-notice error" role="alert"><AlertTriangle size={15} /><div><strong>{t("Save failed")}</strong><p>{state.message}</p></div></div>}
       <div className="artifact-editor-actions">
-        <button type="button" className="button secondary" onClick={workspace.cancel} disabled={saving}>{t("Cancel")}</button>
+        <button type="button" className="button secondary" onClick={workspace.cancel} disabled={saving}>{zh ? "保留草稿并退出" : "Keep draft and close"}</button>
         <button type="submit" className="button dark" disabled={!workspace.canSave}>{saving ? <LoaderCircle className="attachment-loader" size={13} /> : <Save size={13} />}{t(saving ? "Saving…" : state.phase === "error" ? "Try save again" : "Save")}</button>
       </div>
     </form>

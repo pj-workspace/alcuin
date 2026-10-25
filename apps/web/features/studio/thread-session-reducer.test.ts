@@ -1,14 +1,92 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ExecutionEvent, ThreadDetail } from "@alcuin/contracts";
+import type { ArtifactReferenceMessagePart, ExecutionEvent, ThreadDetail } from "@alcuin/contracts";
+import { stopRecoveryDelay } from "./stop-recovery.ts";
+import { toolDisplayStatus } from "./run-stop-display.ts";
+
+test("stop trace presentation closes questions without inventing execution results", () => {
+  assert.equal(toolDisplayStatus("running", "human.ask", "cancel_requested"), "stopped");
+  assert.equal(toolDisplayStatus("running", "human.ask", "cancelled"), "stopped");
+  assert.equal(toolDisplayStatus("running", "records.update", "cancel_requested"), "running");
+  assert.equal(toolDisplayStatus("running", "knowledge.search", "cancelled"), "stopped");
+  assert.equal(toolDisplayStatus("success", "records.update", "cancelled"), "success");
+  assert.equal(toolDisplayStatus("error", "records.update", "cancelled"), "error");
+  assert.equal(toolDisplayStatus("running", "human.ask", "waiting_for_input"), "running");
+});
+
+test("stop recovery reaches a finite retry boundary", () => {
+  assert.deepEqual([0, 1, 2, 3, 4].map(stopRecoveryDelay), [1000, 2000, 4000, 8000, null]);
+});
 
 import {
   initialThreadSessionState,
+  isCurrentSubmissionScope,
   optimisticTurn,
   threadSessionReducer,
   turnsFromThreadDetail,
 } from "./thread-session-reducer.ts";
+
+const artifactSnapshot: ArtifactReferenceMessagePart = {
+  type: "artifact_reference", artifact_id: "art_1", version: 2,
+  title: "Saved draft", content_type: "text/markdown", source_run_id: "run_origin",
+  source_run_status: "cancelled",
+  sha256: "a".repeat(64), content: "Saved version two",
+};
+
+test("submission scope rejects navigation and late errors while allowing its created thread", () => {
+  const original = { agentId: "agt_1", threadId: null as string | null };
+  assert.equal(isCurrentSubmissionScope(original, original, true, null), true);
+  original.threadId = "thr_created";
+  assert.equal(isCurrentSubmissionScope(original, original, true, "thr_created"), true);
+  assert.equal(isCurrentSubmissionScope(original, { agentId: "agt_1", threadId: "thr_other" }, true, "thr_created"), false);
+  assert.equal(isCurrentSubmissionScope(original, { ...original }, true, "thr_created"), false, "navigating away and back must not revive an old response");
+  assert.equal(isCurrentSubmissionScope(original, original, false, "thr_created"), false);
+  assert.equal(isCurrentSubmissionScope(original, original, true, "thr_other"), false);
+});
+
+test("canonical references replace only the target turn without disturbing stream state", () => {
+  const turn = { ...optimisticTurn("run_1", "Revise", [], [{ ...artifactSnapshot, sha256: "" }]), runId: "run_1", assistantText: "Streaming answer" };
+  const other = { ...optimisticTurn("run_2", "Other", []), runId: "run_2" };
+  const state = { ...initialThreadSessionState, thread: detail.thread, turns: [turn, other], phase: "streaming" as const, activeRunId: "run_2" };
+  const message = { ...detail.messages.find((item) => item.role === "user")!, parts: [{ ...artifactSnapshot }] };
+  const next = threadSessionReducer(state, { type: "references.hydrated", threadId: "thr_1", runId: "run_1", message });
+  assert.deepEqual(next.turns[0]?.artifactReferences, [artifactSnapshot]);
+  assert.equal(next.turns[0]?.assistantText, "Streaming answer");
+  assert.equal(next.turns[1], other);
+  assert.equal(next.phase, "streaming");
+  assert.equal(next.activeRunId, "run_2");
+  assert.equal(threadSessionReducer(state, { type: "references.hydrated", threadId: "another_thread", runId: "run_1", message }), state);
+  assert.equal(threadSessionReducer(state, { type: "references.hydrated", threadId: "thr_1", runId: "run_2", message }), state);
+});
+
+test("optimistic turns retain independent saved artifact snapshots", () => {
+  const reference = { ...artifactSnapshot };
+  const turn = optimisticTurn("pending_1", "Revise", [], [reference]);
+  reference.content = "Later local edits";
+  assert.deepEqual(turn.artifactReferences, [artifactSnapshot]);
+  assert.deepEqual(optimisticTurn("pending_2", "Next", []).artifactReferences, []);
+});
+
+test("history restores artifact snapshots on their own run without following later versions", () => {
+  const history = structuredClone(detail);
+  const user = history.messages.find((message) => message.role === "user")!;
+  user.parts.push({ ...artifactSnapshot });
+  history.runs.push({ ...history.runs[0]!, id: "run_2", input: "Next", input_message_id: "msg_next", output_message_id: null, created_at: "2026-08-29T00:01:00Z" });
+  history.messages.push({ ...user, id: "msg_next", run_id: "run_2", sequence: 3, parts: [{ type: "text", text: "Next" }], created_at: "2026-08-29T00:01:00Z" });
+  const turns = turnsFromThreadDetail(history);
+  assert.deepEqual(turns[0]?.artifactReferences, [artifactSnapshot]);
+  assert.deepEqual(turns[1]?.artifactReferences, []);
+  (user.parts.at(-1) as ArtifactReferenceMessagePart).content = "Mutated after hydration";
+  assert.equal(turns[0]?.artifactReferences?.[0]?.content, "Saved version two");
+});
+
+test("history restores artifact references even when the run list is paginated", () => {
+  const history = structuredClone(detail);
+  history.runs = [];
+  history.messages.find((message) => message.role === "user")!.parts.push({ ...artifactSnapshot });
+  assert.deepEqual(turnsFromThreadDetail(history)[0]?.artifactReferences, [artifactSnapshot]);
+});
 
 const detail: ThreadDetail = {
   thread: {
@@ -61,6 +139,50 @@ const detail: ThreadDetail = {
     },
   ],
 };
+
+test("stop waits for server confirmation, preserves partial content, and survives reload", () => {
+  const run = { ...detail.runs[0], status: "running" as const };
+  let state = threadSessionReducer(initialThreadSessionState, { type: "hydrate.completed", detail: { ...detail, runs: [run] }, latestRunId: run.id, latestRunStatus: "running" });
+  state = threadSessionReducer(state, { type: "stop.requested", runId: run.id });
+  assert.equal(state.phase, "streaming");
+  assert.equal(state.turns[0].status, "running");
+  state = threadSessionReducer(state, { type: "stop.failed", runId: run.id });
+  assert.equal(state.stop?.pending, false);
+  assert.ok(state.stop?.error);
+  const event: ExecutionEvent = { id: "cancel1", run_id: run.id, sequence: 9, timestamp: "2026-08-29T00:00:05Z", type: "run.cancel_requested", payload: { tool_in_flight: true } };
+  state = threadSessionReducer(state, { type: "events.appended", runId: run.id, events: [event] });
+  assert.equal(state.stop?.pending, true);
+  assert.equal(state.phase, "streaming");
+  state = threadSessionReducer(state, { type: "stop.disconnected", runId: run.id });
+  assert.equal(state.stop?.pending, false);
+  assert.equal(state.turns[0].status, "cancel_requested");
+  assert.equal(state.activeRunId, run.id);
+  assert.match(state.stop?.error ?? "", /Connection lost/);
+  state = threadSessionReducer(state, { type: "events.appended", runId: run.id, events: [{ ...event, id: "cancel2", sequence: 10, type: "run.cancelled" }] });
+  assert.equal(state.phase, "idle");
+  assert.equal(state.activeRunId, null);
+  assert.equal(state.turns[0].assistantText, "Persisted response");
+  assert.equal(state.turns[0].status, "cancelled");
+  assert.equal(threadSessionReducer(state, { type: "run.settled", runId: run.id, status: "running" }), state);
+  const restored = threadSessionReducer(initialThreadSessionState, { type: "hydrate.completed", detail: { ...detail, runs: [{ ...run, status: "cancelled" }] }, latestRunId: run.id, latestRunStatus: "cancelled" });
+  assert.equal(restored.turns[0].status, "cancelled");
+  assert.equal(restored.turns[0].assistantText, "Persisted response");
+});
+
+test("stop responses for a previous thread cannot change the current stop state", () => {
+  assert.equal(threadSessionReducer(initialThreadSessionState, { type: "stop.failed", runId: "old" }), initialThreadSessionState);
+  assert.equal(threadSessionReducer(initialThreadSessionState, { type: "stop.requested", runId: "old" }), initialThreadSessionState);
+});
+
+test("paged-out cancelled runs keep their receipt even with an empty assistant message", () => {
+  const fallbackDetail: ThreadDetail = { ...detail, runs: [], messages: detail.messages.map((message) => message.role === "assistant"
+    ? { ...message, status: "cancelled", parts: [{ type: "text", text: "" }] } : message) };
+  const [turn] = turnsFromThreadDetail(fallbackDetail);
+  assert.equal(turn.status, "cancelled");
+  assert.equal(turn.assistantText, "");
+  assert.equal(turn.events.length, 0);
+  assert.equal(turn.input, "Persisted input");
+});
 
 test("materializes ordered conversation turns and attachment references", () => {
   const turns = turnsFromThreadDetail(detail);

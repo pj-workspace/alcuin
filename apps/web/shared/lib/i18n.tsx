@@ -7,6 +7,16 @@ import { formatTranslation, type TranslationParams } from "@/shared/lib/i18n-for
 export type Locale = "en" | "zh";
 
 const zh = {
+  "Stop generation": "停止生成",
+  "Stopping…": "正在停止…",
+  "Retry stop": "重试停止",
+  "Connection lost while stopping. Retry to check the result.": "停止中的连接已中断，请重试以核对结果。",
+  "Stop is not confirmed. Try again.": "尚未确认停止，请重试。",
+  "Generation stopped": "已停止生成",
+  "{prefix} · stopped waiting for a result": "{prefix} · 已停止等待结果",
+  "Generation stopped. Existing output was kept.": "已停止，保留已生成内容。",
+  "Stopping after the current action returns…": "正在停止，等待已开始的操作返回结果…",
+  "Actions already started may have completed. Check their results before retrying.": "已开始的操作可能已完成，请核查结果后再重试。",
   "Conversation settings": "对话设置",
   "Close conversation settings": "关闭对话设置",
   "A question for you": "需要你补充一点信息",
@@ -694,6 +704,9 @@ type MessageParams = TranslationParams;
 
 const zhStatus: Record<string, string> = {
   waiting_for_input: "等待你的回答",
+  waiting_for_approval: "等待你的确认",
+  cancel_requested: "正在停止",
+  cancelled: "已停止",
   completed: "已完成",
   healthy: "健康",
   enabled: "已启用",

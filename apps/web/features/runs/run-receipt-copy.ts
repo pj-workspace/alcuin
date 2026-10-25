@@ -1,0 +1,38 @@
+const zh: Record<string, string> = {
+  "Your work, with a record": "每一步，都有记录",
+  "See what happened, check the evidence, and pick up the conversation.": "回看执行过程，核对依据，回到原对话继续。",
+  "Refresh records": "刷新记录", "Refreshing…": "正在刷新…",
+  "Could not refresh records. Your previous list is still here.": "暂时无法刷新，已保留上次的记录列表。",
+  "Recent records": "最近记录", "Search recent work": "搜索最近的执行", "Filter records": "筛选记录",
+  "Latest 30 runs · search and filters apply to this list only.": "最近 30 次执行 · 搜索与筛选仅针对这些记录。",
+  all: "全部状态", active: "进行中", needs_attention: "需要你处理", completed: "已完成", failed: "未完成", cancelled: "已停止",
+  queued: "排队中", running: "执行中", waiting_for_input: "等待你的回答", waiting_for_approval: "等待你的确认", cancel_requested: "正在停止",
+  "Untitled work": "未命名执行", Agent: "智能体", "No matching records": "没有匹配的记录", "Your work will appear here": "执行过的事情，会留在这里",
+  "Try another search or clear the filters.": "换个关键词，或清除筛选条件试试。",
+  "Start a conversation. Its results and evidence will stay together here.": "开始一段对话，执行结果和依据会一起保存在这里。",
+  "Clear filters": "清除筛选", "Start a conversation": "开始对话", "Work details": "执行详情", "Back to records": "返回记录列表",
+  "Choose a record": "选择一条记录", "Results, decisions and sources will appear here.": "这里会显示结果、你的决定和信息来源。",
+  "Open conversation": "打开原对话", "Download receipt": "下载执行摘要", "Could not download the receipt. Try again.": "暂时无法下载摘要，请重试。",
+  "Could not load this record.": "暂时无法加载这条记录。", "Try again": "重试", "Loading this record…": "正在读取这条记录…",
+  "Total duration": "总耗时", "Tool calls": "工具调用", Sources: "来源", s: "秒",
+  "This work is still open. Refresh for the latest status, or continue in its conversation.": "这次执行尚未结束。刷新查看最新状态，或回到原对话处理。",
+  "Stopped output is incomplete. Check any actions already started before retrying.": "已停止的输出并不完整。再次执行前，请核查已经开始的操作。",
+  "This work did not finish. Any output below is partial; check action results before trying again.": "这次执行未完成。以下为已保存的部分内容，再试之前请核查操作结果。",
+  Result: "结果", "Output so far": "已保存的内容", "No answer text was saved for this run.": "这次执行没有保存回答正文。",
+  Deliverables: "产出文件", "Open the conversation to view or edit deliverables": "回到原对话查看或编辑产出文件",
+  "Action outcomes": "操作结果", "Permission to act and the result of an action are different records.": "允许执行，不代表操作已完成；这里分别记录授权与实际结果。",
+  "What happened": "执行过程", "No activity details were saved.": "没有保存详细的执行记录。",
+  "The download includes status, action outcomes and source references, not private reasoning or raw tool inputs.": "下载的摘要包含状态、操作结果和来源引用，不包含内部思考或原始工具参数。",
+  recorded: "已记录", pending: "当时等待处理", approved: "已允许", denied: "已拒绝", succeeded: "已成功", unknown: "结果未确认", permission: "授权",
+  "Work started": "开始执行", "Work completed": "执行完成", "Work failed": "执行未完成", "Work stopped": "停止执行", "Stop requested": "收到停止请求",
+  "Tool requested": "发起工具调用", "Tool outcome recorded": "记录工具结果", "Permission requested": "请求你的确认", "Permission granted": "你允许了操作", "Permission denied": "你拒绝了操作",
+  "Your input requested": "请你补充信息", "Your input received": "收到你的回答", "Your input skipped": "你跳过了这个问题", "Deliverable saved": "保存产出文件", "Source recorded": "记录信息来源",
+  "Work receipt": "执行摘要", Title: "标题", Status: "状态", Started: "开始时间", Finished: "结束时间", Duration: "总耗时", Unknown: "未知",
+  "Tool outcomes": "工具结果", Tool: "工具", "No tool outcomes recorded.": "没有记录工具结果。", Source: "来源", "Open source": "打开来源", "No sources recorded.": "没有记录来源。",
+  "Run ID": "执行编号", "Thread ID": "对话编号",
+  "Citation ID": "引用编号", "Document ID": "文档编号", Page: "页码", "Chunk index": "片段索引（从 0 起）",
+};
+const en: Record<string, string> = { all: "All statuses", active: "In progress", needs_attention: "Needs you", completed: "Completed", failed: "Did not finish", cancelled: "Stopped", unknown: "Outcome unconfirmed", succeeded: "Succeeded", pending: "Was awaiting action", recorded: "Recorded", approved: "Allowed", denied: "Declined", queued: "Queued", running: "In progress", waiting_for_input: "Waiting for your answer", waiting_for_approval: "Waiting for your approval", cancel_requested: "Stopping", "Chunk index": "Chunk index (zero-based)" };
+export function receiptCopy(locale: "en" | "zh") {
+  return (key: string) => locale === "zh" ? zh[key] ?? key : en[key] ?? key;
+}

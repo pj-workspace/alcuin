@@ -1,4 +1,5 @@
 import type {
+  ArtifactReferenceMessagePart,
   AttachmentKind,
   AttachmentResource,
   ExecutionEvent,
@@ -27,6 +28,7 @@ export type ConversationTurn = {
   runId: string | null;
   input: string;
   attachments: ConversationAttachment[];
+  artifactReferences?: ArtifactReferenceMessagePart[];
   assistantText: string;
   events: ExecutionEvent[];
   status: RunStatus | "submitting";
@@ -42,6 +44,7 @@ export type ThreadSessionState = {
   phase: ThreadSessionPhase;
   activeRunId: string | null;
   error: string | null;
+  stop: { runId: string; pending: boolean; error: string | null } | null;
 };
 
 export const initialThreadSessionState: ThreadSessionState = {
@@ -50,6 +53,7 @@ export const initialThreadSessionState: ThreadSessionState = {
   phase: "idle",
   activeRunId: null,
   error: null,
+  stop: null,
 };
 
 export type ThreadSessionAction =
@@ -60,9 +64,13 @@ export type ThreadSessionAction =
   | { type: "turn.submitted"; turn: ConversationTurn }
   | { type: "thread.created"; thread: Thread }
   | { type: "run.created"; optimisticId: string; run: Run }
+  | { type: "references.hydrated"; threadId: string; runId: string; message: ThreadMessage }
   | { type: "events.appended"; runId: string; events: ExecutionEvent[] }
   | { type: "run.settled"; runId: string; status: RunStatus }
   | { type: "run.connection_failed"; runId: string; message: string }
+  | { type: "stop.requested"; runId: string }
+  | { type: "stop.failed"; runId: string }
+  | { type: "stop.disconnected"; runId: string }
   | { type: "turn.failed"; optimisticId: string; message: string };
 
 export function threadSessionReducer(
@@ -88,8 +96,9 @@ export function threadSessionReducer(
     case "hydrate.completed":
       return {
         thread: action.detail.thread,
+        stop: action.latestRunStatus === "cancel_requested" && action.latestRunId ? { runId: action.latestRunId, pending: true, error: null } : null,
         turns: turnsFromThreadDetail(action.detail, action.latestRunEvents),
-        phase: action.latestRunStatus === "queued" || action.latestRunStatus === "running"
+        phase: action.latestRunStatus === "queued" || action.latestRunStatus === "running" || action.latestRunStatus === "cancel_requested"
           ? "streaming"
           : action.latestRunStatus === "waiting_for_approval"
             ? "waiting_for_approval"
@@ -98,6 +107,7 @@ export function threadSessionReducer(
             : "idle",
         activeRunId: action.latestRunStatus === "queued"
           || action.latestRunStatus === "running"
+          || action.latestRunStatus === "cancel_requested"
           || action.latestRunStatus === "waiting_for_approval"
           || action.latestRunStatus === "waiting_for_input"
           ? action.latestRunId ?? null
@@ -110,12 +120,20 @@ export function threadSessionReducer(
       return {
         ...state,
         turns: [...state.turns, action.turn],
+        stop: null,
         phase: "submitting",
         activeRunId: null,
         error: null,
       };
     case "thread.created":
       return { ...state, thread: action.thread };
+    case "references.hydrated": {
+      if (state.thread?.id !== action.threadId || action.message.thread_id !== action.threadId
+        || action.message.run_id !== action.runId || action.message.role !== "user") return state;
+      const references = artifactReferencesFromMessage(action.message);
+      return { ...state, turns: state.turns.map((turn) => turn.runId === action.runId
+        ? { ...turn, artifactReferences: references } : turn) };
+    }
     case "run.created":
       return {
         ...state,
@@ -136,12 +154,20 @@ export function threadSessionReducer(
         changed ||= next !== turn;
         return next;
       });
-      return changed ? { ...state, turns } : state;
+      const latest = action.events.filter((event) => event.run_id === action.runId && ["run.cancel_requested", "run.cancelled", "run.completed", "run.failed"].includes(event.type)).sort((left, right) => left.sequence - right.sequence).at(-1);
+      const next = changed ? { ...state, turns } : state;
+      if (latest) return threadSessionReducer(next, { type: "run.settled", runId: action.runId, status: latest.type.slice(4) as RunStatus });
+      return next;
     }
     case "run.settled": {
+      const currentStatus = state.turns.find((turn) => turn.runId === action.runId)?.status;
+      if (currentStatus === "cancelled" && action.status !== "cancelled") return state;
+      if (currentStatus && ["completed", "failed"].includes(currentStatus) && !["completed", "failed"].includes(action.status)) return state;
+      if (currentStatus === "cancel_requested" && ["queued", "running", "waiting_for_approval", "waiting_for_input"].includes(action.status)) return state;
       const isActiveRun = state.activeRunId === action.runId;
       return {
         ...state,
+        stop: isActiveRun ? action.status === "cancel_requested" ? { runId: action.runId, pending: true, error: null } : ["completed", "failed", "cancelled"].includes(action.status) ? null : state.stop : state.stop,
         turns: state.turns.map((turn) => turn.runId === action.runId ? {
           ...turn,
           status: action.status,
@@ -154,13 +180,14 @@ export function threadSessionReducer(
               ? "waiting_for_approval"
               : action.status === "waiting_for_input"
                 ? "waiting_for_input"
-              : action.status === "queued" || action.status === "running"
+              : action.status === "queued" || action.status === "running" || action.status === "cancel_requested"
                 ? "streaming"
                 : "idle"
           : state.phase,
         activeRunId: isActiveRun
           ? action.status === "queued"
             || action.status === "running"
+            || action.status === "cancel_requested"
             || action.status === "waiting_for_approval"
             || action.status === "waiting_for_input"
             ? action.runId
@@ -176,6 +203,13 @@ export function threadSessionReducer(
         phase: "streaming",
         error: action.message,
       };
+    case "stop.requested":
+      return state.activeRunId === action.runId ? { ...state, stop: { runId: action.runId, pending: true, error: null } } : state;
+    case "stop.failed":
+      if (state.turns.some((turn) => turn.runId === action.runId && ["cancel_requested", "cancelled"].includes(turn.status))) return state;
+      return state.activeRunId === action.runId ? { ...state, stop: { runId: action.runId, pending: false, error: "Stop is not confirmed. Try again." } } : state;
+    case "stop.disconnected":
+      return state.activeRunId === action.runId ? { ...state, stop: { runId: action.runId, pending: false, error: "Connection lost while stopping. Retry to check the result." } } : state;
     case "turn.failed":
       return {
         ...state,
@@ -187,15 +221,27 @@ export function threadSessionReducer(
   }
 }
 
+export function isCurrentSubmissionScope(
+  captured: { agentId: string | undefined; threadId: string | null },
+  current: { agentId: string | undefined; threadId: string | null },
+  mounted: boolean,
+  targetThreadId: string | null,
+): boolean {
+  return mounted && captured === current
+    && (!current.threadId || !targetThreadId || current.threadId === targetThreadId);
+}
+
 export function optimisticTurn(
   id: string,
   input: string,
   attachments: AttachmentResource[],
+  references: ArtifactReferenceMessagePart[] = [],
 ): ConversationTurn {
   return {
     id,
     runId: null,
     input,
+    artifactReferences: references.map((reference) => ({ ...reference })),
     attachments: attachments.map((attachment) => ({
       id: attachment.id,
       kind: attachment.kind,
@@ -273,9 +319,10 @@ export function turnsFromThreadDetail(
       runId,
       input: textFromMessage(userMessage),
       attachments: attachmentsFromMessage(userMessage),
+      artifactReferences: artifactReferencesFromMessage(userMessage),
       assistantText: textFromMessage(assistantMessage),
       events: [],
-      status: assistantMessage?.status === "failed" ? "failed" : "completed",
+      status: assistantMessage?.status === "cancelled" ? "cancelled" : assistantMessage?.status === "failed" ? "failed" : "completed",
       createdAt: userMessage?.created_at ?? assistantMessage?.created_at ?? detail.thread.created_at,
       optimistic: false,
     });
@@ -294,6 +341,7 @@ function turnFromMessages(
     runId: run.id,
     input: textFromMessage(userMessage) || run.input,
     attachments: attachmentsFromMessage(userMessage),
+    artifactReferences: artifactReferencesFromMessage(userMessage),
     assistantText: assistantTextFromEvents(events) || textFromMessage(assistantMessage),
     events,
     status: run.status,
@@ -321,6 +369,12 @@ function attachmentsFromMessage(message: ThreadMessageShape | undefined): Conver
       mediaType: part.media_type,
       sizeBytes: part.size_bytes,
     }));
+}
+
+function artifactReferencesFromMessage(message: ThreadMessageShape | undefined): ArtifactReferenceMessagePart[] {
+  return (message?.parts ?? [])
+    .filter((part): part is ArtifactReferenceMessagePart => part.type === "artifact_reference")
+    .map((part) => ({ ...part }));
 }
 
 function appendEvents(turn: ConversationTurn, nextEvents: ExecutionEvent[]): ConversationTurn {
